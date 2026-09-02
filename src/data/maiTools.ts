@@ -1,0 +1,113 @@
+export interface MAITool {
+  id: string;
+  name: string;
+  slashCommand: string;
+  mentionTag: string;
+  description: string;
+  iconName: string;
+  category: 'creation' | 'search' | 'analysis' | 'account';
+  samplePrompt: string;
+}
+
+export const AVAILABLE_MAI_TOOLS: MAITool[] = [
+  {
+    id: 'generate_image',
+    name: 'Génération d’Image',
+    slashCommand: '/image',
+    mentionTag: '@image',
+    description: 'Génère une image IA artistique en haute résolution',
+    iconName: 'Image',
+    category: 'creation',
+    samplePrompt: '/image une ville futuriste sous la pluie au coucher de soleil',
+  },
+  {
+    id: 'search_web',
+    name: 'Recherche Web en Direct',
+    slashCommand: '/search',
+    mentionTag: '@search',
+    description: 'Recherche sur le web des informations vérifiées et actualités',
+    iconName: 'Globe',
+    category: 'search',
+    samplePrompt: '/search dernières découvertes en intelligence artificielle 2026',
+  },
+  {
+    id: 'summarize',
+    name: 'Résumer le Flux / Texte',
+    slashCommand: '/summarize',
+    mentionTag: '@summarize',
+    description: 'Synthétise les publications récentes ou un long fil de discussion',
+    iconName: 'FileText',
+    category: 'analysis',
+    samplePrompt: '/summarize les tendances du jour sur Vibe',
+  },
+  {
+    id: 'fact_check',
+    name: 'Vérification des Faits',
+    slashCommand: '/fact_check',
+    mentionTag: '@fact_check',
+    description: 'Analyse et vérifie la véracité d’une information avec sources',
+    iconName: 'ShieldCheck',
+    category: 'analysis',
+    samplePrompt: '/fact_check La mission Artemis III a-t-elle aluni ?',
+  },
+  {
+    id: 'rewrite_post',
+    name: 'Reformulation de Style',
+    slashCommand: '/rewrite',
+    mentionTag: '@rewrite',
+    description: 'Reformule votre texte (Viral, Professionnel, Humoristique, Concis)',
+    iconName: 'Sparkles',
+    category: 'creation',
+    samplePrompt: '/rewrite viral Nous venons de lancer la nouvelle version de Vibe !',
+  },
+  {
+    id: 'translate',
+    name: 'Traduction Instantanée',
+    slashCommand: '/translate',
+    mentionTag: '@translate',
+    description: 'Traduit un texte dans la langue souhaitée (Anglais, Espagnol, etc.)',
+    iconName: 'Languages',
+    category: 'creation',
+    samplePrompt: '/translate anglais Bienvenue sur la plateforme Vibe mAI',
+  },
+  {
+    id: 'create_post',
+    name: 'Publier un Post',
+    slashCommand: '/publish',
+    mentionTag: '@publish',
+    description: 'Publie directement un message sur votre profil Vibe',
+    iconName: 'Send',
+    category: 'creation',
+    samplePrompt: '/publish Ravi de rejoindre la communauté Vibe ! 🚀',
+  },
+  {
+    id: 'analyze_trends',
+    name: 'Tendances en Temps Réel',
+    slashCommand: '/trends',
+    mentionTag: '@trends',
+    description: 'Détecte les sujets chauds et discussions émergentes',
+    iconName: 'TrendingUp',
+    category: 'analysis',
+    samplePrompt: '/trends',
+  },
+  {
+    id: 'get_account_stats',
+    name: 'Statistiques du Compte',
+    slashCommand: '/stats',
+    mentionTag: '@stats',
+    description: 'Affiche votre réputation, nombre de posts et quotas IA',
+    iconName: 'BarChart3',
+    category: 'account',
+    samplePrompt: '/stats',
+  },
+  {
+    id: 'check_quotas',
+    name: 'Vérifier mes Quotas',
+    slashCommand: '/quotas',
+    mentionTag: '@quotas',
+    description: 'Consulte l’état de vos tokens mAI et images restantes',
+    iconName: 'Zap',
+    category: 'account',
+    samplePrompt: '/quotas',
+  },
+];

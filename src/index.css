@@ -1,0 +1,200 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+@layer base {
+  /* Default / LIGHT THEME */
+  :root,
+  html.light,
+  [data-theme="light"] {
+    color-scheme: light;
+
+    /* Base Layout Semantic Tokens */
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8fafc;
+    --bg-card: #ffffff;
+    --border-subtle: #e2e8f0;
+    --text-primary: #09090b;
+    --text-secondary: #334155;
+    --text-muted: #64748b;
+
+    /* Tailwind Palette Mapping for LIGHT THEME */
+    --color-black: #ffffff;
+    --color-white: #09090b;
+    --color-zinc-50: #09090b;
+    --color-zinc-100: #0f172a;
+    --color-zinc-200: #1e293b;
+    --color-zinc-300: #334155;
+    --color-zinc-400: #475569;
+    --color-zinc-500: #64748b;
+    --color-zinc-600: #94a3b8;
+    --color-zinc-700: #cbd5e1;
+    --color-zinc-800: #e2e8f0;
+    --color-zinc-900: #f1f5f9;
+    --color-zinc-950: #f8fafc;
+  }
+
+  /* DARK THEME */
+  html.dark,
+  [data-theme="dark"] {
+    color-scheme: dark;
+
+    /* Base Layout Semantic Tokens */
+    --bg-primary: #000000;
+    --bg-secondary: #09090b;
+    --bg-card: #121212;
+    --border-subtle: #27272a;
+    --text-primary: #ffffff;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+
+    /* Tailwind Palette Mapping for DARK THEME */
+    --color-black: #000000;
+    --color-white: #ffffff;
+    --color-zinc-50: #fafafa;
+    --color-zinc-100: #f4f4f5;
+    --color-zinc-200: #e4e4e7;
+    --color-zinc-300: #d4d4d8;
+    --color-zinc-400: #a1a1aa;
+    --color-zinc-500: #71717a;
+    --color-zinc-600: #71717a;
+    --color-zinc-700: #3f3f46;
+    --color-zinc-800: #27272a;
+    --color-zinc-900: #18181b;
+    --color-zinc-950: #09090b;
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * HIGH-CONTRAST ACTION BUTTONS (White in Dark, Dark in Light)
+ * ───────────────────────────────────────────────────────────── */
+html.light button.bg-white,
+[data-theme="light"] button.bg-white {
+  background-color: #09090b !important;
+  color: #ffffff !important;
+}
+
+html.light button.bg-white:hover,
+[data-theme="light"] button.bg-white:hover {
+  background-color: #1e293b !important;
+}
+
+html.light button.bg-white:disabled,
+[data-theme="light"] button.bg-white:disabled {
+  opacity: 0.45 !important;
+  background-color: #09090b !important;
+  color: #ffffff !important;
+}
+
+html.light button.bg-white svg,
+[data-theme="light"] button.bg-white svg {
+  color: #ffffff !important;
+  stroke: #ffffff !important;
+}
+
+/* Text Selection Contrast */
+html.light ::selection,
+[data-theme="light"] ::selection {
+  background-color: #0f172a;
+  color: #ffffff;
+}
+
+html.dark ::selection,
+[data-theme="dark"] ::selection {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+/* Form Inputs & Textareas in Light Mode */
+html.light input:not([type="checkbox"]):not([type="radio"]),
+[data-theme="light"] input:not([type="checkbox"]):not([type="radio"]),
+html.light textarea,
+[data-theme="light"] textarea,
+html.light select,
+[data-theme="light"] select {
+  color: #09090b !important;
+}
+
+html.light input::placeholder,
+[data-theme="light"] input::placeholder,
+html.light textarea::placeholder,
+[data-theme="light"] textarea::placeholder {
+  color: #64748b !important;
+}
+
+/* Always keep video backdrops dark */
+video {
+  background-color: #000000;
+}
+
+/* Minimalist Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+html.dark ::-webkit-scrollbar-track,
+[data-theme="dark"] ::-webkit-scrollbar-track {
+  background: #000000;
+}
+
+html.dark ::-webkit-scrollbar-thumb,
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+html.light ::-webkit-scrollbar-track,
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+html.light ::-webkit-scrollbar-thumb,
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+html.light ::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Voice Recording Pulsing Animation */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.7);
+  }
+  70% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 10px rgba(56, 189, 248, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+}
+
+.pulse-recording {
+  animation: pulse-ring 1.5s infinite;
+}

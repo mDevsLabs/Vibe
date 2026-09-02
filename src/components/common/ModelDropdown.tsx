@@ -1,0 +1,181 @@
+/**
+ * ============================================================================
+ * VIBE SOCIAL PLATFORM — MODEL DROPDOWN (src/components/common/ModelDropdown.tsx)
+ * Custom Sleek AI Model Selector with Search Bar, Name & Selection
+ * ============================================================================
+ */
+
+import React, { useState, useRef, useEffect } from 'react';
+import { Cpu, ChevronDown, Check, Sparkles, Search, X } from 'lucide-react';
+
+export interface AIModel {
+  id: string;
+  name: string;
+  description?: string;
+  provider?: string;
+  contextWindow?: number;
+  tierRequired?: string;
+}
+
+interface ModelDropdownProps {
+  models: AIModel[];
+  selectedModelId: string;
+  onSelectModel: (modelId: string) => void;
+  className?: string;
+}
+
+export const ModelDropdown: React.FC<ModelDropdownProps> = ({
+  models,
+  selectedModelId,
+  onSelectModel,
+  className = '',
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Close when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Reset search and focus input when opening
+  useEffect(() => {
+    if (isOpen) {
+      setSearchQuery('');
+      setTimeout(() => {
+        searchInputRef.current?.focus();
+      }, 50);
+    }
+  }, [isOpen]);
+
+  const selectedModel = models.find((m) => m.id === selectedModelId) || models[0] || {
+    id: selectedModelId,
+    name: 'mAI 1.5 Apex',
+  };
+
+  const filteredModels = models.filter((m) =>
+    m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    m.id.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  return (
+    <div ref={dropdownRef} className={`relative inline-block text-left ${className}`}>
+      {/* Trigger Button */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-full bg-zinc-900/90 border border-zinc-700/80 hover:border-zinc-500 text-white text-xs font-semibold shadow-md transition-all hover:bg-zinc-800 focus:outline-none"
+        title="Changer de modèle d'intelligence artificielle"
+      >
+        <div className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shrink-0">
+          <Cpu className="w-3 h-3 text-black" />
+        </div>
+
+        {/* Display Name Prominently */}
+        <span className="font-bold text-white tracking-tight truncate max-w-[140px] sm:max-w-[200px]">
+          {selectedModel.name}
+        </span>
+
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-zinc-400 transition-transform duration-200 shrink-0 ${
+            isOpen ? 'rotate-180 text-white' : ''
+          }`}
+        />
+      </button>
+
+      {/* Floating Menu Popover */}
+      {isOpen && (
+        <div className="absolute right-0 mt-2 w-72 sm:w-80 rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl z-50 overflow-hidden animate-fadeIn backdrop-blur-xl">
+          {/* Header */}
+          <div className="px-3.5 py-2.5 bg-black/60 border-b border-zinc-900 flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-300">
+              <Sparkles className="w-3.5 h-3.5 text-white" />
+              <span>Modèles IA</span>
+            </div>
+            <span className="text-[10px] text-zinc-500 font-mono">{filteredModels.length} modèle{filteredModels.length > 1 ? 's' : ''}</span>
+          </div>
+
+          {/* Search Bar */}
+          <div className="p-2 border-b border-zinc-900 bg-black/40">
+            <div className="relative flex items-center">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 text-zinc-500 pointer-events-none" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Rechercher un modèle..."
+                className="w-full pl-8 pr-7 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600 font-sans"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 text-zinc-500 hover:text-white p-0.5"
+                  title="Effacer la recherche"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Model Options List */}
+          <div className="max-h-72 overflow-y-auto divide-y divide-zinc-900 p-1">
+            {filteredModels.map((model) => {
+              const isSelected = model.id === selectedModelId;
+
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  onClick={() => {
+                    onSelectModel(model.id);
+                    setIsOpen(false);
+                  }}
+                  className={`w-full p-2.5 rounded-xl text-left transition-all flex items-center gap-2.5 group ${
+                    isSelected
+                      ? 'bg-zinc-900/90 text-white'
+                      : 'hover:bg-zinc-900/50 text-zinc-300'
+                  }`}
+                >
+                  <div className="shrink-0">
+                    <div
+                      className={`w-4 h-4 rounded-full flex items-center justify-center border ${
+                        isSelected
+                          ? 'border-white bg-white text-black'
+                          : 'border-zinc-700 bg-zinc-950 text-transparent group-hover:border-zinc-500'
+                      }`}
+                    >
+                      <Check className="w-2.5 h-2.5 stroke-[3]" />
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-w-0">
+                    <span className="font-bold text-xs text-white truncate block">
+                      {model.name}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+
+            {filteredModels.length === 0 && (
+              <div className="p-6 text-center text-xs text-zinc-500">
+                Aucun modèle ne correspond à « {searchQuery} »
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
