@@ -170,8 +170,18 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
   // 4. GET PROFILE
   const handleGetProfile = async (c: any) => {
     try {
-      const username = c.req.param("username").toLowerCase().trim();
+      const rawParam = c.req.param("username") || "";
+      const username = rawParam.toLowerCase().trim().replace(/^@/, "");
       const sql = getDb();
+
+      let currentUserId: number | null = null;
+      const token = extractToken(c.req.raw);
+      if (token) {
+        try {
+          const payload = await verifyToken(token);
+          currentUserId = Number(payload.sub || (payload as any).id);
+        } catch {}
+      }
 
       const userRows = await sql`
         SELECT u.id, u.username, u.email, u.tier, u.avatar_url,
@@ -189,20 +199,50 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       }
 
       const row = userRows[0];
-      const posts = await sql`
-        SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
-               (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified
-        FROM posts p
-        JOIN users u ON u.id = p.author_id
-        LEFT JOIN profiles pr ON pr.user_id = u.id
-        WHERE p.author_id = ${row.id}
-        ORDER BY p.published_at DESC
-        LIMIT 40
-      `;
+      let isFollowing = false;
+      if (currentUserId && currentUserId !== Number(row.id)) {
+        try {
+          const followRows = await sql`
+            SELECT 1 FROM follows WHERE follower_id = ${currentUserId} AND following_id = ${row.id} LIMIT 1
+          `;
+          isFollowing = followRows.length > 0;
+        } catch {}
+      }
 
-      for (const p of posts) {
-        const media = await sql`SELECT url, media_type, alt_text FROM media_assets WHERE post_id = ${p.id}::uuid`;
-        p.media_assets = media;
+      let posts: any[] = [];
+      try {
+        posts = await sql`
+          SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
+                 (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified
+          FROM posts p
+          JOIN users u ON u.id = p.author_id
+          LEFT JOIN profiles pr ON pr.user_id = u.id
+          WHERE p.author_id = ${row.id}
+          ORDER BY p.published_at DESC
+          LIMIT 40
+        `;
+
+        // Charger tous les médias en une seule requête (évite le N+1)
+        if (posts.length > 0) {
+          const postIds = posts.map((p) => p.id);
+          const allMedia = await sql`
+            SELECT post_id, url, media_type, alt_text
+            FROM media_assets
+            WHERE post_id = ANY(${postIds}::uuid[])
+          `;
+          const mediaByPost = new Map<string, any[]>();
+          for (const m of allMedia) {
+            const key = String(m.post_id);
+            if (!mediaByPost.has(key)) mediaByPost.set(key, []);
+            mediaByPost.get(key)!.push({ url: m.url, media_type: m.media_type, alt_text: m.alt_text });
+          }
+          for (const p of posts) {
+            p.media_assets = mediaByPost.get(String(p.id)) || [];
+          }
+        }
+      } catch (postErr: any) {
+        console.error("[Get Profile] Erreur chargement posts:", postErr);
+        posts = [];
       }
 
       return c.json({
@@ -219,6 +259,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           followingCount: row.following_count || 0,
           postsCount: row.posts_count || posts.length,
           is_verified: Boolean(row.is_verified),
+          isFollowing,
         },
         posts,
       });
@@ -238,18 +279,30 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       const userId = Number(payload.sub || (payload as any).id);
 
       const body = await c.req.json();
-      const { username, displayName, bio, interests, avatarUrl, bannerUrl, is_verified, isVerified } = body;
+      const { username, displayName, bio, interests, avatarUrl, bannerUrl } = body;
       const sql = getDb();
 
-      // Vérifier et mettre à jour le nom d'utilisateur
-      if (username) {
-        const cleanUser = username.toLowerCase().replace(/[^a-zA-Z0-9_]/g, "").trim();
-        if (cleanUser && cleanUser.length >= 2) {
-          const taken = await sql`SELECT id FROM users WHERE LOWER(username) = ${cleanUser} AND id != ${userId} LIMIT 1`;
-          if (taken.length > 0) {
-            return c.json({ error: "Ce nom d'utilisateur est déjà pris." }, 400);
+      // Vérifier et mettre à jour le nom d'utilisateur avec vérification stricte de non-duplication
+      if (username !== undefined && username !== null) {
+        const rawUser = String(username).trim();
+        if (rawUser) {
+          const cleanUser = rawUser.toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "").trim();
+          if (cleanUser.length < 2) {
+            return c.json(
+              { error: "Le nom d'utilisateur doit contenir au moins 2 caractères (lettres, chiffres, _)." },
+              400
+            );
           }
-          await sql`UPDATE users SET username = ${cleanUser} WHERE id = ${userId}`;
+          const taken = await sql`
+            SELECT id FROM users
+            WHERE LOWER(username) = ${cleanUser}
+              AND id::text != ${String(userId)}
+            LIMIT 1
+          `;
+          if (taken.length > 0) {
+            return c.json({ error: "Ce nom d'utilisateur est déjà pris par un autre compte." }, 400);
+          }
+          await sql`UPDATE users SET username = ${cleanUser} WHERE id::text = ${String(userId)}`;
         }
       }
 
@@ -257,26 +310,62 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
         await sql`UPDATE users SET avatar_url = ${avatarUrl} WHERE id = ${userId}`;
       }
 
-      const verifiedVal = is_verified !== undefined ? Boolean(is_verified) : (isVerified !== undefined ? Boolean(isVerified) : null);
-      if (verifiedVal !== null) {
-        await sql`UPDATE users SET is_verified = ${verifiedVal} WHERE id = ${userId}`;
-      }
+      // Écriture réelle des champs fournis (les champs vides sont bien enregistrés
+      // comme vides au lieu d'être ignorés par l'ancien COALESCE).
+      const nextDisplayName = displayName !== undefined ? (displayName || null) : undefined;
+      const nextBio = bio !== undefined ? (bio || null) : undefined;
+      const nextInterests = interests !== undefined ? (Array.isArray(interests) ? interests : []) : undefined;
+      const nextAvatarUrl = avatarUrl !== undefined ? (avatarUrl || null) : undefined;
+      const nextBannerUrl = bannerUrl !== undefined ? (bannerUrl || null) : undefined;
 
       await sql`
-        INSERT INTO profiles (user_id, display_name, bio, interests, avatar_url, banner_url, is_verified)
-        VALUES (${userId}, ${displayName || null}, ${bio || null}, ${(interests || []) as string[]}, ${avatarUrl || null}, ${bannerUrl || null}, ${verifiedVal !== null ? verifiedVal : false})
+        INSERT INTO profiles (user_id, display_name, bio, interests, avatar_url, banner_url)
+        VALUES (
+          ${userId},
+          ${nextDisplayName !== undefined ? nextDisplayName : null},
+          ${nextBio !== undefined ? nextBio : null},
+          ${nextInterests !== undefined ? (nextInterests as string[]) : []},
+          ${nextAvatarUrl !== undefined ? nextAvatarUrl : null},
+          ${nextBannerUrl !== undefined ? nextBannerUrl : null}
+        )
         ON CONFLICT (user_id)
         DO UPDATE SET
-          display_name = COALESCE(EXCLUDED.display_name, profiles.display_name),
-          bio = COALESCE(EXCLUDED.bio, profiles.bio),
-          interests = COALESCE(EXCLUDED.interests, profiles.interests),
-          avatar_url = COALESCE(EXCLUDED.avatar_url, profiles.avatar_url),
-          banner_url = COALESCE(EXCLUDED.banner_url, profiles.banner_url),
-          is_verified = COALESCE(EXCLUDED.is_verified, profiles.is_verified),
+          display_name = ${nextDisplayName !== undefined ? nextDisplayName : sql`profiles.display_name`},
+          bio = ${nextBio !== undefined ? nextBio : sql`profiles.bio`},
+          interests = ${nextInterests !== undefined ? (nextInterests as string[]) : sql`profiles.interests`},
+          avatar_url = ${nextAvatarUrl !== undefined ? nextAvatarUrl : sql`profiles.avatar_url`},
+          banner_url = ${nextBannerUrl !== undefined ? nextBannerUrl : sql`profiles.banner_url`},
           updated_at = NOW()
       `;
 
-      return c.json({ success: true, message: "Profil mis à jour." });
+      // Renvoyer le profil à jour (avec le username potentiellement modifié)
+      const updated = await sql`
+        SELECT u.username, u.avatar_url,
+               (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
+               pr.display_name, pr.bio, pr.banner_url, pr.interests, pr.followers_count, pr.following_count, pr.posts_count
+        FROM users u
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE u.id::text = ${String(userId)}
+        LIMIT 1
+      `;
+      const r = updated[0] || {};
+
+      return c.json({
+        success: true,
+        message: "Profil mis à jour.",
+        profile: {
+          username: r.username,
+          displayName: r.display_name || r.username,
+          bio: r.bio || "",
+          avatarUrl: r.avatar_url,
+          bannerUrl: r.banner_url,
+          interests: r.interests || [],
+          followersCount: r.followers_count || 0,
+          followingCount: r.following_count || 0,
+          postsCount: r.posts_count || 0,
+          is_verified: Boolean(r.is_verified),
+        },
+      });
     } catch (err: any) {
       console.error("[Update Profile Error]:", err);
       return c.json({ error: "Erreur mise à jour profil." }, 500);
@@ -342,7 +431,10 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
     }
   };
 
-  registerMulti("post", ["/api/vibe/profile/avatar", "/vibe/profile/avatar", "/v1/profile/avatar", "/v1/upload-avatar", "/upload-avatar"], handleUpdateAvatar);
+  // NB : /upload-avatar et /v1/upload-avatar sont gérés par registerStorageRoutes (storage.ts),
+  // seule source de vérité pour l'upload d'avatar. Ici on ne garde que /profile/avatar
+  // pour la mise à jour via URL JSON (multipart accepté aussi pour compat).
+  registerMulti("post", ["/api/vibe/profile/avatar", "/vibe/profile/avatar", "/v1/profile/avatar"], handleUpdateAvatar);
 
   // 7. FOLLOW / UNFOLLOW
   const handleFollow = async (c: any) => {
@@ -351,7 +443,8 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const currentUserId = Number(payload.sub || (payload as any).id);
-      const targetUsername = c.req.param("username").toLowerCase().trim();
+      const rawParam = c.req.param("username") || "";
+      const targetUsername = rawParam.toLowerCase().trim().replace(/^@/, "");
 
       const sql = getDb();
       const targetUser = await sql`SELECT id FROM users WHERE LOWER(username) = ${targetUsername} LIMIT 1`;

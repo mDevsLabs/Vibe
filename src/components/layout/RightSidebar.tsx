@@ -8,6 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import { Search, TrendingUp, CheckCircle, ArrowUpRight, Sparkles } from 'lucide-react';
 import { ApiService } from '../../services/api';
+import { ProfileAvatar } from '../common/ProfileAvatar';
 
 interface RightSidebarProps {
   onSearch?: (query: string) => void;
@@ -117,10 +118,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                 onClick={() => onOpenProfile && onOpenProfile(acc.username)}
               >
                 <div className="flex items-center gap-3 overflow-hidden">
-                  <img
-                    src={acc.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+                  <ProfileAvatar
+                    src={acc.avatar_url}
                     alt={acc.username}
-                    className="w-10 h-10 rounded-full object-cover border border-zinc-800 shrink-0"
+                    fallbackName={acc.username}
+                    size="md"
+                    className="border border-zinc-800 shrink-0"
                   />
                   <div className="truncate">
                     <div className="flex items-center gap-1">

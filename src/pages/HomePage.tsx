@@ -1,53 +1,137 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — HOME PAGE (src/pages/HomePage.tsx)
- * Timeline: Pour Vous, Abonnements & Tendances Populaires avec Hashtags Réels
+ * Timeline: Pour Vous, Abonnements & Tendances avec scroll infini,
+ * pull-to-refresh mobile et bouton « nouvelles vibes »
  * ============================================================================
  */
 
-import React, { useState, useEffect, useRef } from 'react';
-import { RefreshCw, AlertCircle, PenSquare, Sparkles, TrendingUp, Hash, X } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { AlertCircle, PenSquare, TrendingUp, X, ArrowUp } from 'lucide-react';
 import { PostComposer } from '../components/feed/PostComposer';
 import { PostCard } from '../components/feed/PostCard';
 import { ExplainModal } from '../components/feed/ExplainModal';
+import { IntroBanner } from '../components/common/IntroBanner';
+import { PostCardSkeleton } from '../components/common/PageSkeleton';
+import { VibeLogo } from '../components/layout/VibeLogo';
 import type { Post } from '../types/vibe';
 import { ApiService } from '../services/api';
+import { useInfiniteFeed } from '../hooks/useInfiniteFeed';
 
 interface HomePageProps {
   onOpenThread: (post: Post) => void;
   onOpenProfile: (username: string) => void;
 }
 
-export const HomePage: React.FC<HomePageProps> = ({
-  onOpenThread,
-  onOpenProfile,
-}) => {
+/** Pull-to-refresh mobile : déclenché au-delà de 70px de sur-scroll. */
+function usePullToRefresh(onRefresh: () => void, enabled: boolean) {
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const startY = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const onTouchStart = (e: TouchEvent) => {
+      if (window.scrollY <= 0) startY.current = e.touches[0].clientY;
+      else startY.current = null;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (startY.current == null || isRefreshing) return;
+      const dist = e.touches[0].clientY - startY.current;
+      if (dist > 0 && window.scrollY <= 0) setPullDistance(Math.min(90, dist * 0.5));
+    };
+    const onTouchEnd = async () => {
+      if (pullDistance >= 60 && !isRefreshing) {
+        setIsRefreshing(true);
+        try {
+          await onRefresh();
+        } finally {
+          setIsRefreshing(false);
+          setPullDistance(0);
+        }
+      } else {
+        setPullDistance(0);
+      }
+      startY.current = null;
+    };
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd);
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [enabled, onRefresh, pullDistance, isRefreshing]);
+
+  return { pullDistance, isRefreshing };
+}
+
+export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile }) => {
   const [feedType, setFeedType] = useState<'for_you' | 'stream' | 'trending'>('for_you');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [trends, setTrends] = useState<Array<{ tag: string; category?: string; posts: string }>>([]);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [fetchError, setFetchError] = useState<string | null>(null);
   const [selectedPostForExplain, setSelectedPostForExplain] = useState<Post | null>(null);
-  const composerRef = useRef<HTMLDivElement>(null);
 
-  const fetchFeed = async () => {
-    setIsLoading(true);
-    setFetchError(null);
-    try {
-      const data = await ApiService.getFeed(feedType, selectedTag || undefined);
-      setPosts(data.posts || []);
-    } catch (err: any) {
-      console.warn('[HomePage] Error loading feed:', err);
-      setFetchError(err.message || 'Impossible de charger le fil.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const fetchPage = useCallback(
+    async (cursor?: string) => {
+      const data = await ApiService.getFeed(feedType, selectedTag || undefined, cursor);
+      if (!cursor) ApiService.prefetchProfiles(data.posts || []);
+      return { items: (data.posts || []) as Post[], nextCursor: data.nextCursor };
+    },
+    [feedType, selectedTag]
+  );
+
+  const {
+    items: posts,
+    isLoading,
+    isLoadingMore,
+    error: fetchError,
+    sentinelRef,
+    refresh,
+    prependItems,
+    removeItem,
+  } = useInfiniteFeed<Post>({ fetchPage, resetKey: `${feedType}:${selectedTag}` });
+
+  const { pullDistance, isRefreshing } = usePullToRefresh(refresh, feedType === 'for_you');
+
+  // Bouton « N nouvelles vibes » : détection discrète de nouveaux posts
+  const [newCount, setNewCount] = useState(0);
+  const lastTopIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (posts.length > 0 && !lastTopIdRef.current) lastTopIdRef.current = String(posts[0].id);
+  }, [posts]);
 
   useEffect(() => {
-    fetchFeed();
-  }, [feedType, selectedTag]);
+    const interval = setInterval(async () => {
+      if (document.hidden || isLoading) return;
+      try {
+        const data = await ApiService.getFeed(feedType, selectedTag || undefined);
+        const fresh = data.posts || [];
+        const topId = lastTopIdRef.current;
+        if (!topId) return;
+        const count = fresh.findIndex((p) => String(p.id) === topId);
+        setNewCount(count === -1 ? Math.min(20, fresh.length) : count);
+      } catch {}
+    }, 45000);
+    return () => clearInterval(interval);
+  }, [feedType, selectedTag, isLoading]);
+
+  // Événements « feed_refresh » (composer, mAI) : prepend du nouveau post si fourni,
+  // sinon rafraîchissement complet
+  useEffect(() => {
+    const handleRefresh = (e: any) => {
+      if (e?.detail?.post) {
+        lastTopIdRef.current = String(e.detail.post.id);
+        setNewCount(0);
+        prependItems([e.detail.post]);
+      } else {
+        refresh();
+      }
+    };
+    window.addEventListener('vibe:feed_refresh', handleRefresh);
+    return () => window.removeEventListener('vibe:feed_refresh', handleRefresh);
+  }, [refresh, prependItems]);
 
   useEffect(() => {
     ApiService.getTrends()
@@ -55,19 +139,17 @@ export const HomePage: React.FC<HomePageProps> = ({
         if (res?.trends) setTrends(res.trends);
       })
       .catch(() => {});
-
-    const handlePostUpdated = () => {
-      fetchFeed();
-    };
-    window.addEventListener('vibe:post_updated', handlePostUpdated);
-    return () => {
-      window.removeEventListener('vibe:post_updated', handlePostUpdated);
-    };
   }, []);
 
-  const handlePostDeleted = (postId: string) => {
-    setPosts((prev) => prev.filter((p) => p.id !== postId));
-  };
+  const handlePostDeleted = useCallback(
+    (postId: string) => removeItem(postId),
+    [removeItem]
+  );
+
+  const handleOpenExplain = useCallback(
+    (p: Post) => setSelectedPostForExplain(p),
+    []
+  );
 
   const handleSelectTag = (tag: string) => {
     if (selectedTag === tag) {
@@ -78,12 +160,32 @@ export const HomePage: React.FC<HomePageProps> = ({
     }
   };
 
+  const showNewPosts = () => {
+    lastTopIdRef.current = null;
+    setNewCount(0);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    refresh();
+  };
+
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20 select-none">
-      {/* Sticky Top Header with 3 Feed Tabs: Pour Vous | Abonnements | Tendances */}
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
+      {/* Pull-to-refresh (mobile) */}
+      {(pullDistance > 0 || isRefreshing) && (
+        <div
+          className="flex justify-center items-center overflow-hidden transition-[height]"
+          style={{ height: isRefreshing ? 44 : pullDistance }}
+        >
+          <RefreshIcon spinning={isRefreshing || pullDistance >= 60} />
+        </div>
+      )}
+
+      {/* Sticky Top Header with 3 Feed Tabs */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800">
         <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            <div className="sm:hidden shrink-0">
+              <VibeLogo size={24} showText={false} />
+            </div>
             <h1 className="text-base font-bold text-white tracking-tight">Accueil</h1>
             {selectedTag && (
               <span className="flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-white font-mono">
@@ -95,11 +197,11 @@ export const HomePage: React.FC<HomePageProps> = ({
             )}
           </div>
           <button
-            onClick={fetchFeed}
+            onClick={refresh}
             title="Rafraîchir le flux"
             className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
           >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshIcon spinning={isLoading} />
           </button>
         </div>
 
@@ -150,12 +252,30 @@ export const HomePage: React.FC<HomePageProps> = ({
         </div>
       </header>
 
-      {/* Main Post Composer */}
-      <div ref={composerRef}>
-        <PostComposer onPostCreated={fetchFeed} />
-      </div>
+      {/* Intro Video Banner (2026 / mAI) */}
+      <IntroBanner />
 
-      {/* Trending Hashtags Quick Strip (When on Tendances or always on top of stream) */}
+      {/* Main Post Composer */}
+      <PostComposer
+        onPostCreated={() => {
+          // Le composer émet vibe:feed_refresh avec le post créé
+        }}
+      />
+
+      {/* Bouton « N nouvelles vibes » */}
+      {newCount > 0 && (
+        <div className="sticky top-[104px] z-15 flex justify-center pointer-events-none animate-slideDown">
+          <button
+            onClick={showNewPosts}
+            className="pointer-events-auto -mt-3 mb-2 px-4 py-1.5 rounded-full bg-white text-black text-xs font-bold shadow-xl hover:brightness-90 active:scale-95 transition-all flex items-center gap-1.5"
+          >
+            <ArrowUp className="w-3.5 h-3.5" />
+            {newCount} nouvelle{newCount > 1 ? 's' : ''} vibe{newCount > 1 ? 's' : ''}
+          </button>
+        </div>
+      )}
+
+      {/* Trending Hashtags Quick Strip */}
       {feedType === 'trending' && trends.length > 0 && (
         <div className="p-3 bg-zinc-950/80 border-b border-zinc-900 overflow-x-auto flex items-center gap-2 no-scrollbar">
           <span className="text-[11px] font-mono text-zinc-500 uppercase shrink-0 pl-1">Hashtags du moment :</span>
@@ -188,7 +308,7 @@ export const HomePage: React.FC<HomePageProps> = ({
             <AlertCircle className="w-5 h-5 mx-auto text-zinc-400" />
             <p className="text-xs text-zinc-400">{fetchError}</p>
             <button
-              onClick={fetchFeed}
+              onClick={refresh}
               className="py-1.5 px-4 rounded-full bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-all"
             >
               Réessayer
@@ -196,16 +316,22 @@ export const HomePage: React.FC<HomePageProps> = ({
           </div>
         )}
 
-        {posts.map((post) => (
-          <PostCard
-            key={post.id}
-            post={post}
-            onOpenThread={onOpenThread}
-            onOpenProfile={onOpenProfile}
-            onPostDeleted={handlePostDeleted}
-            onOpenExplain={(p: Post) => setSelectedPostForExplain(p)}
-          />
-        ))}
+        {isLoading && posts.length === 0
+          ? [0, 1, 2, 3].map((i) => <PostCardSkeleton key={i} />)
+          : posts.map((post) => (
+              <PostCard
+                key={post.id}
+                post={post}
+                onOpenThread={onOpenThread}
+                onOpenProfile={onOpenProfile}
+                onPostDeleted={handlePostDeleted}
+                onOpenExplain={handleOpenExplain}
+              />
+            ))}
+
+        {/* Sentinelle du scroll infini + loader de fin de liste */}
+        <div ref={sentinelRef} className="h-1" />
+        {isLoadingMore && <div className="feed-end-loader" aria-label="Chargement" />}
 
         {!isLoading && posts.length === 0 && !fetchError && (
           <div className="p-12 sm:p-16 text-center space-y-4 max-w-sm mx-auto">
@@ -214,12 +340,12 @@ export const HomePage: React.FC<HomePageProps> = ({
             </div>
             <div className="space-y-1">
               <h3 className="text-base font-bold text-white">
-                {feedType === 'trending' ? 'Aucune tendance pour le moment' : 'Aucune publication'}
+                {feedType === 'trending' ? 'Aucune tendance pour le moment' : 'Aucune vibe'}
               </h3>
               <p className="text-xs text-zinc-500">
                 {feedType === 'trending'
                   ? 'Soyez le premier à lancer un sujet populaire avec un #hashtag !'
-                  : 'Créez votre première publication ci-dessus pour animer votre communauté.'}
+                  : 'Poster votre première vibe ci-dessus pour animer votre communauté.'}
               </p>
             </div>
           </div>
@@ -237,3 +363,18 @@ export const HomePage: React.FC<HomePageProps> = ({
     </div>
   );
 };
+
+const RefreshIcon: React.FC<{ spinning?: boolean }> = ({ spinning }) => (
+  <svg
+    className={`w-4 h-4 ${spinning ? 'animate-spin' : ''}`}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+    <path d="M21 3v6h-6" />
+  </svg>
+);

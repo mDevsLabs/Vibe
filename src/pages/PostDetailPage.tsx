@@ -39,7 +39,7 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
           author_id: 'mathias-id',
           username: 'mathias_dev',
           display_name: 'Mathias',
-          avatar_url: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&q=80',
+          avatar_url: undefined,
           content: 'Bienvenue sur Vibe ! Le réseau social nouvelle génération fusionnant l’expérience fluide de X/Twitter avec l’intelligence artificielle autonome mAI.',
           format: 'micro_text',
           visibility: 'public',
@@ -58,7 +58,7 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
   }, [postId]);
 
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20">
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8">
       {/* Header */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 py-3 flex items-center gap-4">
         <button

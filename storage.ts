@@ -447,10 +447,19 @@ export function registerStorageRoutes(app: Hono) {
       const userId = payload.sub as string;
 
       const body = await c.req.parseBody();
-      const file = body["avatar"];
+      const file = body["avatar"] || body["file"];
 
-      if (!(file instanceof File)) {
+      if (!(file instanceof File) || file.size === 0) {
         return c.json({ error: "Fichier invalide ou non fourni." }, 400);
+      }
+
+      const MAX_AVATAR_SIZE = 10 * 1024 * 1024;
+      if (file.size > MAX_AVATAR_SIZE) {
+        return c.json({ error: "Image trop volumineuse (max 10 MB)." }, 413);
+      }
+      const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+      if (file.type && !ALLOWED_IMAGE_TYPES.includes(file.type)) {
+        return c.json({ error: "Format d'image non supporté (JPEG, PNG, WebP ou GIF requis)." }, 400);
       }
 
       const primaryNode = selectStorageNode(`avatar-${userId}`);
@@ -471,10 +480,17 @@ export function registerStorageRoutes(app: Hono) {
 
       if (!uploadResult.success) {
         console.error(
-          "Erreur Z1 Storage S3 (avatar fallback épuisé):",
+          "Erreur Z1 Storage S3 (avatar, fallback épuisé):",
           uploadResult.error
         );
-        return c.json({ error: "Erreur lors de l'upload de l'image." }, 500);
+        return c.json(
+          {
+            error:
+              "L'upload a échoué sur tous les buckets de stockage. Vérifiez la configuration Z1 Storage (credentials S3) ou réessayez plus tard.",
+            details: uploadResult.error?.slice(0, 300),
+          },
+          503
+        );
       }
 
       const publicUrl = uploadResult.publicUrl;
@@ -558,10 +574,17 @@ export function registerStorageRoutes(app: Hono) {
 
       if (!uploadResult.success) {
         console.error(
-          "Erreur Z1 Storage S3 (file fallback épuisé):",
+          "Erreur Z1 Storage S3 (file, fallback épuisé):",
           uploadResult.error
         );
-        return c.json({ error: "Erreur lors de l'upload vers S3." }, 500);
+        return c.json(
+          {
+            error:
+              "L'upload a échoué sur tous les buckets de stockage. Vérifiez la configuration Z1 Storage (credentials S3) ou réessayez plus tard.",
+            details: uploadResult.error?.slice(0, 300),
+          },
+          503
+        );
       }
 
       const publicUrl = uploadResult.publicUrl;

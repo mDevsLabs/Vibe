@@ -18,9 +18,75 @@ import type {
   User,
 } from '../types/vibe';
 
-export const API_BASE = 'https://mai.val.run';
+export const API_BASE =
+  (import.meta as any).env?.VITE_API_URL ||
+  (typeof window !== 'undefined' &&
+   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') &&
+   !(import.meta as any).env?.VITE_API_URL
+    ? ''
+    : 'https://mai.val.run');
+
+// ─────────────────────────────────────────────
+// CACHE GET (TTL court) + dédoublonnage des requêtes en vol.
+// Réduit fortement les latences perçues (feed, profils, DMs…).
+// Tout POST/PUT/DELETE invalide le cache pour rester cohérent.
+// ─────────────────────────────────────────────
+const GET_CACHE_TTL = 15000;
+
+interface CacheEntry { data: any; ts: number }
 
 export class ApiService {
+  private static cache = new Map<string, CacheEntry>();
+  private static inflight = new Map<string, Promise<any>>();
+
+  private static cacheGet<T>(endpoint: string, ttlMs: number = GET_CACHE_TTL): Promise<T> | null {
+    const hit = this.cache.get(endpoint);
+    if (hit && Date.now() - hit.ts < ttlMs) return Promise.resolve(hit.data as T);
+    return null;
+  }
+
+  private static async cachedRequest<T>(endpoint: string, ttlMs: number = GET_CACHE_TTL): Promise<T> {
+    const cached = this.cacheGet<T>(endpoint, ttlMs);
+    if (cached) return cached;
+
+    const pending = this.inflight.get(endpoint);
+    if (pending) return pending as Promise<T>;
+
+    const p = this.request<T>(endpoint)
+      .then((data) => {
+        this.cache.set(endpoint, { data, ts: Date.now() });
+        return data;
+      })
+      .finally(() => {
+        this.inflight.delete(endpoint);
+      });
+
+    this.inflight.set(endpoint, p);
+    return p as Promise<T>;
+  }
+
+  /** Invalide tout ou partie du cache GET (préfixe d'endpoint, ex. '/v1/dms'). */
+  public static invalidateCache(prefix?: string) {
+    if (!prefix) this.cache.clear();
+    else for (const key of Array.from(this.cache.keys())) {
+      if (key.includes(prefix)) this.cache.delete(key);
+    }
+  }
+
+  /** Précharge les profils auteurs d'un flux pour un affichage instantané des pages profil. */
+  public static prefetchProfiles(posts: Array<{ username?: string; author_id?: string }>): void {
+    const usernames = Array.from(
+      new Set(posts.map((p) => p.username).filter((u): u is string => Boolean(u)))
+    ).slice(0, 8);
+    for (const u of usernames) this.prefetchProfile(u);
+  }
+
+  /** Précharge en arrière-plan le profil + ses posts (sans bloquer l'UI). */
+  public static prefetchProfile(username: string): void {
+    const cleanUser = username.trim().replace(/^@/, '');
+    const endpoint = `/v1/profiles/${encodeURIComponent(cleanUser)}`;
+    this.cachedRequest(endpoint, 60000).catch(() => {});
+  }
   public static getToken(): string | null {
     return localStorage.getItem('vibe_jwt_token');
   }
@@ -48,25 +114,54 @@ export class ApiService {
 
     const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
 
-    const response = await fetch(url, {
-      ...options,
-      headers,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers,
+      });
+    } catch (networkErr: any) {
+      // Si la requête vers l'URL absolue échoue (ex. CORS ou Failed to fetch),
+      // et qu'un serveur local est actif, on tente via le proxy relatif local
+      if (url.startsWith('https://mai.val.run') && typeof window !== 'undefined') {
+        try {
+          response = await fetch(endpoint, {
+            ...options,
+            headers,
+          });
+        } catch {
+          throw networkErr;
+        }
+      } else {
+        throw networkErr;
+      }
+    }
 
     if (!response.ok) {
       const errJson = await response.json().catch(() => ({}));
-      throw new Error(errJson.error || `Erreur (${response.status})`);
+      const err = new Error(errJson.error || `Erreur (${response.status})`) as any;
+      err.status = response.status;
+      throw err;
     }
 
-    // Exclure les routes d'interaction rapides pour éviter les boucles de log
+    // Exclure les routes d'interaction rapides et les GET de lecture pour éviter les boucles de log
     const SKIP_LOG_PATTERNS = ['/usage/log', '/like', '/repost', '/bookmark', '/notifications/read', '/models'];
-    const shouldLog = !SKIP_LOG_PATTERNS.some(p => endpoint.includes(p));
+    const isReadRequest = (options.method || 'GET').toUpperCase() === 'GET';
+    const shouldLog = !isReadRequest && !SKIP_LOG_PATTERNS.some(p => endpoint.includes(p));
 
     if (response.ok && shouldLog) {
       this.logUsage(endpoint).catch(() => {});
     }
 
-    return await response.json();
+    const json = await response.json();
+
+    // Toute écriture invalide le cache GET pour garantir la fraîcheur des lectures suivantes
+    const isRead = (options.method || 'GET').toUpperCase() === 'GET';
+    if (!isRead) {
+      this.cache.clear();
+    }
+
+    return json;
   }
 
   // ─────────────────────────────────────────────
@@ -127,9 +222,10 @@ export class ApiService {
   // ─────────────────────────────────────────────
   // FEEDS & POSTS & TRENDS
   // ─────────────────────────────────────────────
-  public static async getFeed(type: 'for_you' | 'stream' | 'trending' = 'for_you', tag?: string): Promise<{ posts: Post[]; mode: string; title: string }> {
+  public static async getFeed(type: 'for_you' | 'stream' | 'trending' = 'for_you', tag?: string, cursor?: string): Promise<{ posts: Post[]; mode: string; title: string; nextCursor?: string | null }> {
     const queryParams = new URLSearchParams({ type });
     if (tag) queryParams.append('tag', tag);
+    if (cursor) queryParams.append('cursor', cursor);
 
     try {
       return await this.request(`/v1/feed?${queryParams.toString()}`);
@@ -140,10 +236,10 @@ export class ApiService {
 
   public static async getTrends(): Promise<{ success: boolean; trends: Array<{ tag: string; category?: string; posts: string; post_count?: number }> }> {
     try {
-      return await this.request('/v1/trends');
+      return await this.cachedRequest('/v1/trends', 60000);
     } catch {
       try {
-        return await this.request('/api/vibe/trends');
+        return await this.cachedRequest('/api/vibe/trends', 60000);
       } catch {
         // Aucun fallback statique — retourner une liste vide si le backend est inaccessible
         return { success: false, trends: [] };
@@ -231,9 +327,9 @@ export class ApiService {
   // ─────────────────────────────────────────────
   public static async getComments(postId: string): Promise<{ comments: Comment[]; aiDigest: string | null; count: number }> {
     try {
-      return await this.request(`/v1/posts/${postId}/comments`);
+      return await this.cachedRequest(`/v1/posts/${postId}/comments`, 10000);
     } catch {
-      return await this.request(`/api/vibe/posts/${postId}/comments`);
+      return await this.cachedRequest(`/api/vibe/posts/${postId}/comments`, 10000);
     }
   }
 
@@ -251,37 +347,135 @@ export class ApiService {
     }
   }
 
+  public static async likeComment(postId: string, commentId: string): Promise<{ success: boolean; liked: boolean; likes_count: number }> {
+    try {
+      return await this.request(`/v1/posts/${postId}/comments/${commentId}/like`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/posts/${postId}/comments/${commentId}/like`, { method: 'POST' });
+    }
+  }
+
   // ─────────────────────────────────────────────
   // DIRECT MESSAGES (DMs)
   // ─────────────────────────────────────────────
   public static async getConversations(): Promise<{ conversations: DMConversation[] }> {
     try {
-      return await this.request('/v1/dms/conversations');
+      return await this.cachedRequest('/v1/dms/conversations', 8000);
     } catch {
-      return await this.request('/api/vibe/dms/conversations');
+      return await this.cachedRequest('/api/vibe/dms/conversations', 8000);
     }
   }
 
   public static async getMessages(partnerId: string | number): Promise<{ messages: DirectMessage[] }> {
     try {
-      return await this.request(`/v1/dms/messages/${partnerId}`);
+      return await this.cachedRequest(`/v1/dms/messages/${partnerId}`, 5000);
     } catch {
-      return await this.request(`/api/vibe/dms/messages/${partnerId}`);
+      return await this.cachedRequest(`/api/vibe/dms/messages/${partnerId}`, 5000);
     }
   }
 
-  public static async sendMessage(recipient_id: string | number, content: string): Promise<{ success: boolean; message: DirectMessage }> {
+  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string): Promise<{ success: boolean; message: DirectMessage }> {
+    this.invalidateCache('/dms/');
     try {
       return await this.request('/v1/dms/messages', {
         method: 'POST',
-        body: JSON.stringify({ recipient_id, content }),
+        body: JSON.stringify({ recipient_id, content, reply_to_id }),
       });
     } catch {
       return await this.request('/api/vibe/dms/messages', {
         method: 'POST',
-        body: JSON.stringify({ recipient_id, content }),
+        body: JSON.stringify({ recipient_id, content, reply_to_id }),
       });
     }
+  }
+
+  public static async reactToMessage(messageId: string, emoji: string): Promise<{ success: boolean; reacted: boolean; reactions: { emoji: string; count: number; mine: boolean }[] }> {
+    this.invalidateCache('/dms/');
+    try {
+      return await this.request(`/v1/dms/messages/${messageId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/dms/messages/${messageId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+    }
+  }
+
+  public static async generateDMReply(partnerId: string | number, draft?: string): Promise<{ success: boolean; suggestion: string }> {
+    const payload = { partner_id: partnerId, draft: draft || '' };
+    try {
+      return await this.request('/v1/dms/suggest-reply', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      try {
+        return await this.request(`/v1/dms/generate-reply/${partnerId}`, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        return await this.request(`/api/vibe/dms/generate-reply/${partnerId}`, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // DMs — MODÉRATION : blocage, signalement, suppression, renommage
+  // ─────────────────────────────────────────────
+  public static async blockUser(userId: string | number): Promise<{ success: boolean }> {
+    return this.request('/v1/dms/block', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    });
+  }
+
+  public static async unblockUser(userId: string | number): Promise<{ success: boolean }> {
+    return this.request('/v1/dms/unblock', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    });
+  }
+
+  public static async getBlockedUsers(): Promise<{ blocked: Array<{ id: string; blocked_user_id: string; blocked_username?: string; blocked_display_name?: string; blocked_avatar_url?: string; created_at: string }> }> {
+    try {
+      return await this.request('/v1/dms/blocked');
+    } catch {
+      return await this.request('/api/vibe/dms/blocked');
+    }
+  }
+
+  public static async reportConversation(
+    partnerId: string | number,
+    reason: string,
+    messageId?: string
+  ): Promise<{ success: boolean }> {
+    return this.request('/v1/dms/report', {
+      method: 'POST',
+      body: JSON.stringify({ reported_user_id: partnerId, reason, message_id: messageId }),
+    });
+  }
+
+  public static async renameConversation(partnerId: string | number, customName: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/conversations/${partnerId}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ name: customName }),
+    });
+  }
+
+  public static async deleteConversation(partnerId: string | number): Promise<{ success: boolean }> {
+    return this.request(`/v1/dms/conversations/${partnerId}`, { method: 'DELETE' });
+  }
+
+  public static async deleteMessage(messageId: string): Promise<{ success: boolean }> {
+    return this.request(`/v1/dms/messages/${messageId}`, { method: 'DELETE' });
   }
 
   // ─────────────────────────────────────────────
@@ -304,10 +498,24 @@ export class ApiService {
             provider: m.owned_by || m.provider || (m.id.includes('/') ? m.id.split('/')[0] : 'mAI'),
           };
         });
+        const lagunaIdx = formatted.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
+        if (lagunaIdx > 0) {
+          const [laguna] = formatted.splice(lagunaIdx, 1);
+          formatted.unshift(laguna);
+        } else if (lagunaIdx === -1) {
+          formatted.unshift({
+            id: 'poolside/laguna-xs-2.1:free',
+            name: 'Laguna XS 2.1',
+            description: 'Modèle IA par défaut haute performance',
+            contextWindow: 128000,
+            provider: 'Poolside',
+          });
+        }
         return { models: formatted };
       }
       return {
         models: [
+          { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
           { id: 'mai-1.5-apex', name: 'mAI 1.5 Apex', description: 'Modèle IA d\'élite mAI — Raisonnement profond & Vision', provider: 'mDevsLabs' },
           { id: 'mai-1.5-light', name: 'mAI 1.5 Light', description: 'Modèle agile mAI ultra-rapide', provider: 'mDevsLabs' },
           { id: 'google/gemini-2.5-flash:free', name: 'Gemini 2.5 Flash', description: 'Vitesse instantanée et compréhension multimodale', provider: 'Google' },
@@ -319,6 +527,7 @@ export class ApiService {
     } catch {
       return {
         models: [
+          { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
           { id: 'mai-1.5-apex', name: 'mAI 1.5 Apex', description: 'Modèle IA d\'élite mAI — Raisonnement profond & Vision', provider: 'mDevsLabs' },
           { id: 'mai-1.5-light', name: 'mAI 1.5 Light', description: 'Modèle agile mAI ultra-rapide', provider: 'mDevsLabs' },
           { id: 'google/gemini-2.5-flash:free', name: 'Gemini 2.5 Flash', description: 'Vitesse instantanée et compréhension multimodale', provider: 'Google' },
@@ -334,7 +543,7 @@ export class ApiService {
     message: string,
     execute_tool?: { name: string; args: any },
     model?: string
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string }> {
+  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any } }> {
     try {
       return await this.request('/v1/mai/chat', {
         method: 'POST',
@@ -344,6 +553,25 @@ export class ApiService {
       return await this.request('/api/vibe/mai/chat', {
         method: 'POST',
         body: JSON.stringify({ message, execute_tool, model }),
+      });
+    }
+  }
+
+  /** Exécute un outil mAI explicitement approuvé par l'utilisateur. */
+  public static async executeMAITool(
+    name: string,
+    args: any = {},
+    model?: string
+  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string }> {
+    try {
+      return await this.request('/v1/mai/execute-tool', {
+        method: 'POST',
+        body: JSON.stringify({ name, args, model }),
+      });
+    } catch {
+      return await this.request('/api/vibe/mai/execute-tool', {
+        method: 'POST',
+        body: JSON.stringify({ name, args, model }),
       });
     }
   }
@@ -374,10 +602,12 @@ export class ApiService {
   // PROFILES & AVATAR SYNC
   // ─────────────────────────────────────────────
   public static async getProfile(username: string): Promise<{ profile: Profile; posts: Post[] }> {
+    const cleanUser = username.trim().replace(/^@/, '');
+    const endpoint = `/v1/profiles/${encodeURIComponent(cleanUser)}`;
     try {
-      return await this.request(`/v1/profiles/${username}`);
+      return await this.cachedRequest(endpoint, 30000);
     } catch {
-      return await this.request(`/api/vibe/profiles/${username}`);
+      return await this.cachedRequest(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}`, 30000);
     }
   }
 
@@ -468,10 +698,11 @@ export class ApiService {
   }
 
   public static async toggleFollow(username: string): Promise<{ success: boolean; following: boolean }> {
+    const cleanUser = username.trim().replace(/^@/, '');
     try {
-      return await this.request(`/v1/profiles/${username}/follow`, { method: 'POST' });
+      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/follow`, { method: 'POST' });
     } catch {
-      return await this.request(`/api/vibe/profiles/${username}/follow`, { method: 'POST' });
+      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/follow`, { method: 'POST' });
     }
   }
 
@@ -483,6 +714,15 @@ export class ApiService {
       return await this.request('/v1/notifications');
     } catch {
       return await this.request('/api/vibe/notifications');
+    }
+  }
+
+  /** Badges légers : un seul appel, aucune liste chargée. */
+  public static async getUnreadCounts(): Promise<{ unread_notifications: number; unread_messages: number }> {
+    try {
+      return await this.request('/v1/notifications/unread_count');
+    } catch {
+      return await this.request('/api/vibe/notifications/unread_count');
     }
   }
 

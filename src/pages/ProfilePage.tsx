@@ -8,7 +8,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Calendar,
-  CheckCircle,
   Edit3,
   ArrowLeft,
   X,
@@ -16,14 +15,15 @@ import {
   LogOut,
   Upload,
   Loader2,
-  ShieldCheck,
-  BadgeCheck
+  BadgeCheck,
+  AlertCircle
 } from 'lucide-react';
 import type { Profile, Post } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { PostCard } from '../components/feed/PostCard';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { ProfileAvatar } from '../components/common/ProfileAvatar';
 
 interface ProfilePageProps {
   username?: string;
@@ -38,15 +38,19 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   onOpenThread,
   onOpenProfile,
 }) => {
-  const { user, profile: authProfile, updateUserAvatar, refreshProfile, logout } = useAuth();
-  const targetUsername = username || user?.username || 'utilisateur';
-  const isSelf = user && (user.username.toLowerCase() === targetUsername.toLowerCase());
+  const { user, profile: authProfile, updateUserAvatar, updateUser, refreshProfile, logout, isLoadingSession } = useAuth();
+  const rawTarget = username || user?.username || 'utilisateur';
+  const targetUsername = rawTarget.replace(/^@/, '');
+  const isSelf = Boolean(user && user.username && user.username.toLowerCase().replace(/^@/, '') === targetUsername.toLowerCase());
 
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
   const [isFollowing, setIsFollowing] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // Edit fields
   const [editUsername, setEditUsername] = useState('');
@@ -55,8 +59,6 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [editInterests, setEditInterests] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
   const [editBanner, setEditBanner] = useState('');
-  const [editIsVerified, setEditIsVerified] = useState(false);
-
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [isUploadingBanner, setIsUploadingBanner] = useState(false);
@@ -65,21 +67,36 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const bannerInputRef = useRef<HTMLInputElement>(null);
 
   const fetchProfile = async () => {
+    setIsLoadingProfile(true);
+    setProfileError(null);
     try {
       const data = await ApiService.getProfile(targetUsername);
       setProfile(data.profile);
       setPosts(data.posts || []);
+      setIsFollowing(Boolean((data.profile as any).isFollowing));
       setEditUsername(data.profile.username || targetUsername);
       setEditName(data.profile.displayName || '');
       setEditBio(data.profile.bio || '');
       setEditInterests(data.profile.interests ? data.profile.interests.join(', ') : '');
       setEditAvatar(data.profile.avatarUrl || '');
       setEditBanner(data.profile.bannerUrl || '');
-      setEditIsVerified(Boolean(data.profile.is_verified || (data.profile as any).isVerified));
-    } catch {}
+    } catch (err: any) {
+      if (isSelf && authProfile) {
+        setProfile(authProfile);
+        setEditUsername(user?.username || targetUsername);
+        setEditName(authProfile.displayName || '');
+        setEditBio(authProfile.bio || '');
+        setEditAvatar(authProfile.avatarUrl || '');
+      } else {
+        setProfileError(err?.message || 'Impossible de charger ce profil.');
+      }
+    } finally {
+      setIsLoadingProfile(false);
+    }
   };
 
   useEffect(() => {
+    if (!username && isLoadingSession) return;
     fetchProfile();
     const handlePostUpdated = () => {
       fetchProfile();
@@ -88,14 +105,24 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     return () => {
       window.removeEventListener('vibe:post_updated', handlePostUpdated);
     };
-  }, [targetUsername]);
+  }, [targetUsername, isLoadingSession, username]);
 
   const handleFollowToggle = async () => {
-    setIsFollowing(!isFollowing);
+    const next = !isFollowing;
+    setIsFollowing(next);
+    // Mise à jour immédiate des compteurs affichés
+    setProfile((prev) => prev ? {
+      ...prev,
+      followersCount: Math.max(0, (prev.followersCount || 0) + (next ? 1 : -1)),
+    } : prev);
     try {
       await ApiService.toggleFollow(targetUsername);
     } catch {
-      setIsFollowing(isFollowing);
+      setIsFollowing(!next);
+      setProfile((prev) => prev ? {
+        ...prev,
+        followersCount: Math.max(0, (prev.followersCount || 0) + (next ? -1 : 1)),
+      } : prev);
     }
   };
 
@@ -142,31 +169,45 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    setEditError(null);
     setIsSaving(true);
     try {
       const interestsArray = editInterests.split(',').map((s) => s.trim()).filter(Boolean);
+      const cleanUser = editUsername.trim().toLowerCase().replace(/^@/, '');
 
-      await ApiService.updateProfile({
-        username: editUsername.trim() || undefined,
+      if (cleanUser && cleanUser.length < 2) {
+        setEditError("Le nom d'utilisateur doit comporter au moins 2 caractères (lettres, chiffres, _).");
+        setIsSaving(false);
+        return;
+      }
+
+      const res = await ApiService.updateProfile({
+        username: cleanUser || undefined,
         displayName: editName.trim(),
         bio: editBio.trim(),
         interests: interestsArray,
         avatarUrl: editAvatar,
         bannerUrl: editBanner,
-        is_verified: editIsVerified,
       } as any);
 
-      await fetchProfile();
+      // Synchroniser l'utilisateur avec la réponse du serveur (username modifié inclus)
+      const updatedProfile = (res as any)?.profile;
+      const finalUsername = updatedProfile?.username || cleanUser;
+      if (finalUsername) {
+        updateUser({ username: finalUsername, avatar_url: updatedProfile?.avatarUrl || editAvatar });
+        window.history.replaceState(null, '', `/@${finalUsername}`);
+      }
       await refreshProfile();
+      await fetchProfile();
       setIsEditOpen(false);
     } catch (err: any) {
-      alert(`Erreur: ${err.message}`);
+      setEditError(err.message || 'Erreur lors de la modification du profil.');
     } finally {
       setIsSaving(false);
     }
   };
 
-  const activeAvatar = profile?.avatarUrl || (isSelf ? authProfile?.avatarUrl || user?.avatar_url : null) || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&q=80';
+  const activeAvatar = profile?.avatarUrl || (isSelf ? authProfile?.avatarUrl || user?.avatar_url : null);
   const isVerified = Boolean(
     profile?.is_verified ||
     (profile as any)?.isVerified ||
@@ -175,7 +216,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   );
 
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20 select-none">
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Hidden file inputs for direct camera / file upload via storage.ts */}
       <input
         type="file"
@@ -202,18 +243,20 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           )}
           <div>
             <h1 className="text-base font-bold text-white tracking-tight flex items-center gap-1.5">
-              <span>{profile?.displayName || targetUsername}</span>
-              <VerifiedBadge isVerified={isVerified} tier={isSelf ? user?.tier : (profile as any)?.tier} size="sm" />
+              <span>{profile?.displayName || (isLoadingProfile ? 'Chargement...' : targetUsername)}</span>
+              <VerifiedBadge isVerified={isVerified} size="sm" />
             </h1>
-            <span className="text-[11px] text-zinc-500 font-mono">{posts.length} publication(s)</span>
+            <p className="text-xs text-zinc-500 font-mono">
+              {posts.length} {posts.length <= 1 ? 'publication' : 'publications'}
+            </p>
           </div>
         </div>
 
         {isSelf && (
           <button
             onClick={logout}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-900/50 bg-red-950/20 text-red-400 text-xs font-medium hover:bg-red-950/40 transition-colors"
             title="Se déconnecter"
-            className="flex items-center gap-1.5 py-1.5 px-3 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 text-xs font-semibold transition-all"
           >
             <LogOut className="w-3.5 h-3.5" />
             <span>Déconnexion</span>
@@ -223,7 +266,11 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
       {/* Banner */}
       <div className="h-44 sm:h-52 w-full bg-zinc-900 relative overflow-hidden border-b border-zinc-800 group">
-        {profile?.bannerUrl ? (
+        {isLoadingProfile ? (
+          <div className="w-full h-full bg-zinc-950 animate-pulse flex items-center justify-center text-zinc-600 text-xs font-mono">
+            Chargement...
+          </div>
+        ) : profile?.bannerUrl ? (
           <img src={profile.bannerUrl} alt="Banner" className="w-full h-full object-cover" />
         ) : (
           <div className="w-full h-full bg-gradient-to-r from-zinc-950 via-zinc-900 to-black" />
@@ -246,16 +293,19 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         {/* Avatar & Action Button */}
         <div className="flex items-end justify-between -mt-16 sm:-mt-20">
           <div className="relative group">
-            <img
+            <ProfileAvatar
               src={activeAvatar}
               alt="Avatar"
-              className="w-28 h-28 sm:w-32 sm:h-32 rounded-full object-cover border-4 border-black bg-zinc-900 shadow-2xl"
+              size="2xl"
+              isLoading={isLoadingProfile}
+              fallbackName={targetUsername}
+              className="border-4 border-black bg-zinc-900 shadow-2xl"
             />
             {isSelf && (
               <button
                 onClick={() => avatarInputRef.current?.click()}
                 disabled={isUploadingAvatar}
-                className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-white transition-opacity text-xs"
+                className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-white transition-opacity text-xs z-20"
                 title="Télécharger une photo de profil"
               >
                 {isUploadingAvatar ? (
@@ -281,10 +331,11 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           ) : (
             <button
               onClick={handleFollowToggle}
+              style={!isFollowing ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
               className={`py-2 px-6 rounded-full font-bold text-xs transition-all ${
                 isFollowing
                   ? 'border border-zinc-700 bg-transparent text-white hover:bg-zinc-900'
-                  : 'bg-white text-black hover:bg-zinc-200'
+                  : 'bg-white text-black hover:brightness-90'
               }`}
             >
               {isFollowing ? 'Abonné' : 'Suivre'}
@@ -322,10 +373,15 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
           {/* Meta data */}
           <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-500 pt-2 font-mono">
-            <div className="flex items-center gap-1">
-              <Calendar className="w-3.5 h-3.5" />
-              <span>Inscrit sur Vibe</span>
-            </div>
+            {(Boolean((profile as any)?.created_at) || (isSelf && user?.created_at)) && (
+              <div className="flex items-center gap-1">
+                <Calendar className="w-3.5 h-3.5" />
+                <span>
+                  Inscrit sur Vibe en{' '}
+                  {new Date((profile as any)?.created_at || user?.created_at).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}
+                </span>
+              </div>
+            )}
             {isVerified && (
               <div className="flex items-center gap-1 text-[#1D9BF0]">
                 <BadgeCheck className="w-3.5 h-3.5" />
@@ -355,7 +411,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             className="flex-1 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
           >
             <span className={activeTab === tab ? 'text-white' : 'text-zinc-500'}>
-              {tab === 'posts' ? 'Publications' : tab === 'replies' ? 'Réponses' : tab === 'media' ? 'Médias' : 'J’aime'}
+              {tab === 'posts' ? 'Vibes' : tab === 'replies' ? 'Réponses' : tab === 'media' ? 'Médias' : 'J’aime'}
             </span>
             {activeTab === tab && (
               <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
@@ -366,19 +422,38 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
       {/* Real Posts Stream from DB */}
       <div className="divide-y divide-zinc-900">
-        {posts.map((p) => (
+        {isLoadingProfile && (
+          <div className="p-16 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
+            <Loader2 className="w-6 h-6 animate-spin text-zinc-500" />
+            <span>Chargement des publications…</span>
+          </div>
+        )}
+
+        {!isLoadingProfile && profileError && (
+          <div className="p-16 text-center text-zinc-500 text-xs flex flex-col items-center gap-3">
+            <span>{profileError}</span>
+            <button
+              onClick={fetchProfile}
+              className="py-2 px-4 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold hover:bg-zinc-800"
+            >
+              Réessayer
+            </button>
+          </div>
+        )}
+
+        {!isLoadingProfile && !profileError && posts.map((p) => (
           <PostCard
             key={p.id}
             post={p}
-            onPostDeleted={() => fetchProfile()}
+            onPostDeleted={(postId) => setPosts((prev) => prev.filter((x) => String(x.id) !== String(postId)))}
             onOpenThread={onOpenThread}
             onOpenProfile={onOpenProfile}
           />
         ))}
 
-        {posts.length === 0 && (
+        {!isLoadingProfile && !profileError && posts.length === 0 && (
           <div className="p-16 text-center text-zinc-500 text-xs">
-            Aucun post publié pour le moment.
+            Aucune vibe publiée pour le moment.
           </div>
         )}
       </div>
@@ -395,6 +470,13 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             </div>
 
             <form onSubmit={handleSaveProfile} className="space-y-4">
+              {editError && (
+                <div className="p-3 rounded-2xl bg-red-950/40 border border-red-800/80 text-red-300 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>{editError}</span>
+                </div>
+              )}
+
               {/* Username Input */}
               <div className="space-y-1">
                 <label className="text-xs font-mono uppercase text-zinc-400">Nom d’utilisateur (@pseudo)</label>
@@ -440,21 +522,15 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 />
               </div>
 
-              {/* Verified Badge Option */}
-              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <CheckCircle className="w-4 h-4 text-[#1D9BF0] fill-[#1D9BF0]" />
-                  <div>
-                    <span className="text-xs font-bold text-white">Compte Vérifié (Badge Bleu)</span>
-                    <p className="text-[11px] text-zinc-500">Affiche la coche bleue Twitter officielle</p>
-                  </div>
+              {/* Verified Badge Info — réservé aux abonnements payants */}
+              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center gap-2">
+                <BadgeCheck className="w-4 h-4 text-[#1D9BF0] shrink-0" />
+                <div>
+                  <span className="text-xs font-bold text-white">Coche bleue</span>
+                  <p className="text-[11px] text-zinc-500">
+                    Disponible automatiquement avec les abonnements Plus, Pro et Max.
+                  </p>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={editIsVerified}
-                  onChange={(e) => setEditIsVerified(e.target.checked)}
-                  className="w-4 h-4 accent-[#1D9BF0] cursor-pointer"
-                />
               </div>
 
               {/* File-Only Uploads for Avatar and Banner */}

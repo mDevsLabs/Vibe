@@ -1,16 +1,17 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — COMMENT SECTION (src/components/comments/CommentSection.tsx)
- * Interactive thread replies & mAI discussion synthesis
+ * Interactive thread replies, comment likes & mAI discussion synthesis
  * ============================================================================
  */
 
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Send, MessageSquare, Heart, Mic, MicOff } from 'lucide-react';
+import { Sparkles, Send, Heart, Mic, MicOff, Loader2, AlertCircle } from 'lucide-react';
 import { Comment } from '../../types/vibe';
 import { ApiService } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
+import { ProfileAvatar } from '../common/ProfileAvatar';
 
 interface CommentSectionProps {
   postId: string;
@@ -23,7 +24,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   const [newComment, setNewComment] = useState('');
   const [replyingTo, setReplyingTo] = useState<Comment | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
 
   const {
     isListening,
@@ -40,27 +43,16 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
 
   const fetchComments = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await ApiService.getComments(postId);
       setComments(data.comments || []);
       setAiDigest(data.aiDigest || null);
-    } catch {
-      // Fallback comments
-      setComments([
-        {
-          id: 'c1',
-          post_id: postId,
-          author_id: 'u1',
-          username: 'sophie_ux',
-          display_name: 'Sophie',
-          avatar_url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&q=80',
-          content: 'Le design monochrome est extrêmement propre et moderne !',
-          depth: 0,
-          likes_count: 4,
-          created_at: new Date().toISOString(),
-        },
-      ]);
-      setAiDigest('Synthèse mAI : Retours très positifs sur l’ergonomie et la rapidité du flux.');
+      setLikedIds(new Set((data.comments || []).filter((c: any) => c.liked_by_me).map((c: any) => String(c.id))));
+    } catch (err: any) {
+      setComments([]);
+      setAiDigest(null);
+      setLoadError(err?.message || 'Impossible de charger les commentaires.');
     } finally {
       setIsLoading(false);
     }
@@ -92,6 +84,106 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
   };
 
+  const handleLikeComment = async (cm: Comment) => {
+    if (!user) {
+      // Bouton "mort" si déconnecté : on prévient au lieu d'un update optimiste
+      // qui serait annulé par un 401.
+      window.dispatchEvent(
+        new CustomEvent('vibe:in_app_toast', {
+          detail: {
+            id: Date.now(),
+            title: 'Connexion requise',
+            message: 'Connectez-vous pour aimer un commentaire.',
+          },
+        })
+      );
+      return;
+    }
+    const id = String(cm.id);
+    const wasLiked = likedIds.has(id);
+    // Mise à jour optimiste
+    setLikedIds((prev) => {
+      const next = new Set(prev);
+      if (wasLiked) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setComments((prev) =>
+      prev.map((c) =>
+        String(c.id) === id
+          ? { ...c, likes_count: Math.max(0, (c.likes_count || 0) + (wasLiked ? -1 : 1)) }
+          : c
+      )
+    );
+    try {
+      const res = await (ApiService as any).likeComment(postId, id);
+      if (typeof res?.likes_count === 'number') {
+        setComments((prev) =>
+          prev.map((c) => (String(c.id) === id ? { ...c, likes_count: res.likes_count } : c))
+        );
+      }
+    } catch {
+      // Revenir en arrière en cas d'échec
+      setLikedIds((prev) => {
+        const next = new Set(prev);
+        if (wasLiked) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      setComments((prev) =>
+        prev.map((c) =>
+          String(c.id) === id
+            ? { ...c, likes_count: Math.max(0, (c.likes_count || 0) + (wasLiked ? 1 : -1)) }
+            : c
+        )
+      );
+    }
+  };
+
+  const renderComment = (cm: Comment) => {
+    const liked = likedIds.has(String(cm.id));
+    return (
+      <div
+        key={String(cm.id)}
+        className={`p-3.5 rounded-2xl bg-black border border-zinc-900 space-y-1.5 ${
+          (cm.depth || 0) > 0 ? 'ml-4 sm:ml-6 border-l-2 border-zinc-700' : ''
+        }`}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <ProfileAvatar
+              src={cm.avatar_url}
+              alt={cm.username}
+              fallbackName={cm.username}
+              size="xs"
+              className="border border-zinc-800 shrink-0"
+            />
+            <span className="text-xs font-bold text-white truncate">{cm.display_name || cm.username}</span>
+            <span className="text-[11px] text-zinc-500 truncate">@{cm.username}</span>
+          </div>
+          <button
+            onClick={() => setReplyingTo(cm)}
+            className="text-[11px] text-zinc-500 hover:text-white transition-colors shrink-0 ml-2"
+          >
+            Répondre
+          </button>
+        </div>
+        <p className="text-xs text-zinc-200 pl-8 whitespace-pre-wrap break-words">{cm.content}</p>
+        <div className="flex items-center gap-4 pl-8 pt-0.5">
+          <button
+            onClick={() => handleLikeComment(cm)}
+            className={`flex items-center gap-1 text-[11px] transition-colors ${
+              liked ? 'text-rose-500' : 'text-zinc-500 hover:text-rose-400'
+            }`}
+          >
+            <Heart className={`w-3.5 h-3.5 ${liked ? 'fill-rose-500' : ''}`} />
+            <span>{cm.likes_count || 0}</span>
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       {/* mAI Thread Synthesis */}
@@ -109,7 +201,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
       <form onSubmit={handleSubmit} className="p-4 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-3">
         {replyingTo && (
           <div className="flex items-center justify-between text-xs text-zinc-400">
-            <span>En réponse à <strong className="text-white">@{replyingTo.username}</strong></span>
+            <span>
+              En réponse à <strong className="text-white">@{replyingTo.username}</strong>
+            </span>
             <button
               type="button"
               onClick={() => setReplyingTo(null)}
@@ -121,10 +215,12 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
         )}
 
         <div className="flex gap-3">
-          <img
-            src={user?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+          <ProfileAvatar
+            src={user?.avatar_url}
             alt="Avatar"
-            className="w-8 h-8 rounded-full object-cover border border-zinc-800 shrink-0"
+            fallbackName={user?.username}
+            size="sm"
+            className="border border-zinc-800 shrink-0"
           />
           <div className="flex-1 space-y-2">
             <input
@@ -149,9 +245,10 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
               <button
                 type="submit"
                 disabled={!newComment.trim() || isSubmitting}
-                className="py-1.5 px-4 rounded-full bg-white text-black font-semibold text-xs hover:bg-zinc-200 transition-colors disabled:opacity-40"
+                className="py-1.5 px-4 rounded-full bg-white text-black font-semibold text-xs hover:bg-zinc-200 transition-colors disabled:opacity-40 flex items-center gap-1.5"
               >
-                Répondre
+                {isSubmitting && <Loader2 className="w-3 h-3 animate-spin" />}
+                {isSubmitting ? 'Envoi…' : 'Répondre'}
               </button>
             </div>
           </div>
@@ -160,35 +257,29 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
 
       {/* Comments List */}
       <div className="space-y-2">
-        {comments.map((cm) => (
-          <div
-            key={cm.id}
-            className={`p-3.5 rounded-2xl bg-black border border-zinc-900 space-y-1.5 ${
-              cm.depth > 0 ? 'ml-6 border-l-2 border-zinc-700' : ''
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <img
-                  src={cm.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
-                  alt={cm.username}
-                  className="w-6 h-6 rounded-full object-cover border border-zinc-800"
-                />
-                <span className="text-xs font-bold text-white">{cm.display_name || cm.username}</span>
-                <span className="text-[11px] text-zinc-500">@{cm.username}</span>
-              </div>
-              <button
-                onClick={() => setReplyingTo(cm)}
-                className="text-[11px] text-zinc-500 hover:text-white transition-colors"
-              >
-                Répondre
-              </button>
-            </div>
-            <p className="text-xs text-zinc-200 pl-8">{cm.content}</p>
+        {isLoading && (
+          <div className="text-center py-6 text-xs text-zinc-400 flex flex-col items-center gap-2">
+            <Loader2 className="w-5 h-5 animate-spin text-zinc-500" />
+            <span>Chargement des commentaires…</span>
           </div>
-        ))}
+        )}
 
-        {comments.length === 0 && !isLoading && (
+        {!isLoading && loadError && (
+          <div className="text-center py-6 text-xs text-zinc-500 flex flex-col items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-500" />
+            <span>{loadError}</span>
+            <button
+              onClick={fetchComments}
+              className="py-1.5 px-4 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold hover:bg-zinc-800"
+            >
+              Réessayer
+            </button>
+          </div>
+        )}
+
+        {!isLoading && !loadError && comments.map(renderComment)}
+
+        {!isLoading && !loadError && comments.length === 0 && (
           <div className="text-center py-6 text-xs text-zinc-500 font-mono">
             Aucun commentaire pour le moment. Soyez le premier à répondre !
           </div>

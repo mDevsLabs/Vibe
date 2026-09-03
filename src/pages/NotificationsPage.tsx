@@ -1,30 +1,41 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — NOTIFICATIONS PAGE (src/pages/NotificationsPage.tsx)
- * Real-time notification center with filter categories & real database events
+ * Real-time notification center: dedicated Likes tab, post navigation & unread states
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Bell,
+  BellOff,
   Heart,
   Repeat,
   MessageSquare,
   Sparkles,
   UserPlus,
-  Check
+  Check,
+  Loader2,
+  AlertCircle
 } from 'lucide-react';
 import { NotificationItem } from '../types/vibe';
 import { ApiService } from '../services/api';
+import { NotificationService } from '../services/notificationService';
+import { ProfileAvatar } from '../components/common/ProfileAvatar';
+import { VerifiedBadge } from '../components/common/VerifiedBadge';
+
+type PermissionState = 'unsupported' | 'default' | 'granted' | 'denied';
 
 export const NotificationsPage: React.FC = () => {
+  const navigate = useNavigate();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [filter, setFilter] = useState<'all' | 'verified' | 'mentions'>('all');
+  const [filter, setFilter] = useState<'all' | 'likes' | 'mentions' | 'verified'>('all');
   const [isLoading, setIsLoading] = useState(true);
+  const [permission, setPermission] = useState<PermissionState>('default');
+  const [isRequestingPermission, setIsRequestingPermission] = useState(false);
 
   const fetchNotifications = async () => {
-    setIsLoading(true);
     try {
       const data = await ApiService.getNotifications();
       setNotifications(data.notifications || []);
@@ -37,7 +48,33 @@ export const NotificationsPage: React.FC = () => {
 
   useEffect(() => {
     fetchNotifications();
+    const state = NotificationService.getPermissionState();
+    setPermission(state === 'unsupported' ? 'unsupported' : (state as PermissionState));
+
+    // Rafraîchissement automatique toutes les 8s ou au focus/événement
+    const interval = setInterval(fetchNotifications, 8000);
+    const handleNotif = () => fetchNotifications();
+    window.addEventListener('vibe:notification_received', handleNotif);
+    window.addEventListener('vibe:feed_refresh', handleNotif);
+    window.addEventListener('focus', handleNotif);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('vibe:notification_received', handleNotif);
+      window.removeEventListener('vibe:feed_refresh', handleNotif);
+      window.removeEventListener('focus', handleNotif);
+    };
   }, []);
+
+  const handleEnableNotifications = async () => {
+    setIsRequestingPermission(true);
+    try {
+      const result = await NotificationService.requestPermission();
+      setPermission(result as PermissionState);
+    } finally {
+      setIsRequestingPermission(false);
+    }
+  };
 
   const handleMarkAllAsRead = async () => {
     try {
@@ -46,38 +83,67 @@ export const NotificationsPage: React.FC = () => {
     } catch {}
   };
 
+  const handleNotificationClick = (notif: NotificationItem) => {
+    if (notif.post_id) {
+      navigate(`/posts/${notif.post_id}`);
+    } else if (notif.actor_username) {
+      navigate(`/@${notif.actor_username}`);
+    }
+  };
+
   const getIcon = (type: string) => {
     switch (type) {
       case 'like':
       case 'reaction':
-        return <Heart className="w-4 h-4 text-white fill-white" />;
+        return <Heart className="w-4 h-4 text-rose-500 fill-rose-500" />;
       case 'repost':
-        return <Repeat className="w-4 h-4 text-white" />;
+        return <Repeat className="w-4 h-4 text-emerald-400" />;
       case 'reply':
-        return <MessageSquare className="w-4 h-4 text-white" />;
+      case 'mention':
+        return <MessageSquare className="w-4 h-4 text-sky-400" />;
       case 'follow':
       case 'follow_request':
       case 'follow_accept':
-        return <UserPlus className="w-4 h-4 text-white" />;
+        return <UserPlus className="w-4 h-4 text-violet-400" />;
       case 'ai_digest':
-        return <Sparkles className="w-4 h-4 text-white" />;
+        return <Sparkles className="w-4 h-4 text-amber-400" />;
       default:
-        return <Bell className="w-4 h-4 text-white" />;
+        return <Bell className="w-4 h-4 text-zinc-400" />;
     }
   };
 
   const filteredNotifications = notifications.filter((n) => {
+    if (filter === 'likes') return n.type === 'like' || n.type === 'reaction';
     if (filter === 'mentions') return n.type === 'reply' || n.type === 'mention';
+    if (filter === 'verified') return Boolean((n as any).actor_verified);
     return true;
   });
 
+  // Regroupement par jour (Aujourd'hui / Hier / date)
+  const grouped = useMemo(() => {
+    const groups: { label: string; items: NotificationItem[] }[] = [];
+    const today = new Date().toDateString();
+    const yesterday = new Date(Date.now() - 86400000).toDateString();
+
+    for (const n of filteredNotifications) {
+      const d = new Date(n.created_at).toDateString();
+      const label = d === today ? "Aujourd'hui" : d === yesterday ? 'Hier' : new Date(n.created_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+      const last = groups[groups.length - 1];
+      if (last && last.label === label) last.items.push(n);
+      else groups.push({ label, items: [n] });
+    }
+    return groups;
+  }, [filteredNotifications]);
+
+  const likesCount = notifications.filter((n) => n.type === 'like' || n.type === 'reaction').length;
+
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20 select-none">
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Header */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4 flex items-center justify-between">
         <div>
           <h1 className="text-base font-bold text-white tracking-tight">Notifications</h1>
-          <p className="text-xs text-zinc-500">Activités et interactions récentes</p>
+          <p className="text-xs text-zinc-500">Activités, mentions et mentions J'aime</p>
         </div>
 
         {notifications.some((n) => !n.is_read) && (
@@ -91,65 +157,160 @@ export const NotificationsPage: React.FC = () => {
         )}
       </header>
 
+      {/* Bandeau d'activation des notifications appareil */}
+      {permission !== 'granted' && (
+        <div className="mx-4 mt-4 p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+          {permission === 'denied' ? (
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          ) : (
+            <BellOff className="w-5 h-5 text-zinc-400 shrink-0 mt-0.5" />
+          )}
+          <div className="flex-1 space-y-2">
+            <p className="text-xs font-bold text-white">
+              {permission === 'denied'
+                ? 'Notifications bloquées sur cet appareil'
+                : permission === 'unsupported'
+                ? 'Notifications non supportées sur cet appareil'
+                : 'Activez les notifications Vibe'}
+            </p>
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              {permission === 'denied'
+                ? 'Pour les réactiver, autorisez les notifications pour ce site dans les réglages de votre navigateur.'
+                : permission === 'unsupported'
+                ? 'Votre navigateur ne prend pas encore en charge les notifications système.'
+                : 'Recevez les likes, réponses, abonnements et messages en direct sur votre appareil.'}
+            </p>
+            {(permission === 'default' || permission === 'denied') && (
+              <button
+                onClick={handleEnableNotifications}
+                disabled={isRequestingPermission || permission === 'denied'}
+                className="mt-1 py-2 px-4 rounded-full bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors disabled:opacity-40 flex items-center gap-2"
+              >
+                {isRequestingPermission && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <Bell className="w-3.5 h-3.5" />
+                <span>
+                  {permission === 'denied'
+                    ? 'Bloqué — modifiez les réglages navigateur'
+                    : isRequestingPermission
+                    ? 'Demande en cours…'
+                    : 'Autoriser les notifications'}
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Filter Tabs */}
-      <div className="flex border-b border-zinc-800 bg-zinc-950">
-        {(['all', 'verified', 'mentions'] as const).map((f) => (
+      <div className="flex border-b border-zinc-800 bg-zinc-950 mt-4">
+        {[
+          { id: 'all', label: 'Toutes' },
+          { id: 'likes', label: `J'aime (${likesCount})` },
+          { id: 'mentions', label: 'Mentions' },
+          { id: 'verified', label: 'Vérifiés' },
+        ].map((t) => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
+            key={t.id}
+            onClick={() => setFilter(t.id as any)}
             className={`flex-1 py-3 text-xs font-semibold uppercase tracking-wider relative transition-colors ${
-              filter === f ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
+              filter === t.id ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
             }`}
           >
-            <span>{f === 'all' ? 'Toutes' : f === 'verified' ? 'Vérifiés' : 'Mentions'}</span>
-            {filter === f && (
+            <span>{t.label}</span>
+            {filter === t.id && (
               <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
             )}
           </button>
         ))}
       </div>
 
-      {/* Notification Stream */}
-      <div className="divide-y divide-zinc-900">
-        {filteredNotifications.map((notif) => (
-          <div
-            key={notif.id}
-            className={`p-4 flex gap-3.5 items-start hover:bg-zinc-950/60 transition-colors ${
-              !notif.is_read ? 'bg-zinc-950/40' : ''
-            }`}
-          >
-            <div className="mt-1">{getIcon(notif.type)}</div>
+      {/* Notification Stream, groupée par jour */}
+      {isLoading && (
+        <div className="p-16 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
+          <Loader2 className="w-6 h-6 animate-spin text-zinc-500" />
+          <span>Chargement…</span>
+        </div>
+      )}
 
-            <div className="flex-1 space-y-1">
-              <div className="flex items-center gap-2">
-                {notif.actor_avatar_url && (
-                  <img
-                    src={notif.actor_avatar_url}
-                    alt={notif.actor_username || 'user'}
-                    className="w-6 h-6 rounded-full object-cover border border-zinc-800"
-                  />
-                )}
-                {notif.actor_username && (
-                  <span className="text-xs font-bold text-white">@{notif.actor_username}</span>
-                )}
-                <span className="text-xs text-zinc-300">{notif.message}</span>
+      {!isLoading && (
+        <>
+          {grouped.map((group) => (
+            <div key={group.label}>
+              <div className="px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-600 bg-zinc-950/80 sticky top-[60px] backdrop-blur-md">
+                {group.label}
               </div>
+              <div className="divide-y divide-zinc-900">
+                {group.items.map((notif) => (
+                  <div
+                    key={notif.id}
+                    onClick={() => handleNotificationClick(notif)}
+                    className={`p-4 flex gap-3.5 items-start hover:bg-zinc-950 transition-colors cursor-pointer ${
+                      !notif.is_read ? 'bg-zinc-950/60 border-l-2 border-rose-500' : ''
+                    }`}
+                  >
+                    <div className="mt-1 shrink-0">{getIcon(notif.type)}</div>
 
-              <span className="text-[11px] text-zinc-600 block font-mono">
-                {new Date(notif.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </span>
+                    <div className="flex-1 space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <div
+                          onClick={(e) => {
+                            if (notif.actor_username) {
+                              e.stopPropagation();
+                              navigate(`/@${notif.actor_username}`);
+                            }
+                          }}
+                        >
+                          <ProfileAvatar
+                            src={notif.actor_avatar_url}
+                            alt={notif.actor_username || 'user'}
+                            fallbackName={notif.actor_username}
+                            size="xs"
+                            className="border border-zinc-800"
+                          />
+                        </div>
+                        {notif.actor_username && (
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/@${notif.actor_username}`);
+                            }}
+                            className="text-xs font-bold text-white hover:underline cursor-pointer flex items-center gap-1"
+                          >
+                            <span>@{notif.actor_username}</span>
+                            <VerifiedBadge isVerified={Boolean((notif as any).actor_verified)} size="xs" />
+                          </span>
+                        )}
+                        <span className="text-xs text-zinc-300">{notif.message}</span>
+                      </div>
+
+                      <span className="text-[11px] text-zinc-600 block font-mono">
+                        {new Date(notif.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+
+                    {!notif.is_read && <div className="w-2 h-2 rounded-full bg-rose-500 mt-1.5 shrink-0" />}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
 
-        {!isLoading && filteredNotifications.length === 0 && (
-          <div className="p-16 text-center text-zinc-500 text-xs space-y-2">
-            <Bell className="w-6 h-6 mx-auto text-zinc-600" />
-            <p className="font-semibold text-zinc-400">Aucune notification pour le moment</p>
-            <p className="text-[11px] text-zinc-600">Vos likes, repartages et mentions apparaîtront ici.</p>
-          </div>
-        )}
-      </div>
+          {filteredNotifications.length === 0 && (
+            <div className="p-16 text-center text-zinc-500 text-xs space-y-2">
+              <Bell className="w-6 h-6 mx-auto text-zinc-600" />
+              <p className="font-semibold text-zinc-400">
+                {filter === 'likes'
+                  ? "Aucune mention J'aime pour le moment"
+                  : filter === 'mentions'
+                  ? 'Aucune mention pour le moment'
+                  : 'Aucune notification pour le moment'}
+              </p>
+              <p className="text-[11px] text-zinc-600">Vos likes, repartages et mentions apparaîtront ici dès leur réception.</p>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 };
+export default NotificationsPage;

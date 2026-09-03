@@ -19,12 +19,15 @@ import { useAuth } from '../../context/AuthContext';
 import { ApiService } from '../../services/api';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { NotificationService } from '../../services/notificationService';
+import { ProfileAvatar } from '../common/ProfileAvatar';
 
 interface PostComposerProps {
   onPostCreated: () => void;
   placeholder?: string;
   isModal?: boolean;
   onClose?: () => void;
+  initialContent?: string;
+  initialMediaUrl?: string;
 }
 
 interface UploadedMedia {
@@ -39,10 +42,14 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   placeholder = "Quoi de neuf sur Vibe ?",
   isModal = false,
   onClose,
+  initialContent,
+  initialMediaUrl,
 }) => {
   const { user, profile } = useAuth();
-  const [content, setContent] = useState('');
-  const [mediaList, setMediaList] = useState<UploadedMedia[]>([]);
+  const [content, setContent] = useState(initialContent || '');
+  const [mediaList, setMediaList] = useState<UploadedMedia[]>(
+    initialMediaUrl ? [{ url: initialMediaUrl, media_type: 'image' }] : []
+  );
   const [isUploading, setIsUploading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -148,9 +155,13 @@ export const PostComposer: React.FC<PostComposerProps> = ({
         media_type: m.media_type === 'video' ? 'video/mp4' : 'image/jpeg',
       }));
 
-      await ApiService.createPost(content.trim(), primaryMedia, mediaAssets);
+      const res = await ApiService.createPost(content.trim(), primaryMedia, mediaAssets);
       NotificationService.notifyPostPublished(content.trim());
       window.dispatchEvent(new CustomEvent('vibe:post_updated'));
+      // Insertion optimiste : le fil affiche le post immédiatement, sans recharger
+      if (res?.post) {
+        window.dispatchEvent(new CustomEvent('vibe:feed_refresh', { detail: { post: res.post } }));
+      }
       setContent('');
       setMediaList([]);
       onPostCreated();
@@ -164,7 +175,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     }
   };
 
-  const avatarSrc = profile?.avatarUrl || user?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80';
+  const avatarSrc = profile?.avatarUrl || user?.avatar_url || null;
 
   return (
     <div className={`p-4 border-b border-zinc-800 bg-black ${isModal ? 'border-none p-4' : ''} select-none relative`}>
@@ -176,10 +187,12 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       )}
 
       <div className="flex gap-3">
-        <img
+        <ProfileAvatar
           src={avatarSrc}
           alt="Avatar"
-          className="w-10 h-10 rounded-full object-cover border border-zinc-800 shrink-0"
+          fallbackName={user?.username}
+          size="md"
+          className="border border-zinc-800 shrink-0"
         />
 
         <div className="flex-1 space-y-3 relative">
@@ -255,7 +268,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                       ? 'bg-red-500 text-white animate-pulse'
                       : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
                   }`}
-                  title={isListening ? 'Arrêter la dictée' : 'Dicter le post'}
+                  title={isListening ? 'Arrêter la dictée' : 'Dicter la vibe'}
                 >
                   {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                 </button>
@@ -271,10 +284,11 @@ export const PostComposer: React.FC<PostComposerProps> = ({
               <button
                 onClick={handleSubmit}
                 disabled={(!content.trim() && mediaList.length === 0) || isSubmitting || isUploading}
-                className="py-2 px-5 rounded-full bg-white text-black font-bold text-xs hover:bg-zinc-200 transition-all flex items-center gap-1.5 shadow-lg disabled:opacity-40"
+                style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
+                className="py-2 px-5 rounded-full bg-white text-black font-bold text-xs hover:brightness-90 transition-all flex items-center gap-1.5 shadow-lg disabled:opacity-40"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>Publier</span>
+                <span>Poster une vibe</span>
               </button>
             </div>
           </div>

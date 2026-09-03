@@ -20,6 +20,7 @@ interface AuthContextType {
   logout: () => void;
   refreshQuotas: () => Promise<void>;
   updateUserAvatar: (avatarUrl: string) => Promise<void>;
+  updateUser: (partial: Partial<User>) => void;
   refreshProfile: () => Promise<void>;
 }
 
@@ -48,12 +49,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(data.profile);
       setQuotas(data.quotas);
     } catch (err: any) {
-      console.warn('[AuthContext] Session expirée ou non autorisée:', err.message);
-      ApiService.removeToken();
-      setToken(null);
-      setUser(null);
-      setProfile(null);
-      setQuotas(null);
+      // On ne déconnecte que sur une vraie invalidation (401).
+      // Une erreur réseau ou un 500 ponctuel ne doit pas détruire la session.
+      if (err?.status === 401) {
+        console.warn('[AuthContext] Session expirée ou non autorisée:', err.message);
+        ApiService.removeToken();
+        setToken(null);
+        setUser(null);
+        setProfile(null);
+        setQuotas(null);
+      } else {
+        console.warn('[AuthContext] Erreur transitoire de session (session conservée):', err?.message);
+      }
       throw err;
     } finally {
       setIsLoadingSession(false);
@@ -67,16 +74,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {}
   };
 
+  const updateUser = (partial: Partial<User>) => {
+    setUser((prev) => (prev ? { ...prev, ...partial } : prev));
+  };
+
   const refreshProfile = async () => {
-    if (user?.username) {
-      try {
-        const data = await ApiService.getProfile(user.username);
-        setProfile(data.profile);
-        if (data.profile.avatarUrl) {
-          setUser((prev) => (prev ? { ...prev, avatar_url: data.profile.avatarUrl } : null));
-        }
-      } catch {}
-    }
+    try {
+      // Passer par /me (JWT) évite tout problème de username périmé après renommage
+      const data = await ApiService.getCurrentUser();
+      setUser(data.user);
+      setProfile(data.profile);
+      setQuotas(data.quotas);
+    } catch {}
   };
 
   const updateUserAvatar = async (avatarUrl: string) => {
@@ -121,6 +130,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         refreshQuotas,
         updateUserAvatar,
+        updateUser,
         refreshProfile,
       }}
     >

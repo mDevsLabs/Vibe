@@ -112,6 +112,10 @@ export interface DMConversation {
   last_message_content?: string;
   last_message_at: string;
   unread_count?: number;
+  /** Nom personnalisé donné à la conversation (par le compte courant) */
+  custom_name?: string | null;
+  /** Partenaire bloqué par le compte courant */
+  is_blocked?: boolean;
 }
 
 export interface NotificationItem {
@@ -120,7 +124,7 @@ export interface NotificationItem {
   actor_id?: string;
   actor_username?: string;
   actor_avatar_url?: string;
-  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system';
+  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction';
   post_id?: string;
   message: string;
   is_read: boolean;
@@ -161,4 +165,7 @@ export interface UserSettings {
   two_factor_auth?: boolean;
   age_restriction_enabled: boolean;
   theme_preference: string;
+  mai_auto_approve_tools?: boolean;
+  accent_color?: string;
+  font_size?: 'small' | 'medium' | 'large';
 }

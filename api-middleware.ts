@@ -43,6 +43,25 @@ export function registerMiddleware(app: Hono) {
     }
 
     const isPublicRoute =
+      path === "/" ||
+      path === "/api" ||
+      path === "/api/" ||
+      path === "/v1" ||
+      path === "/v1/" ||
+      path === "/vibe" ||
+      path === "/vibe/" ||
+      path === "/api/vibe" ||
+      path === "/api/vibe/" ||
+      path.startsWith("/v1/feed") ||
+      path.startsWith("/api/vibe/feed") ||
+      path.startsWith("/vibe/feed") ||
+      path === "/feed" ||
+      path.startsWith("/v1/posts") ||
+      path.startsWith("/api/vibe/posts") ||
+      path.startsWith("/v1/trends") ||
+      path.startsWith("/api/vibe/trends") ||
+      path.startsWith("/v1/profiles") ||
+      path.startsWith("/api/vibe/profiles") ||
       path === "/v1/models" ||
       path === "/models" ||
       path === "/v1beta/models" ||

@@ -1,7 +1,7 @@
 {
   "name": "@mdevs/vibe",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
     "lucide-react": "^1.39.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {

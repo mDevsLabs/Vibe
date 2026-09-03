@@ -18,7 +18,10 @@ import {
   Copy,
   Check,
   Edit2,
-  Share2
+  Share2,
+  ShieldCheck,
+  ShieldAlert,
+  XCircle
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { ApiService } from '../services/api';
@@ -33,9 +36,12 @@ interface ChatMessage {
   toolExecuted?: any;
   modelUsed?: string;
   time: string;
+  requiresApproval?: boolean;
 }
 
 const DEFAULT_MODELS = [
+  { id: 'openrouter/free', name: 'mAI Auto Free', description: 'Sélection automatique du meilleur modèle gratuit actif', provider: 'mDevsLabs' },
+  { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
   { id: 'mai-1.5-apex', name: 'mAI 1.5 Apex', description: 'Modèle IA d\'élite mAI — Raisonnement profond & Vision', provider: 'mDevsLabs' },
   { id: 'mai-1.5-light', name: 'mAI 1.5 Light', description: 'Modèle agile mAI ultra-rapide', provider: 'mDevsLabs' },
   { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Vitesse instantanée et compréhension multimodale', provider: 'Google' },
@@ -47,19 +53,17 @@ const DEFAULT_MODELS = [
 
 export const MAIStudioPage: React.FC = () => {
   const { user, quotas, refreshQuotas } = useAuth();
-  const [selectedModel, setSelectedModel] = useState<string>('mai-1.5-apex');
+  const [selectedModel, setSelectedModel] = useState<string>('openrouter/free');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string; description: string; provider?: string }>>(DEFAULT_MODELS);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      sender: 'mai',
-      content: `Bonjour @${user?.username || 'utilisateur'} ! Je suis mAI. Posez-moi des questions, générez des images ou utilisez les commandes avec @ ou / (ex: /image, /search, /trends, /stats, /quotas...).`,
-      time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [promptInput, setPromptInput] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Approbation des outils sensibles : l'IA doit demander l'accord de
+  // l'utilisateur, sauf si l'auto-approbation a été activée en paramètre.
+  const [pendingTool, setPendingTool] = useState<{ name: string; args: any } | null>(null);
+  const [autoApprove, setAutoApprove] = useState<boolean>(false);
+  const [isApproving, setIsApproving] = useState(false);
 
   // Autocomplete state
   const [autocompleteTrigger, setAutocompleteTrigger] = useState<'/' | '@' | null>(null);
@@ -73,7 +77,13 @@ export const MAIStudioPage: React.FC = () => {
       try {
         const res = await ApiService.getModels();
         if (res.models && res.models.length > 0) {
-          setAvailableModels(res.models);
+          const list = [...res.models];
+          const lagunaIdx = list.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
+          if (lagunaIdx > 0) {
+            const [laguna] = list.splice(lagunaIdx, 1);
+            list.unshift(laguna);
+          }
+          setAvailableModels(list);
         }
       } catch {}
     };
@@ -83,6 +93,23 @@ export const MAIStudioPage: React.FC = () => {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Charger le réglage d'auto-approbation des outils mAI
+  useEffect(() => {
+    ApiService.getSettings()
+      .then((res) => setAutoApprove(Boolean(res?.settings?.mai_auto_approve_tools)))
+      .catch(() => {});
+  }, []);
+
+  const toggleAutoApprove = async () => {
+    const next = !autoApprove;
+    setAutoApprove(next);
+    try {
+      await ApiService.updateSettings({ mai_auto_approve_tools: next });
+    } catch {
+      setAutoApprove(!next);
+    }
+  };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const text = e.target.value;
@@ -139,8 +166,12 @@ export const MAIStudioPage: React.FC = () => {
         toolExecuted: res.toolExecuted,
         modelUsed: res.modelUsed || selectedModel,
         time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        requiresApproval: Boolean(res.requiresApproval),
       };
       setMessages((prev) => [...prev, maiMsg]);
+      if (res.requiresApproval && res.pendingTool) {
+        setPendingTool(res.pendingTool);
+      }
       refreshQuotas();
     } catch (err: any) {
       const errorMsg: ChatMessage = {
@@ -155,6 +186,43 @@ export const MAIStudioPage: React.FC = () => {
     }
   };
 
+  const handleApproveTool = async (approved: boolean) => {
+    if (!pendingTool || isApproving) return;
+    setIsApproving(true);
+    const tool = pendingTool;
+    setPendingTool(null);
+
+    const pushMaiMsg = (content: string, toolExecuted?: any) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 2).toString(),
+          sender: 'mai',
+          content,
+          toolExecuted,
+          modelUsed: selectedModel,
+          time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+    };
+
+    if (!approved) {
+      pushMaiMsg(`🚫 Très bien, je n'exécute pas l'outil « ${tool.name} ». Dites-moi si je peux faire autre chose pour vous.`);
+      setIsApproving(false);
+      return;
+    }
+
+    try {
+      const res = await ApiService.executeMAITool(tool.name, tool.args, selectedModel);
+      pushMaiMsg(res.reply, res.toolExecuted);
+      refreshQuotas();
+    } catch (err: any) {
+      pushMaiMsg(`⚠️ Erreur lors de l'exécution de « ${tool.name} » : ${err.message || 'réessayez plus tard.'}`);
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
   const handleCopyText = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -166,17 +234,15 @@ export const MAIStudioPage: React.FC = () => {
     inputRef.current?.focus();
   };
 
-  const handlePublishAsPost = async (content: string, imageUrl?: string) => {
-    try {
-      await ApiService.createPost(content, imageUrl);
-      alert('✨ Publication publiée avec succès sur votre profil Vibe !');
-    } catch (err: any) {
-      alert(`Erreur publication : ${err.message}`);
-    }
+  const handlePublishAsPost = (content: string, imageUrl?: string) => {
+    // Préremplit le composer Vibe — l'utilisateur valide la publication lui-même
+    window.dispatchEvent(
+      new CustomEvent('vibe:open_composer', { detail: { content, imageUrl } })
+    );
   };
 
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black flex flex-col pb-20 select-none">
+    <div className="flex-1 h-screen border-r border-zinc-800 bg-black flex flex-col select-none">
       {/* Top Header */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -184,9 +250,8 @@ export const MAIStudioPage: React.FC = () => {
             <Sparkles className="w-5 h-5 text-black" />
           </div>
           <div>
-            <h1 className="text-base font-bold text-white tracking-tight flex items-center gap-1.5">
-              <span>mAI Hub</span>
-              <CheckCircle className="w-3.5 h-3.5 text-white fill-white" />
+            <h1 className="text-base font-bold text-white tracking-tight">
+              <span>mAI</span>
             </h1>
             <p className="text-xs text-zinc-400">Assistant IA unifié & modèles intelligents</p>
           </div>
@@ -199,6 +264,16 @@ export const MAIStudioPage: React.FC = () => {
             selectedModelId={selectedModel}
             onSelectModel={setSelectedModel}
           />
+
+          <button
+            onClick={toggleAutoApprove}
+            title={autoApprove ? 'Auto-approbation des outils mAI activée' : 'Approbation manuelle des outils mAI'}
+            className={`p-2 rounded-full transition-colors ${
+              autoApprove ? 'text-amber-400 bg-amber-400/10' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+            }`}
+          >
+            {autoApprove ? <ShieldAlert className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
+          </button>
 
           <button
             onClick={refreshQuotas}
@@ -227,8 +302,34 @@ export const MAIStudioPage: React.FC = () => {
         </div>
       )}
 
+      {/* Bannière utilisateur */}
+      <div className="mx-4 mt-3 p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-zinc-900 via-zinc-900/80 to-zinc-950 border border-zinc-800 shadow-xl flex items-center justify-between gap-4 animate-fadeIn">
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className="w-10 h-10 rounded-2xl bg-white text-black flex items-center justify-center font-black shrink-0 shadow-md">
+            <Sparkles className="w-5 h-5 text-black" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-sm sm:text-base font-bold text-white tracking-tight truncate">
+              Bienvenue, <span className="text-white font-black">@{user?.username || 'utilisateur'}</span> !
+            </h2>
+            <p className="text-xs text-zinc-400 truncate">
+              Assistant mAI configuré sur Laguna XS 2.1 — Posez vos questions ou utilisez les commandes @ et /.
+            </p>
+          </div>
+        </div>
+      </div>
+
       {/* Chat Messages Log */}
-      <div className="flex-1 p-4 space-y-4 overflow-y-auto max-h-[calc(100vh-230px)]">
+      <div className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto">
+        {messages.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-500 space-y-2">
+            <Sparkles className="w-8 h-8 text-zinc-600 animate-pulse" />
+            <p className="text-sm font-medium text-zinc-400">Comment puis-je vous aider aujourd'hui ?</p>
+            <p className="text-xs text-zinc-600 max-w-sm">
+              Posez une question, ou tapez <span className="font-mono text-zinc-400">/image</span> pour créer un visuel, <span className="font-mono text-zinc-400">/search</span> pour chercher sur le web.
+            </p>
+          </div>
+        )}
         {messages.map((m) => {
           const isMe = m.sender === 'user';
           const isCopied = copiedId === m.id;
@@ -255,6 +356,36 @@ export const MAIStudioPage: React.FC = () => {
                 <div className="whitespace-pre-wrap leading-relaxed space-y-2">
                   {m.content}
                 </div>
+
+                {/* Panneau d'approbation utilisateur pour les outils sensibles */}
+                {m.requiresApproval && pendingTool && (
+                  <div className="mt-3 p-3 rounded-2xl bg-zinc-900 border border-amber-500/40 space-y-2">
+                    <p className="text-[11px] font-mono text-amber-300 uppercase tracking-wide">
+                      🔐 Outil sensible : {pendingTool.name}
+                    </p>
+                    <pre className="text-[10px] text-zinc-400 whitespace-pre-wrap break-all max-h-24 overflow-y-auto">
+                      {JSON.stringify(pendingTool.args, null, 2)}
+                    </pre>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleApproveTool(true)}
+                        disabled={isApproving}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50"
+                      >
+                        {isApproving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                        Approuver
+                      </button>
+                      <button
+                        onClick={() => handleApproveTool(false)}
+                        disabled={isApproving}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-bold hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                        Refuser
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Rich Tool Execution Display */}
                 {m.toolExecuted?.result?.result?.imageUrl && (

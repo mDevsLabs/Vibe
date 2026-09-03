@@ -6,6 +6,10 @@ interface VibeLogoProps {
   showText?: boolean;
 }
 
+/**
+ * Logo Vibe — version arrondie (cercle doux) avec halo coloré.
+ * Utilisé dans la sidebar, le header d'accueil et la modale d'authentification.
+ */
 export const VibeLogo: React.FC<VibeLogoProps> = ({
   className = '',
   size = 36,
@@ -15,18 +19,18 @@ export const VibeLogo: React.FC<VibeLogoProps> = ({
     <div className={`flex items-center gap-2.5 ${className}`}>
       <div
         style={{ width: size, height: size }}
-        className="relative flex items-center justify-center rounded-2xl bg-black overflow-hidden shadow-lg shadow-black/40 shrink-0 hover:scale-105 transition-transform"
+        className="relative flex items-center justify-center rounded-full overflow-hidden shadow-lg shadow-black/40 ring-1 ring-white/20 shrink-0 hover:scale-105 transition-transform"
       >
         <img
           src="/logo.png"
           alt="mAI Vibe Logo"
-          className="w-full h-full object-contain filter drop-shadow-md"
+          className="w-full h-full object-cover"
         />
       </div>
       {showText && (
         <span className="font-extrabold text-xl tracking-tight text-white flex items-center gap-1">
           <span>Vibe</span>
-          <span className="text-[10px] font-mono font-normal px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">mAI</span>
+          <span className="text-[10px] font-mono font-normal px-1.5 py-0.5 rounded-full bg-zinc-800 text-zinc-400">mAI</span>
         </span>
       )}
     </div>

@@ -15,6 +15,14 @@ export default defineConfig({
         target: 'https://mai.val.run',
         changeOrigin: true,
       },
+      '/v1': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/vibe': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
       '/login': {
         target: 'https://mai.val.run',
         changeOrigin: true,
@@ -32,6 +40,30 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/resend-code': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/models': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/chat': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/speech': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/images': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/upload': {
+        target: 'https://mai.val.run',
+        changeOrigin: true,
+      },
+      '/logout': {
         target: 'https://mai.val.run',
         changeOrigin: true,
       },

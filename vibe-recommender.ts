@@ -25,6 +25,8 @@ export interface PostCandidate {
   isVerifiedAuthor?: boolean;
   semanticSimilarity?: number;
   isFollowedAuthor?: boolean;
+  /** Affinité mesurée 0..1 : interactions passées de l'utilisateur avec cet auteur. */
+  affinity?: number;
   candidateTopic?: string;
   candidateSentiment?: number;
   toxicityScore?: number;
@@ -76,8 +78,11 @@ export class HybridRecommender {
     const velocityScore = Math.min(1.0, (rawEngagements / Math.max(0.5, ageInHours)) / 8.0);
     const semanticScore = candidate.semanticSimilarity ?? 0.6;
 
-    // Proximité sociale : abonnement à l'auteur
-    const graphProximityScore = candidate.isFollowedAuthor ? 1.0 : 0.2;
+    // Proximité sociale : abonnement + affinité mesurée (historique d'interactions)
+    const affinity = Math.max(0, Math.min(1, candidate.affinity || 0));
+    const graphProximityScore = candidate.isFollowedAuthor
+      ? 0.7 + 0.3 * affinity
+      : 0.2 + 0.5 * affinity;
 
     // Facteur de sécurité & toxicité
     const toxicity = candidate.toxicityScore || 0;

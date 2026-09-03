@@ -38,6 +38,7 @@ interface MessageItem {
 }
 
 const DEFAULT_MODELS: AIModel[] = [
+  { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
   { id: 'mai-1.5-apex', name: 'mAI 1.5 Apex', description: 'Modèle IA d\'élite mAI — Raisonnement profond & Vision', provider: 'mDevsLabs' },
   { id: 'mai-1.5-light', name: 'mAI 1.5 Light', description: 'Modèle agile mAI ultra-rapide', provider: 'mDevsLabs' },
   { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Vitesse instantanée et compréhension multimodale', provider: 'Google' },
@@ -53,16 +54,9 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   onPostCreated,
 }) => {
   const { user, quotas, refreshQuotas } = useAuth();
-  const [selectedModel, setSelectedModel] = useState<string>('mai-1.5-apex');
+  const [selectedModel, setSelectedModel] = useState<string>('poolside/laguna-xs-2.1:free');
   const [availableModels, setAvailableModels] = useState<AIModel[]>(DEFAULT_MODELS);
-  const [messages, setMessages] = useState<MessageItem[]>([
-    {
-      id: '1',
-      sender: 'assistant',
-      content: `Bonjour @${user?.username || 'vous'} ! Je suis mAI. Utilisez @ ou / pour exécuter des outils réels (ex: /image, /search, /trends, /stats, /quotas...). Comment puis-je vous aider ?`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    },
-  ]);
+  const [messages, setMessages] = useState<MessageItem[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -71,7 +65,13 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
       try {
         const res = await ApiService.getModels();
         if (res?.models && res.models.length > 0) {
-          setAvailableModels(res.models);
+          const list = [...res.models];
+          const lagunaIdx = list.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
+          if (lagunaIdx > 0) {
+            const [laguna] = list.splice(lagunaIdx, 1);
+            list.unshift(laguna);
+          }
+          setAvailableModels(list);
         }
       } catch {}
     };
@@ -234,8 +234,32 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
           </div>
         </div>
 
+        {/* Bannière utilisateur */}
+        <div className="mx-3 mt-3 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center gap-3 animate-fadeIn">
+          <div className="w-8 h-8 rounded-xl bg-white text-black flex items-center justify-center font-black shrink-0">
+            <Sparkles className="w-4 h-4 text-black" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-white truncate">
+              Bienvenue, @{user?.username || 'utilisateur'} !
+            </div>
+            <div className="text-[10px] text-zinc-400 truncate">
+              Laguna XS 2.1 sélectionné par défaut.
+            </div>
+          </div>
+        </div>
+
         {/* Messages Container */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center text-center p-6 text-zinc-500 space-y-2">
+              <Sparkles className="w-6 h-6 text-zinc-600 animate-pulse" />
+              <p className="text-xs font-medium text-zinc-400">Prêt à répondre à vos requêtes.</p>
+              <p className="text-[11px] text-zinc-600 max-w-xs">
+                Tapez votre question ou utilisez les commandes @ ou /.
+              </p>
+            </div>
+          )}
           {messages.map((msg) => (
             <div
               key={msg.id}

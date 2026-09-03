@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, Sparkles, ArrowRight } from 'lucide-react';
+import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { VibeLogo } from '../components/layout/VibeLogo';
@@ -48,23 +48,49 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         if (!email.trim() || !username.trim() || !password.trim()) {
           throw new Error('Tous les champs sont requis.');
         }
-        const res = await ApiService.register(email.trim(), username.trim(), password);
-        if (res.status === 'verification_required') {
+        const res: any = await ApiService.register(email.trim(), username.trim(), password);
+        if (res?.token) {
+          // Inscription directe (sans OTP côté serveur)
+          await loginWithToken(res.token);
+          if (onClose) onClose();
+          return;
+        }
+        if (res?.status === 'verification_required') {
           setStep('otp');
           setNoticeMessage(`Un code de vérification a été envoyé à ${email}.`);
+        } else {
+          throw new Error(res?.error || 'Réponse inattendue du serveur.');
         }
       } else {
         if (!email.trim() || !password.trim()) {
           throw new Error('Identifiant et mot de passe requis.');
         }
-        const res = await ApiService.login(email.trim(), password);
-        if (res.status === 'verification_required') {
+        const res: any = await ApiService.login(email.trim(), password);
+        if (res?.email) {
+          setEmail(res.email);
+        }
+        if (res?.token) {
+          // Connexion directe (sans OTP côté serveur)
+          await loginWithToken(res.token);
+          if (onClose) onClose();
+          return;
+        }
+        if (res?.status === 'verification_required') {
           setStep('otp');
-          setNoticeMessage(`Un code de connexion a été envoyé à votre adresse e-mail.`);
+          setNoticeMessage('Un code de connexion a été envoyé à votre adresse e-mail.');
+        } else if (res?.blocked) {
+          throw new Error('Ce compte a été suspendu. Contactez le support.');
+        } else {
+          throw new Error(res?.error || 'Réponse inattendue du serveur.');
         }
       }
     } catch (err: any) {
-      setError(err.message || 'Erreur lors de la requête.');
+      const msg = err.message || 'Erreur lors de la requête.';
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+        setError('Erreur de connexion réseau/CORS avec le serveur. Si vous avez déjà reçu le code par e-mail, vous pouvez le saisir directement ci-dessous.');
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -114,9 +140,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       </div>
 
       {error && (
-        <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-2 animate-fadeIn">
-          <AlertCircle className="w-4 h-4 text-white shrink-0" />
-          <span>{error}</span>
+        <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 space-y-2 animate-fadeIn">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span className="flex-1">{error}</span>
+          </div>
+          {step === 'credentials' && (
+            <div className="pt-2 border-t border-zinc-800 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-zinc-400">Code déjà reçu dans vos e-mails ?</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setStep('otp');
+                  setNoticeMessage('Saisissez le code de connexion à 6 chiffres reçu par e-mail.');
+                }}
+                className="px-2.5 py-1 rounded-lg bg-white text-black font-bold text-xs hover:bg-zinc-200 transition-colors shrink-0"
+              >
+                Saisir mon code →
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -165,7 +209,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           )}
 
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-zinc-300">Mot de passe</label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-zinc-300">Mot de passe</label>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setStep('otp');
+                  setNoticeMessage('Saisissez le code de connexion reçu par e-mail.');
+                }}
+                className="text-[11px] text-zinc-400 hover:text-white transition-colors"
+              >
+                J'ai déjà reçu un code →
+              </button>
+            </div>
             <div className="relative">
               <Lock className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
@@ -193,7 +250,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             className="w-full py-3 rounded-xl bg-white text-black font-bold text-sm hover:bg-zinc-200 transition-all flex items-center justify-center gap-2 shadow-lg disabled:opacity-40"
           >
             {isLoading ? (
-              <span className="animate-pulse">Chargement...</span>
+              <span className="flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>{mode === 'login' ? 'Connexion…' : 'Création du compte…'}</span>
+              </span>
             ) : (
               <>
                 <span>{mode === 'login' ? 'Continuer' : 'S’inscrire'}</span>
@@ -222,6 +282,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         /* Step 2: OTP Verification */
         <form onSubmit={handleOtpSubmit} className="space-y-4">
           <div className="space-y-1">
+            <label className="text-xs font-semibold text-zinc-300">Adresse e-mail du compte</label>
+            <div className="relative">
+              <Mail className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={email}
+                onChange={(e) => setEmail(e.target.value.trim())}
+                placeholder="votre@email.com"
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                required
+              />
+            </div>
+            <p className="text-[11px] text-zinc-500">L'e-mail auquel le code a été expédié.</p>
+          </div>
+
+          <div className="space-y-1">
             <label className="text-xs font-semibold text-zinc-300">Code de vérification (6 chiffres)</label>
             <div className="relative">
               <KeyRound className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -231,7 +307,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 onChange={(e) => setOtpCode(e.target.value.trim())}
                 placeholder="123456"
                 maxLength={6}
-                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white text-center tracking-widest font-mono focus:outline-none focus:border-zinc-500"
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-base text-white text-center tracking-widest font-mono font-bold focus:outline-none focus:border-zinc-500"
                 required
                 autoFocus
               />
@@ -240,13 +316,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           <button
             type="submit"
-            disabled={isLoading || otpCode.length < 4}
+            disabled={isLoading || otpCode.length < 4 || !email.trim()}
             className="w-full py-3 rounded-xl bg-white text-black font-bold text-sm hover:bg-zinc-200 transition-all flex items-center justify-center gap-2 shadow-lg disabled:opacity-40"
           >
             {isLoading ? (
-              <span className="animate-pulse">Validation...</span>
+              <span className="flex items-center gap-2 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Validation et ouverture de la session…</span>
+              </span>
             ) : (
-              <span>Accéder à Vibe</span>
+              <span>Valider le code & Entrer</span>
             )}
           </button>
 
@@ -260,7 +339,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               }}
               className="text-xs text-zinc-400 hover:text-white transition-colors"
             >
-              ← Retour
+              ← Retour à l'étape précédente
             </button>
           </div>
         </form>

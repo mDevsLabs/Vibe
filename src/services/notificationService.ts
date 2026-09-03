@@ -15,6 +15,14 @@ export interface InAppToast {
 
 export class NotificationService {
   /**
+   * État actuel de la permission de notification sur l'appareil
+   */
+  public static getPermissionState(): 'unsupported' | NotificationPermission {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+  }
+
+  /**
    * Demande poliment la permission d'envoyer des notifications sur l'appareil / navigateur
    */
   public static async requestPermission(): Promise<NotificationPermission> {
@@ -24,7 +32,18 @@ export class NotificationService {
 
     if (Notification.permission === 'default') {
       try {
-        return await Notification.requestPermission();
+        const result = await Notification.requestPermission();
+        if (result === 'granted' && 'serviceWorker' in navigator) {
+          // Préparer le service worker pour les notifications même app en arrière-plan
+          try {
+            const reg = await navigator.serviceWorker.ready;
+            await (reg as any).showNotification?.('Vibe 🔔', {
+              body: 'Les notifications sont maintenant activées !',
+              icon: '/logo.png',
+            });
+          } catch {}
+        }
+        return result;
       } catch {
         return 'denied';
       }
@@ -35,20 +54,34 @@ export class NotificationService {
 
   /**
    * Envoie une notification système sur l'appareil / navigateur si accordée
+   * (passe par le service worker si disponible pour un fonctionnement en arrière-plan)
    */
-  public static sendDeviceNotification(title: string, options?: NotificationOptions) {
+  public static async sendDeviceNotification(title: string, options?: NotificationOptions) {
     if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
 
-    if (Notification.permission === 'granted') {
-      try {
-        new Notification(title, {
-          icon: '/logo.png',
-          badge: '/favicon.png',
-          ...options,
-        });
-      } catch (err) {
-        console.warn('[NotificationService] Device notification failed:', err);
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.showNotification(title, {
+            icon: '/logo.png',
+            badge: '/favicon.png',
+            ...options,
+          });
+          return;
+        }
       }
+    } catch {}
+
+    try {
+      new Notification(title, {
+        icon: '/logo.png',
+        badge: '/favicon.png',
+        ...options,
+      });
+    } catch (err) {
+      console.warn('[NotificationService] Device notification failed:', err);
     }
   }
 

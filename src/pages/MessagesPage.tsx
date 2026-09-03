@@ -24,13 +24,24 @@ import {
   AlertCircle,
   X,
   CheckCircle,
-  Play
+  Play,
+  MoreVertical,
+  Smile,
+  Reply,
+  Forward,
+  Copy,
+  Sparkles,
+  Flag,
+  Trash2,
+  Ban,
+  Pencil
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { DirectMessage, DMConversation } from '../types/vibe';
 import { useAuth } from '../context/AuthContext';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { ProfileAvatar } from '../components/common/ProfileAvatar';
 
 interface AttachedMedia {
   url: string;
@@ -50,6 +61,27 @@ export const MessagesPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Interactions par message : réactions, réponse, transfert, copie
+  const REACTION_EMOJIS = ['❤️', '😂', '👍', '😮', '😢', '🔥'];
+  const [actionMenuFor, setActionMenuFor] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<DirectMessage | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<DirectMessage | null>(null);
+  const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
+
+  // Modération : menu conversation, renommage, signalement, blocage, suppression
+  const [convMenuOpen, setConvMenuOpen] = useState(false);
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportReason, setReportReason] = useState('Spam ou arnaque');
+  const [isModerating, setIsModerating] = useState(false);
+
+  const REPORT_REASONS = ['Spam ou arnaque', 'Harcèlement', 'Contenu haineux ou violent', 'Contenu illégal', 'Impersonation', 'Autre'];
+
+  // Conversation active dérivée de la liste (nom personnalisé, état de blocage…)
+  const activeConv = conversations.find((c) => String(c.partner_id) === String(activePartnerId)) || null;
+  const activePartnerBlocked = Boolean(activeConv?.is_blocked);
 
   // New conversation user search
   const [searchQuery, setSearchQuery] = useState('');
@@ -75,7 +107,13 @@ export const MessagesPage: React.FC = () => {
   const fetchConversations = async () => {
     try {
       const res = await ApiService.getConversations();
-      setConversations(res.conversations || []);
+      // Si une conversation est actuellement affichée, son compteur de non lu passe à 0
+      const list = (res.conversations || []).map((c) =>
+        activePartnerId && String(c.partner_id) === String(activePartnerId)
+          ? { ...c, unread_count: 0 }
+          : c
+      );
+      setConversations(list);
     } catch {
       // Ignore
     } finally {
@@ -85,8 +123,25 @@ export const MessagesPage: React.FC = () => {
 
   const fetchMessages = async (partnerId: string | number) => {
     try {
+      // Invalider le cache pour forcer la lecture réelle et fraîche
+      ApiService.invalidateCache(`/v1/dms/messages/${partnerId}`);
       const res = await ApiService.getMessages(partnerId);
       setMessages(res.messages || []);
+
+      // Supprimer immédiatement le point/badge de non lu sur la conversation ouverte
+      setConversations((prev) =>
+        prev.map((c) =>
+          String(c.partner_id) === String(partnerId)
+            ? { ...c, unread_count: 0 }
+            : c
+        )
+      );
+
+      // Invalider le cache des conversations et actualiser les badges globaux
+      ApiService.invalidateCache('/dms/conversations');
+      ApiService.invalidateCache('/unread_count');
+      window.dispatchEvent(new CustomEvent('vibe:unread_updated'));
+
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 50);
@@ -97,12 +152,17 @@ export const MessagesPage: React.FC = () => {
 
   useEffect(() => {
     fetchConversations();
-    const timer = setInterval(() => {
-      if (activePartnerId) {
-        fetchMessages(activePartnerId);
-      }
-      fetchConversations();
-    }, 5000);
+    // Polling adaptatif : 10s avec conversation ouverte, 25s sinon, jamais en arrière-plan
+    let timer: ReturnType<typeof setInterval>;
+    const schedule = () => {
+      clearInterval(timer);
+      timer = setInterval(() => {
+        if (document.hidden) return;
+        if (activePartnerId) fetchMessages(activePartnerId);
+        fetchConversations();
+      }, activePartnerId ? 10000 : 25000);
+    };
+    schedule();
     return () => clearInterval(timer);
   }, [activePartnerId]);
 
@@ -114,9 +174,103 @@ export const MessagesPage: React.FC = () => {
       display_name: conv.partner_display_name,
       avatar_url: conv.partner_avatar_url,
     });
+    // Supprimer immédiatement le badge/point de non lu au clic
+    setConversations((prev) =>
+      prev.map((c) =>
+        String(c.partner_id) === String(conv.partner_id)
+          ? { ...c, unread_count: 0 }
+          : c
+      )
+    );
+    setConvMenuOpen(false);
     setErrorMessage(null);
     setAttachedMediaList([]);
     fetchMessages(conv.partner_id);
+  };
+
+  // ── Modération conversation ──
+  const handleRenameConversation = async () => {
+    if (!activePartnerId || isModerating) return;
+    setIsModerating(true);
+    try {
+      await ApiService.renameConversation(activePartnerId, renameValue);
+      setRenameModalOpen(false);
+      setConvMenuOpen(false);
+      fetchConversations();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Erreur lors du renommage.');
+    } finally {
+      setIsModerating(false);
+    }
+  };
+
+  const handleReportConversation = async () => {
+    if (!activePartnerId || isModerating) return;
+    setIsModerating(true);
+    try {
+      await ApiService.reportConversation(activePartnerId, reportReason);
+      setReportModalOpen(false);
+      setConvMenuOpen(false);
+      setErrorMessage(null);
+      alert('Signalement transmis à la modération. Merci de nous aider à garder Vibe sûr.');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Erreur lors du signalement.');
+    } finally {
+      setIsModerating(false);
+    }
+  };
+
+  const handleBlockPartner = async () => {
+    if (!activePartnerId || isModerating) return;
+    setIsModerating(true);
+    try {
+      if (activePartnerBlocked) {
+        await ApiService.unblockUser(activePartnerId);
+      } else {
+        if (!window.confirm(`Bloquer @${activePartner?.username} ? Cette personne ne pourra plus vous envoyer de messages.`)) {
+          setIsModerating(false);
+          return;
+        }
+        await ApiService.blockUser(activePartnerId);
+      }
+      setConvMenuOpen(false);
+      fetchConversations();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Erreur lors du blocage.');
+    } finally {
+      setIsModerating(false);
+    }
+  };
+
+  const handleDeleteConversation = async () => {
+    if (!activePartnerId || isModerating) return;
+    if (!window.confirm('Supprimer définitivement cette conversation et tous ses messages ?')) return;
+    setIsModerating(true);
+    try {
+      await ApiService.deleteConversation(activePartnerId);
+      setActivePartnerId(null);
+      setActivePartner(null);
+      setMessages([]);
+      setConvMenuOpen(false);
+      fetchConversations();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Erreur lors de la suppression.');
+    } finally {
+      setIsModerating(false);
+    }
+  };
+
+  const handleDeleteMessage = async (m: DirectMessage) => {
+    setActionMenuFor(null);
+    if (!window.confirm('Supprimer ce message ?')) return;
+    const snapshot = messages;
+    setMessages((prev) => prev.filter((x) => x.id !== m.id));
+    try {
+      await ApiService.deleteMessage(String(m.id));
+    } catch (err: any) {
+      setMessages(snapshot);
+      setErrorMessage(err.message || 'Impossible de supprimer le message.');
+    }
   };
 
   const handleSearchUsers = (q: string) => {
@@ -211,7 +365,7 @@ export const MessagesPage: React.FC = () => {
       ? `${messageInput.trim()} ${mediaUrls}`.trim()
       : messageInput.trim();
 
-    if (!textToSend || !activePartnerId || isSending) return;
+    if (!textToSend || !activePartnerId || isSending || activePartnerBlocked) return;
 
     if (isListening) {
       stopListening();
@@ -237,7 +391,8 @@ export const MessagesPage: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      await ApiService.sendMessage(activePartnerId, textToSend);
+      await ApiService.sendMessage(activePartnerId, textToSend, replyTo && !String(replyTo.id).startsWith('temp') ? String(replyTo.id) : undefined);
+      setReplyTo(null);
       fetchMessages(activePartnerId);
       fetchConversations();
     } catch (err: any) {
@@ -246,6 +401,76 @@ export const MessagesPage: React.FC = () => {
     } finally {
       setIsSending(false);
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
+  const handleToggleReaction = async (m: DirectMessage, emoji: string) => {
+    if (String(m.id).startsWith('temp')) return;
+    setActionMenuFor(null);
+    // Mise à jour optimiste
+    setMessages((prev) => prev.map((msg) => {
+      if (msg.id !== m.id) return msg;
+      const reactions: { emoji: string; count: number; mine: boolean }[] = [...((msg as any).reactions || [])];
+      const g = reactions.find((r) => r.emoji === emoji);
+      if (g) {
+        if (g.mine) { g.count -= 1; g.mine = false; if (g.count <= 0) g.count = 0; }
+        else { g.count += 1; g.mine = true; }
+      } else {
+        reactions.push({ emoji, count: 1, mine: true });
+      }
+      return { ...msg, reactions: reactions.filter((r) => r.count > 0) } as any;
+    }));
+    try {
+      await ApiService.reactToMessage(String(m.id), emoji);
+    } catch {
+      fetchMessages(activePartnerId!); // resynchro en cas d'échec
+    }
+  };
+
+  const handleCopyMessage = async (m: DirectMessage) => {
+    setActionMenuFor(null);
+    try {
+      await navigator.clipboard.writeText(m.content);
+      alert('Message copié dans le presse-papiers.');
+    } catch {
+      alert('Impossible de copier le message.');
+    }
+  };
+
+  const handleForwardTo = async (conv: DMConversation) => {
+    if (!forwardingMessage) return;
+    try {
+      await ApiService.sendMessage(conv.partner_id, forwardingMessage.content);
+      setForwardingMessage(null);
+      alert('Message transféré !');
+    } catch (err: any) {
+      alert(err.message || 'Erreur lors du transfert.');
+    }
+  };
+
+  const handleGenerateSuggestion = async () => {
+    if (!activePartnerId || isGeneratingSuggestion) return;
+    if (!messageInput.trim()) {
+      setErrorMessage("Veuillez d'abord écrire un texte dans la bulle de message pour que mAI puisse l'améliorer.");
+      return;
+    }
+    setIsGeneratingSuggestion(true);
+    setErrorMessage(null);
+    try {
+      const res = await ApiService.generateDMReply(activePartnerId, messageInput.trim());
+      if (res?.suggestion) {
+        const clean = res.suggestion
+          .replace(/User Safety:\s*safe\.?/gi, '')
+          .replace(/^User Safety:[^\n]*\n*/gi, '')
+          .trim();
+        if (clean) {
+          setMessageInput(clean);
+        }
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'mAI n’a pas pu améliorer le message.');
+    } finally {
+      setIsGeneratingSuggestion(false);
     }
   };
 
@@ -314,10 +539,12 @@ export const MessagesPage: React.FC = () => {
                   onClick={() => handleStartConversationWith(u)}
                   className="w-full p-2.5 flex items-center gap-3 hover:bg-zinc-900 cursor-pointer transition-colors text-left"
                 >
-                  <img
-                    src={u.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+                  <ProfileAvatar
+                    src={u.avatar_url}
                     alt={u.username}
-                    className="w-9 h-9 rounded-full object-cover border border-zinc-800 shrink-0"
+                    fallbackName={u.username}
+                    size="sm"
+                    className="border border-zinc-800 shrink-0"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
@@ -364,20 +591,28 @@ export const MessagesPage: React.FC = () => {
                     isSelected ? 'bg-zinc-900/90 border-l-2 border-white' : 'hover:bg-zinc-900/40'
                   }`}
                 >
-                  <img
-                    src={conv.partner_avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+                  <ProfileAvatar
+                    src={conv.partner_avatar_url}
                     alt={conv.partner_username}
-                    className="w-11 h-11 rounded-full object-cover border border-zinc-800 shrink-0"
+                    fallbackName={conv.partner_username}
+                    size="md"
+                    className="border border-zinc-800 shrink-0"
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-bold text-white truncate">{conv.partner_display_name || conv.partner_username}</h4>
+                      <h4 className="text-xs font-bold text-white truncate">
+                        {conv.custom_name || conv.partner_display_name || conv.partner_username}
+                        {conv.custom_name && <span className="ml-1 text-[10px] text-zinc-500 font-normal">@{conv.partner_username}</span>}
+                      </h4>
                       <span className="text-[10px] text-zinc-500 font-mono">{formatTime(conv.last_message_at)}</span>
                     </div>
                     <p className="text-xs text-zinc-400 truncate mt-0.5">{conv.last_message_content || 'Nouveau message'}</p>
                   </div>
-                  {Boolean(conv.unread_count && conv.unread_count > 0) && (
-                    <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0">
+                  {conv.is_blocked && (
+                    <span title="Utilisateur bloqué"><Ban className="w-3.5 h-3.5 text-zinc-600 shrink-0" /></span>
+                  )}
+                  {Boolean(conv.unread_count && conv.unread_count > 0 && String(conv.partner_id) !== String(activePartnerId)) && (
+                    <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 animate-pulse">
                       {conv.unread_count}
                     </span>
                   )}
@@ -402,18 +637,72 @@ export const MessagesPage: React.FC = () => {
                   <ArrowLeft className="w-5 h-5" />
                 </button>
 
-                <img
-                  src={activePartner.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+                <ProfileAvatar
+                  src={activePartner.avatar_url}
                   alt="Avatar"
-                  className="w-9 h-9 rounded-full object-cover border border-zinc-800 shrink-0"
+                  fallbackName={activePartner.username}
+                  size="sm"
+                  className="border border-zinc-800 shrink-0"
                 />
                 <div>
                   <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
-                    <span>{activePartner.display_name || activePartner.username}</span>
+                    <span>{activeConv?.custom_name || activePartner.display_name || activePartner.username}</span>
+                    {activeConv?.custom_name && <span className="text-[10px] text-zinc-500 font-normal">(@{activePartner.username})</span>}
                     <VerifiedBadge isVerified={(activePartner as any).is_verified} tier={(activePartner as any).tier} size="xs" />
+                    {activePartnerBlocked && (
+                      <span className="text-[9px] bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                        <Ban className="w-2.5 h-2.5" /> Bloqué
+                      </span>
+                    )}
                   </h3>
                   <span className="text-[11px] text-zinc-500 font-mono">@{activePartner.username}</span>
                 </div>
+              </div>
+
+              {/* Menu modération de la conversation */}
+              <div className="relative">
+                <button
+                  onClick={() => setConvMenuOpen(!convMenuOpen)}
+                  className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+                  title="Options de la conversation"
+                >
+                  <MoreVertical className="w-4 h-4" />
+                </button>
+
+                {convMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-20" onClick={() => setConvMenuOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 w-56 z-30 p-1.5 rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl animate-fadeIn">
+                      <button
+                        onClick={() => { setRenameValue(activeConv?.custom_name || ''); setRenameModalOpen(true); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-zinc-300 hover:text-white hover:bg-zinc-900 text-left"
+                      >
+                        <Pencil className="w-3.5 h-3.5" /> Renommer la conversation
+                      </button>
+                      <button
+                        onClick={handleBlockPartner}
+                        disabled={isModerating}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-zinc-300 hover:text-white hover:bg-zinc-900 text-left disabled:opacity-40"
+                      >
+                        <Ban className="w-3.5 h-3.5" /> {activePartnerBlocked ? 'Débloquer cet utilisateur' : 'Bloquer cet utilisateur'}
+                      </button>
+                      <button
+                        onClick={() => setReportModalOpen(true)}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-amber-400 hover:bg-zinc-900 text-left"
+                      >
+                        <Flag className="w-3.5 h-3.5" /> Signaler la conversation
+                      </button>
+                      <div className="border-t border-zinc-900 my-1" />
+                      <button
+                        onClick={handleDeleteConversation}
+                        disabled={isModerating}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-red-400 hover:bg-zinc-900 text-left disabled:opacity-40"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Supprimer la conversation
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
@@ -422,6 +711,17 @@ export const MessagesPage: React.FC = () => {
               <div className="m-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-2 animate-fadeIn">
                 <AlertCircle className="w-4 h-4 text-white shrink-0" />
                 <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {/* Bandeau utilisateur bloqué */}
+            {activePartnerBlocked && (
+              <div className="m-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 flex items-center gap-2">
+                <Ban className="w-4 h-4 text-red-400 shrink-0" />
+                <span>
+                  Vous avez bloqué <strong>@{activePartner.username}</strong>. Vous ne pouvez plus échanger de messages.
+                  Débloquez-le depuis le menu <strong>⋮</strong> en haut à droite.
+                </span>
               </div>
             )}
 
@@ -435,8 +735,16 @@ export const MessagesPage: React.FC = () => {
 
                 return (
                   <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                    {/* Citation du message auquel on répond */}
+                    {(m as any).reply_to_content && (
+                      <div className={`max-w-[80%] mb-1 pl-2 border-l-2 ${isMe ? 'border-zinc-600' : 'border-zinc-700'}`}>
+                        <p className="text-[10px] font-bold text-zinc-400">@{(m as any).reply_to_username || 'message'}</p>
+                        <p className="text-[10px] text-zinc-500 truncate max-w-[220px]">{(m as any).reply_to_content}</p>
+                      </div>
+                    )}
+
                     <div
-                      className={`max-w-[80%] rounded-2xl p-3 text-xs leading-relaxed ${
+                      className={`max-w-[80%] rounded-2xl p-3 text-xs leading-relaxed relative group ${
                         isMe
                           ? 'bg-white text-black font-medium rounded-tr-sm'
                           : 'bg-zinc-900 border border-zinc-800 text-zinc-200 rounded-tl-sm'
@@ -456,7 +764,65 @@ export const MessagesPage: React.FC = () => {
                           })}
                         </div>
                       )}
+
+                      {/* Bouton menu d'actions */}
+                      <button
+                        onClick={() => setActionMenuFor(actionMenuFor === m.id ? null : m.id)}
+                        className={`absolute -top-2 ${isMe ? '-left-8' : '-right-8'} p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors opacity-60 group-hover:opacity-100`}
+                        title="Actions"
+                      >
+                        <MoreVertical className="w-3.5 h-3.5" />
+                      </button>
                     </div>
+
+                    {/* Menu d'actions */}
+                    {actionMenuFor === m.id && (
+                      <div className={`mt-1 p-1.5 rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl flex flex-col gap-0.5 animate-fadeIn ${isMe ? 'items-end' : 'items-start'}`}>
+                        <div className="flex gap-0.5 p-1">
+                          {REACTION_EMOJIS.map((emoji) => (
+                            <button
+                              key={emoji}
+                              onClick={() => handleToggleReaction(m, emoji)}
+                              className="p-1 rounded-lg hover:bg-zinc-800 text-base transition-transform hover:scale-125"
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="w-full border-t border-zinc-900 my-0.5" />
+                        <button onClick={() => { setReplyTo(m); setActionMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-300 hover:text-white hover:bg-zinc-900">
+                          <Reply className="w-3.5 h-3.5" /> Répondre
+                        </button>
+                        <button onClick={() => { setForwardingMessage(m); setActionMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-300 hover:text-white hover:bg-zinc-900">
+                          <Forward className="w-3.5 h-3.5" /> Transférer
+                        </button>
+                        <button onClick={() => handleCopyMessage(m)} className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-300 hover:text-white hover:bg-zinc-900">
+                          <Copy className="w-3.5 h-3.5" /> Copier le message
+                        </button>
+                        {isMe && !String(m.id).startsWith('temp') && (
+                          <button onClick={() => handleDeleteMessage(m)} className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-red-400 hover:bg-zinc-900">
+                            <Trash2 className="w-3.5 h-3.5" /> Supprimer le message
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Réactions affichées sous la bulle */}
+                    {Array.isArray((m as any).reactions) && (m as any).reactions.length > 0 && (
+                      <div className="flex gap-1 mt-1">
+                        {(m as any).reactions.map((r: { emoji: string; count: number; mine: boolean }) => (
+                          <button
+                            key={r.emoji}
+                            onClick={() => handleToggleReaction(m, r.emoji)}
+                            className={`px-1.5 py-0.5 rounded-full text-[10px] border transition-colors ${
+                              r.mine ? 'bg-sky-500/20 border-sky-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-600'
+                            }`}
+                          >
+                            {r.emoji} {r.count}
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
                     <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500 px-1 font-mono">
                       <span>{formatTime(m.created_at)}</span>
@@ -505,7 +871,25 @@ export const MessagesPage: React.FC = () => {
             )}
 
             {/* Message Input Box */}
-            <form onSubmit={handleSendMessage} className="p-3 border-t border-zinc-800 bg-zinc-950 flex items-center gap-2">
+            <form onSubmit={handleSendMessage} className="p-3 border-t border-zinc-800 bg-zinc-950 space-y-2">
+              {activePartnerBlocked && (
+                <p className="text-center text-[11px] text-zinc-500 py-1">
+                  Utilisateur bloqué — l'envoi de messages est désactivé.
+                </p>
+              )}
+              {/* Aperçu de réponse */}
+              {replyTo && (
+                <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400">
+                  <span className="truncate">
+                    Réponse à <strong className="text-white">@{replyTo.sender_username}</strong> : {replyTo.content.slice(0, 60)}
+                  </span>
+                  <button type="button" onClick={() => setReplyTo(null)} className="text-zinc-500 hover:text-white shrink-0 ml-2">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
               <input
                 type="file"
                 ref={fileInputRef}
@@ -538,22 +922,155 @@ export const MessagesPage: React.FC = () => {
                 </button>
               )}
 
+              {/* Amélioration de message par mAI */}
+              <button
+                type="button"
+                onClick={handleGenerateSuggestion}
+                disabled={isGeneratingSuggestion || !messageInput.trim()}
+                className={`p-2 rounded-full transition-colors ${
+                  !messageInput.trim()
+                    ? 'text-zinc-600 opacity-40 cursor-not-allowed'
+                    : 'text-white hover:bg-zinc-900 cursor-pointer shadow-sm'
+                }`}
+                title={
+                  !messageInput.trim()
+                    ? "Veuillez d'abord écrire un texte dans la bulle pour que mAI l'améliore"
+                    : "Améliorer mon message avec mAI"
+                }
+              >
+                {isGeneratingSuggestion ? <Loader2 className="w-4 h-4 animate-spin text-white" /> : <Sparkles className="w-4 h-4" />}
+              </button>
+
               <input
                 type="text"
                 value={messageInput}
                 onChange={(e) => setMessageInput(e.target.value)}
-                placeholder="Écrire un message..."
+                placeholder={isListening ? 'Parlez, dictée en cours...' : 'Écrire un message...'}
                 className="flex-1 py-2 px-3.5 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
               />
 
               <button
                 type="submit"
-                disabled={(!messageInput.trim() && attachedMediaList.length === 0) || isSending}
-                className="p-2.5 rounded-full bg-white text-black hover:bg-zinc-200 transition-all disabled:opacity-40"
+                disabled={activePartnerBlocked || (!messageInput.trim() && attachedMediaList.length === 0) || isSending}
+                style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
+                className="p-2.5 rounded-full bg-white text-black hover:brightness-90 transition-all disabled:opacity-40"
               >
                 <Send className="w-4 h-4" />
               </button>
+              </div>
             </form>
+
+            {/* Modale de renommage de conversation */}
+            {renameModalOpen && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setRenameModalOpen(false)}>
+                <div className="w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-3xl p-5 space-y-3 animate-scaleUp" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-sm font-bold text-white">Renommer la conversation</h3>
+                  <input
+                    type="text"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    maxLength={50}
+                    placeholder={activePartner?.display_name || activePartner?.username}
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                    autoFocus
+                  />
+                  <p className="text-[10px] text-zinc-500">Laissez vide pour réafficher le nom d'origine. Ce nom n'est visible que par vous.</p>
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => setRenameModalOpen(false)} className="py-2 px-4 rounded-full bg-zinc-900 text-zinc-300 text-[11px] font-semibold hover:bg-zinc-800">
+                      Annuler
+                    </button>
+                    <button
+                      onClick={handleRenameConversation}
+                      disabled={isModerating}
+                      style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
+                      className="py-2 px-4 rounded-full bg-white text-black text-[11px] font-bold hover:brightness-90 disabled:opacity-40"
+                    >
+                      {isModerating ? '...' : 'Enregistrer'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Modale de signalement */}
+            {reportModalOpen && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setReportModalOpen(false)}>
+                <div className="w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-3xl p-5 space-y-3 animate-scaleUp" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center gap-2">
+                    <Flag className="w-4 h-4 text-amber-400" />
+                    <h3 className="text-sm font-bold text-white">Signaler @{activePartner?.username}</h3>
+                  </div>
+                  <div className="space-y-1.5">
+                    {REPORT_REASONS.map((reason) => (
+                      <button
+                        key={reason}
+                        onClick={() => setReportReason(reason)}
+                        className={`w-full text-left px-3 py-2 rounded-xl text-[11px] border transition-colors ${
+                          reportReason === reason
+                            ? 'bg-zinc-900 border-white text-white font-bold'
+                            : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {reason}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => setReportModalOpen(false)} className="py-2 px-4 rounded-full bg-zinc-900 text-zinc-300 text-[11px] font-semibold hover:bg-zinc-800">
+                      Annuler
+                    </button>
+                    <button
+                      onClick={handleReportConversation}
+                      disabled={isModerating}
+                      className="py-2 px-4 rounded-full bg-amber-500 text-black text-[11px] font-bold hover:bg-amber-400 disabled:opacity-40"
+                    >
+                      {isModerating ? '...' : 'Signaler'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Modale de transfert */}
+            {forwardingMessage && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setForwardingMessage(null)}>
+                <div className="w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-3xl p-4 space-y-3 animate-scaleUp" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white">Transférer le message</h3>
+                    <button onClick={() => setForwardingMessage(null)} className="p-1 rounded-full text-zinc-400 hover:text-white">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-500 p-2 rounded-xl bg-zinc-900 border border-zinc-800 truncate">
+                    {forwardingMessage.content.slice(0, 120)}
+                  </p>
+                  <div className="max-h-64 overflow-y-auto divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+                    {conversations.length === 0 && (
+                      <p className="p-4 text-center text-xs text-zinc-500">Aucune conversation disponible.</p>
+                    )}
+                    {conversations.map((conv) => (
+                      <button
+                        key={conv.partner_id}
+                        onClick={() => handleForwardTo(conv)}
+                        className="w-full p-3 flex items-center gap-3 hover:bg-zinc-900 transition-colors text-left"
+                      >
+                        <ProfileAvatar
+                          src={conv.partner_avatar_url}
+                          alt={conv.partner_username}
+                          fallbackName={conv.partner_username}
+                          size="sm"
+                          className="border border-zinc-800 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">{conv.partner_display_name || conv.partner_username}</p>
+                          <p className="text-[10px] text-zinc-500 font-mono">@{conv.partner_username}</p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-zinc-500 space-y-3">

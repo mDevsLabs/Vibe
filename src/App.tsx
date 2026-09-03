@@ -1,37 +1,133 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — ROOT APPLICATION (src/App.tsx)
- * Master Layout, Responsive Mobile Bottom Bar, Routing & Modals
+ * Router (react-router-dom), Lazy Pages, Layout, Modals & Toasts
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
+import { BrowserRouter, Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { Sidebar } from './components/layout/Sidebar';
+import { MobileNav } from './components/layout/MobileNav';
 import { MAIDrawer } from './components/layout/MAIDrawer';
 import { PostComposer } from './components/feed/PostComposer';
 import { HomePage } from './pages/HomePage';
-import { PostDetailPage } from './pages/PostDetailPage';
-import { ExplorePage } from './pages/ExplorePage';
-import { MessagesPage } from './pages/MessagesPage';
-import { NotificationsPage } from './pages/NotificationsPage';
-import { MAIStudioPage } from './pages/MAIStudioPage';
-import { ProfilePage } from './pages/ProfilePage';
-import { SettingsPage } from './pages/SettingsPage';
 import { AuthModal } from './pages/AuthModal';
+import { PageSkeleton } from './components/common/PageSkeleton';
 import { Post } from './types/vibe';
-import { Home, Compass, Sparkles, PenSquare, X, CheckCircle } from 'lucide-react';
+import { X, CheckCircle } from 'lucide-react';
 import { InAppToast } from './services/notificationService';
+import { ApiService } from './services/api';
+
+// Code splitting : chaque page est chargée à la demande
+const PostDetailPage = lazy(() =>
+  import('./pages/PostDetailPage').then((m) => ({ default: m.PostDetailPage }))
+);
+const ExplorePage = lazy(() =>
+  import('./pages/ExplorePage').then((m) => ({ default: m.ExplorePage }))
+);
+const MessagesPage = lazy(() =>
+  import('./pages/MessagesPage').then((m) => ({ default: m.MessagesPage }))
+);
+const NotificationsPage = lazy(() =>
+  import('./pages/NotificationsPage').then((m) => ({ default: m.NotificationsPage }))
+);
+const MAIStudioPage = lazy(() =>
+  import('./pages/MAIStudioPage').then((m) => ({ default: m.MAIStudioPage }))
+);
+const ProfilePage = lazy(() =>
+  import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage }))
+);
+const SettingsPage = lazy(() =>
+  import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage }))
+);
+
+// Restauration de la position de scroll par route (deep-link => haut de page)
+const scrollPositions = new Map<string, number>();
+
+function ScrollManager() {
+  const location = useLocation();
+  const frame = useRef(0);
+
+  useEffect(() => {
+    const saved = scrollPositions.get(location.key);
+    if (saved != null) {
+      requestAnimationFrame(() => window.scrollTo(0, saved));
+      return;
+    }
+    // Nouvelle navigation : remonte en haut après le rendu
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => window.scrollTo(0, 0));
+  }, [location.key]);
+
+  useEffect(() => {
+    const onScroll = () => scrollPositions.set(location.key, window.scrollY);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      scrollPositions.set(location.key, window.scrollY);
+    };
+  }, [location.key]);
+
+  return null;
+}
 
 function VibeApp() {
   const { user, profile, isAuthenticated } = useAuth();
-  const [currentTab, setCurrentTab] = useState<string>('home');
-  const [activePostDetailId, setActivePostDetailId] = useState<string | null>(null);
-  const [activeProfileUsername, setActiveProfileUsername] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
   const [isComposerModalOpen, setIsComposerModalOpen] = useState(false);
+  const [composerDraft, setComposerDraft] = useState<{ content?: string; imageUrl?: string } | null>(null);
   const [toasts, setToasts] = useState<InAppToast[]>([]);
+  // Compteurs non lus pour les badges de la navigation
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
+
+  const refreshUnreadCounts = useCallback(async () => {
+    if (document.hidden) return;
+    try {
+      const counts = await ApiService.getUnreadCounts();
+      setUnreadNotifications(counts.unread_notifications || 0);
+      setUnreadMessages(counts.unread_messages || 0);
+    } catch {
+      // Fallback : endpoint léger indisponible → comptage local
+      try {
+        const [notifRes, convRes] = await Promise.all([
+          ApiService.getNotifications(),
+          ApiService.getConversations(),
+        ]);
+        setUnreadNotifications((notifRes?.notifications || []).filter((n) => !n.is_read).length);
+        setUnreadMessages(
+          (convRes?.conversations || []).reduce((sum, conv) => sum + (conv.unread_count || 0), 0)
+        );
+      } catch {}
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    refreshUnreadCounts();
+    const interval = setInterval(refreshUnreadCounts, 15000);
+    const handleUnread = () => refreshUnreadCounts();
+    window.addEventListener('vibe:unread_updated', handleUnread);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('vibe:unread_updated', handleUnread);
+    };
+  }, [isAuthenticated, location.pathname, refreshUnreadCounts]);
+
+  // Ouverture du composer préremplie (ex : « Publier sur Vibe » depuis mAI)
+  useEffect(() => {
+    const handleOpenComposer = (e: any) => {
+      setComposerDraft(e?.detail || null);
+      setIsComposerModalOpen(true);
+    };
+    window.addEventListener('vibe:open_composer', handleOpenComposer);
+    return () => window.removeEventListener('vibe:open_composer', handleOpenComposer);
+  }, []);
 
   useEffect(() => {
     const handleToast = (e: any) => {
@@ -49,75 +145,15 @@ function VibeApp() {
     };
   }, []);
 
-  const handleOpenThread = (post: Post) => {
-    setActivePostDetailId(post.id);
-    setCurrentTab('post-detail');
-  };
-
-  const handleOpenProfile = (username: string) => {
-    setActiveProfileUsername(username);
-    setCurrentTab('profile');
-  };
-
-  const renderActiveView = () => {
-    switch (currentTab) {
-      case 'home':
-        return (
-          <HomePage
-            onOpenThread={handleOpenThread}
-            onOpenProfile={handleOpenProfile}
-          />
-        );
-      case 'post-detail':
-        return activePostDetailId ? (
-          <PostDetailPage
-            postId={activePostDetailId}
-            onBack={() => setCurrentTab('home')}
-            onOpenProfile={handleOpenProfile}
-          />
-        ) : (
-          <HomePage
-            onOpenThread={handleOpenThread}
-            onOpenProfile={handleOpenProfile}
-          />
-        );
-      case 'explore':
-        return (
-          <ExplorePage
-            onOpenProfile={handleOpenProfile}
-            onOpenThread={handleOpenThread}
-          />
-        );
-      case 'messages':
-        return <MessagesPage />;
-      case 'notifications':
-        return <NotificationsPage />;
-      case 'mai':
-      case 'mai-studio':
-        return <MAIStudioPage />;
-      case 'profile':
-        return (
-          <ProfilePage
-            username={activeProfileUsername || undefined}
-            onBack={() => {
-              setActiveProfileUsername(null);
-              setCurrentTab('home');
-            }}
-            onOpenThread={handleOpenThread}
-            onOpenProfile={handleOpenProfile}
-          />
-        );
-      case 'settings':
-        return <SettingsPage />;
-      default:
-        return (
-          <HomePage
-            onOpenThread={handleOpenThread}
-            onOpenProfile={handleOpenProfile}
-          />
-        );
-    }
-  };
+  // Navigation adossée au routeur — deep-links et bouton retour natifs
+  const handleOpenThread = useCallback(
+    (post: Post) => navigate(`/post/${post.id}`),
+    [navigate]
+  );
+  const handleOpenProfile = useCallback(
+    (username: string) => navigate(`/@${username.replace(/^@/, '')}`),
+    [navigate]
+  );
 
   if (!isAuthenticated) {
     return (
@@ -127,82 +163,55 @@ function VibeApp() {
     );
   }
 
-  const activeAvatar = profile?.avatarUrl || user?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80';
+  const activeAvatar = profile?.avatarUrl || user?.avatar_url || null;
 
   return (
     <div className="min-h-screen bg-black text-white flex justify-center font-sans antialiased selection:bg-white selection:text-black">
+      <ScrollManager />
       <div className="w-full max-w-7xl flex relative">
         {/* Left Navigation Sidebar (Desktop / Tablet) */}
         <Sidebar
-          currentTab={currentTab}
-          setCurrentTab={(tab) => {
-            setActivePostDetailId(null);
-            if (tab !== 'profile') setActiveProfileUsername(null);
-            setCurrentTab(tab);
-          }}
           onOpenComposer={() => setIsComposerModalOpen(true)}
           onToggleMAIDrawer={() => setIsMAIDrawerOpen(!isMAIDrawerOpen)}
+          unreadNotifications={unreadNotifications}
+          unreadMessages={unreadMessages}
         />
 
         {/* Center Main Viewport (Pleine largeur étendue) */}
-        <main className="flex-1 w-full min-h-screen border-r border-zinc-800 pb-16 sm:pb-0">
-          {renderActiveView()}
+        <main className="flex-1 w-full min-h-screen border-r border-zinc-800">
+          <Suspense fallback={<PageSkeleton />}>
+            <Routes>
+              <Route path="/" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
+              <Route path="/explore" element={<ExplorePage onOpenProfile={handleOpenProfile} onOpenThread={handleOpenThread} />} />
+              <Route path="/explore/:tab" element={<ExplorePage onOpenProfile={handleOpenProfile} onOpenThread={handleOpenThread} />} />
+              <Route path="/post/:postId" element={<PostDetailRoute />} />
+              <Route path="/profile" element={<ProfileRoute />} />
+              <Route path="/profile/:username" element={<ProfileRoute />} />
+              <Route path="/messages" element={<MessagesPage />} />
+              <Route path="/notifications" element={<NotificationsPage />} />
+              <Route path="/mai" element={<MAIStudioPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/:username" element={<ProfileRoute />} />
+              <Route path="*" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
+            </Routes>
+          </Suspense>
         </main>
 
-        {/* Mobile Bottom Navigation Bar (Mobile < 640px) */}
-        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-black/90 backdrop-blur-md border-t border-zinc-800 flex justify-around items-center py-2 px-3">
-          <button
-            onClick={() => setCurrentTab('home')}
-            className={`p-2 rounded-full transition-colors ${currentTab === 'home' ? 'text-white font-bold' : 'text-zinc-500'}`}
-            title="Accueil"
-          >
-            <Home className="w-6 h-6" />
-          </button>
-
-          <button
-            onClick={() => setCurrentTab('explore')}
-            className={`p-2 rounded-full transition-colors ${currentTab === 'explore' ? 'text-white font-bold' : 'text-zinc-500'}`}
-            title="Explorer"
-          >
-            <Compass className="w-6 h-6" />
-          </button>
-
-          <button
-            onClick={() => setIsComposerModalOpen(true)}
-            className="p-3 rounded-full bg-white text-black shadow-lg shadow-white/20 active:scale-90 transition-transform"
-            title="Publier"
-          >
-            <PenSquare className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={() => setCurrentTab('mai')}
-            className={`p-2 rounded-full transition-colors ${currentTab === 'mai' ? 'text-white font-bold' : 'text-zinc-500'}`}
-            title="mAI"
-          >
-            <Sparkles className="w-6 h-6" />
-          </button>
-
-          <button
-            onClick={() => setCurrentTab('profile')}
-            className="p-1 rounded-full border border-transparent hover:border-zinc-700 transition-colors"
-            title="Profil"
-          >
-            <img
-              src={activeAvatar}
-              alt="Profil"
-              className="w-7 h-7 rounded-full object-cover border border-zinc-700"
-            />
-          </button>
-        </nav>
+        {/* Mobile Retractable Side Navigation (Liquid Glass) */}
+        <MobileNav
+          onOpenComposer={() => setIsComposerModalOpen(true)}
+          avatarUrl={activeAvatar}
+          unreadNotifications={unreadNotifications}
+          unreadMessages={unreadMessages}
+        />
 
         {/* Retractable mAI Drawer */}
         <MAIDrawer
           isOpen={isMAIDrawerOpen}
           onClose={() => setIsMAIDrawerOpen(false)}
           onPostCreated={() => {
-            if (currentTab === 'home') {
-              setCurrentTab('home');
+            if (location.pathname === '/') {
+              window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
             }
           }}
         />
@@ -212,7 +221,7 @@ function VibeApp() {
           <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 sm:pt-20 bg-black/70 backdrop-blur-sm p-4 animate-fadeIn">
             <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl animate-scaleUp">
               <div className="p-3 border-b border-zinc-800 flex justify-between items-center bg-black/60">
-                <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">Nouvelle publication</span>
+                <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">Poster une vibe</span>
                 <button
                   onClick={() => setIsComposerModalOpen(false)}
                   className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
@@ -221,11 +230,12 @@ function VibeApp() {
                 </button>
               </div>
               <PostComposer
+                initialContent={composerDraft?.content}
+                initialMediaUrl={composerDraft?.imageUrl}
                 onPostCreated={() => {
                   setIsComposerModalOpen(false);
-                  if (currentTab === 'home') {
-                    setCurrentTab('home');
-                  }
+                  setComposerDraft(null);
+                  window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
                 }}
               />
             </div>
@@ -259,11 +269,45 @@ function VibeApp() {
   );
 }
 
+/** Route wrapper : injecte les paramètres d'URL dans les pages à props. */
+function PostDetailRoute() {
+  const { postId } = useParams<{ postId: string }>();
+  return <PostDetailRouteInner postId={postId || ''} />;
+}
+
+function PostDetailRouteInner({ postId }: { postId: string }) {
+  const navigate = useNavigate();
+  return (
+    <PostDetailPage
+      postId={postId}
+      onBack={() => navigate(-1)}
+      onOpenProfile={(username) => navigate(`/@${username}`)}
+    />
+  );
+}
+
+/** Route profil : gère /profile, /profile/:username et /:username (ex: /@username ou /username). */
+function ProfileRoute() {
+  const { username } = useParams<{ username: string }>();
+  const navigate = useNavigate();
+  const cleanUsername = username ? username.replace(/^@/, '') : undefined;
+  return (
+    <ProfilePage
+      username={cleanUsername}
+      onBack={() => navigate(-1)}
+      onOpenThread={(post: Post) => navigate(`/post/${post.id}`)}
+      onOpenProfile={(u: string) => navigate(`/@${u.replace(/^@/, '')}`)}
+    />
+  );
+}
+
 export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <VibeApp />
+        <BrowserRouter>
+          <VibeApp />
+        </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
   );

@@ -22,17 +22,53 @@ import {
   KeyRound,
   Trash2,
   Sparkles,
+  Palette,
+  Type,
   Sun,
   Moon,
   Laptop
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { useTheme } from '../context/ThemeContext';
+import { useTheme, ACCENT_COLORS } from '../context/ThemeContext';
 import { ApiService } from '../services/api';
+import { NotificationService } from '../services/notificationService';
+
+/** Encart indiquant l'état réel de la permission notifications de l'appareil */
+const DevicePermissionHint: React.FC = () => {
+  const [state, setState] = useState<ReturnType<typeof NotificationService.getPermissionState>>('default');
+
+  useEffect(() => {
+    setState(NotificationService.getPermissionState());
+  }, []);
+
+  if (state === 'granted' || state === 'unsupported') return null;
+
+  return (
+    <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between gap-3">
+      <p className="text-[11px] text-zinc-400">
+        {state === 'denied'
+          ? 'Les notifications sont bloquées pour ce site. Modifiez les réglages de votre navigateur pour les réactiver.'
+          : "Les notifications ne sont pas encore autorisées sur cet appareil."}
+      </p>
+      {state === 'default' && (
+        <button
+          type="button"
+          onClick={async () => {
+            const res = await NotificationService.requestPermission();
+            setState(res);
+          }}
+          className="shrink-0 py-1.5 px-3 rounded-full bg-white text-black text-[11px] font-bold hover:bg-zinc-200"
+        >
+          Autoriser
+        </button>
+      )}
+    </div>
+  );
+};
 
 export const SettingsPage: React.FC = () => {
   const { user, logout } = useAuth();
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, accentColor, setAccentColor, fontSize, setFontSize } = useTheme();
 
   // Feed customization
   const [feedDefaultMode, setFeedDefaultMode] = useState<'for_you' | 'stream' | 'trending'>('for_you');
@@ -73,6 +109,12 @@ export const SettingsPage: React.FC = () => {
           setBlurSensitive(s.blur_sensitive_content ?? true);
           setEmailNotifs(s.email_notifications ?? true);
           setPushNotifs(s.push_notifications ?? true);
+          if (s.accent_color && s.accent_color in ACCENT_COLORS) {
+            setAccentColor(s.accent_color as any);
+          }
+          if (s.font_size && ['small', 'medium', 'large'].includes(s.font_size)) {
+            setFontSize(s.font_size as any);
+          }
         }
       } catch {}
     };
@@ -102,6 +144,8 @@ export const SettingsPage: React.FC = () => {
         email_notifications: emailNotifs,
         push_notifications: pushNotifs,
         theme_preference: theme,
+        accent_color: accentColor,
+        font_size: fontSize,
       });
 
       setSavedSuccess(true);
@@ -134,7 +178,7 @@ export const SettingsPage: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20 select-none">
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Header */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4">
         <h1 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
@@ -230,6 +274,72 @@ export const SettingsPage: React.FC = () => {
                   </button>
                 );
               })}
+            </div>
+          </div>
+
+          {/* Section 0b: Personnalisation (accent + taille de texte) */}
+          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+            <div className="flex items-center gap-2 text-white font-bold text-sm">
+              <Palette className="w-4 h-4 text-fuchsia-400" />
+              <span>Personnalisation de l'interface</span>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div className="space-y-2">
+                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                  <Palette className="w-3 h-3" /> Couleur d'accent
+                </label>
+                <p className="text-zinc-500 text-[11px]">Teinte appliquée aux boutons d'action et éléments interactifs clés.</p>
+                <div className="flex flex-wrap gap-2.5">
+                  {(Object.keys(ACCENT_COLORS) as Array<keyof typeof ACCENT_COLORS>).map((key) => {
+                    const c = ACCENT_COLORS[key];
+                    const isSelected = accentColor === key;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setAccentColor(key as any)}
+                        title={c.label}
+                        className={`relative w-9 h-9 rounded-full border-2 transition-all hover:scale-110 ${
+                          isSelected ? 'border-white shadow-lg' : 'border-zinc-700'
+                        }`}
+                        style={{ backgroundColor: c.hex }}
+                      >
+                        {isSelected && (
+                          <Check className="w-4 h-4 text-black stroke-[3] absolute inset-0 m-auto" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-900">
+                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                  <Type className="w-3 h-3" /> Taille du texte
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { id: 'small', label: 'Petite', sample: 'text-[11px]' },
+                    { id: 'medium', label: 'Moyenne', sample: 'text-xs' },
+                    { id: 'large', label: 'Grande', sample: 'text-sm' },
+                  ] as const).map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => setFontSize(s.id as any)}
+                      className={`py-2 px-3 rounded-xl border font-semibold transition-all flex flex-col items-center gap-0.5 ${
+                        fontSize === s.id
+                          ? 'bg-white text-black border-white'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      <span className={s.sample}>Aa</span>
+                      <span className="text-[10px]">{s.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -419,6 +529,8 @@ export const SettingsPage: React.FC = () => {
                   className="w-4 h-4 accent-white cursor-pointer"
                 />
               </div>
+
+              <DevicePermissionHint />
             </div>
           </div>
 

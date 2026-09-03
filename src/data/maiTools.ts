@@ -11,6 +11,16 @@ export interface MAITool {
 
 export const AVAILABLE_MAI_TOOLS: MAITool[] = [
   {
+    id: 'suggest_post',
+    name: 'Idées de Posts',
+    slashCommand: '/inspire',
+    mentionTag: '@inspire',
+    description: 'Génère des idées de publications originales sur un thème (sans les publier)',
+    iconName: 'Lightbulb',
+    category: 'creation',
+    samplePrompt: '/inspire sur les voyages spatiaux et le futur',
+  },
+  {
     id: 'generate_image',
     name: 'Génération d’Image',
     slashCommand: '/image',
@@ -109,5 +119,25 @@ export const AVAILABLE_MAI_TOOLS: MAITool[] = [
     iconName: 'Zap',
     category: 'account',
     samplePrompt: '/quotas',
+  },
+  {
+    id: 'follow_user',
+    name: 'Suivre un Compte',
+    slashCommand: '/follow',
+    mentionTag: '@follow',
+    description: 'Suit un compte Vibe désigné par son @username (avec votre approbation)',
+    iconName: 'UserPlus',
+    category: 'account',
+    samplePrompt: '/follow @mai_officiel',
+  },
+  {
+    id: 'get_notifications',
+    name: 'Mes Notifications',
+    slashCommand: '/notifications',
+    mentionTag: '@notifications',
+    description: 'Affiche vos dernières notifications (likes, réponses, follows)',
+    iconName: 'Bell',
+    category: 'account',
+    samplePrompt: '/notifications',
   },
 ];

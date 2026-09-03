@@ -5,14 +5,19 @@
  * ============================================================================
  */
 
-const CACHE_NAME = 'vibe-pwa-v1';
+const CACHE_NAME = 'vibe-pwa-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
   '/logo.png',
-  '/favicon.svg',
+  '/favicon.ico',
   '/favicon.png',
+  '/favicon-32x32.png',
+  '/favicon-16x16.png',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
 ];
 
 // Install

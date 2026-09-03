@@ -10,6 +10,21 @@ import { extractToken, getDb, verifyToken, getWeekData } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 
 export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMultiFn) {
+  // Colonnes de personnalisation ajoutées paresseusement (idempotent)
+  let personalizationColumnsReady = false;
+  const ensurePersonalizationColumns = async () => {
+    if (personalizationColumnsReady) return;
+    try {
+      const sql = getDb();
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS accent_color TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS font_size TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`;
+      personalizationColumnsReady = true;
+    } catch (err) {
+      console.warn("[vibe-settings] ensurePersonalizationColumns skipped:", (err as any)?.message);
+    }
+  };
+
   // 1. USAGE LOGGING
   const handleLogUsage = async (c: any) => {
     try {
@@ -74,6 +89,7 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
 
       const body = await c.req.json();
       const sql = getDb();
+      await ensurePersonalizationColumns();
 
       await sql`
         INSERT INTO user_settings (
@@ -81,7 +97,7 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           notify_on_repost, notify_on_reply, notify_on_dm, content_filter_level,
           blur_sensitive_content, age_restriction_enabled, allow_dms, dms_enabled,
           feed_default_mode, hide_reposts, blocked_keywords, two_factor_auth, allow_mentions,
-          theme_preference
+          theme_preference, accent_color, font_size, mai_auto_approve_tools
         )
         VALUES (
           ${userId},
@@ -101,7 +117,10 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.blocked_keywords || []},
           ${body.two_factor_auth ?? false},
           ${body.allow_mentions || 'everyone'},
-          ${body.theme_preference || 'light'}
+          ${body.theme_preference || 'light'},
+          ${body.accent_color || null},
+          ${body.font_size || null},
+          ${body.mai_auto_approve_tools ?? false}
         )
         ON CONFLICT (user_id)
         DO UPDATE SET
@@ -122,6 +141,9 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           two_factor_auth = EXCLUDED.two_factor_auth,
           allow_mentions = EXCLUDED.allow_mentions,
           theme_preference = COALESCE(EXCLUDED.theme_preference, user_settings.theme_preference),
+          accent_color = COALESCE(EXCLUDED.accent_color, user_settings.accent_color),
+          font_size = COALESCE(EXCLUDED.font_size, user_settings.font_size),
+          mai_auto_approve_tools = EXCLUDED.mai_auto_approve_tools,
           updated_at = NOW()
       `;
 

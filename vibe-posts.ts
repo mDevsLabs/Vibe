@@ -6,7 +6,7 @@
  */
 
 import type { Hono } from "npm:hono@4";
-import { extractToken, getDb, verifyToken } from "./config.ts";
+import { extractToken, getDb, rateLimit, verifyToken } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 import { HybridRecommender } from "./vibe-recommender.ts";
 import { MAIAgentFleet } from "./vibe-mai-fleet.ts";
@@ -27,53 +27,89 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
 
       const sql = getDb();
 
+      // Pagination par curseur : soit keyset chronologique "ts|id", soit
+      // rang dans une liste scorée "rank:N" (trending / pour vous).
+      const PAGE_SIZE = 20;
+      const rawCursor = (c.req.query("cursor") || "").trim();
+      const parseKeyset = (cur: string): { ts: string; id: string } | null => {
+        const [ts, id] = cur.split("|");
+        if (!ts || !id || Number.isNaN(Date.parse(ts))) return null;
+        return { ts, id };
+      };
+      const parseRank = (cur: string): number | null => {
+        const m = cur.match(/^rank:(\d+)$/);
+        return m ? Number(m[1]) : null;
+      };
+
+      const fetchMedia = async (posts: any[]) => {
+        if (!posts || posts.length === 0) return;
+        try {
+          const ids = posts.map((p) => p.id);
+          const media = await sql`SELECT post_id, url, media_type, alt_text FROM media_assets WHERE post_id = ANY(${ids}::uuid[])`;
+          const byPost: Record<string, any[]> = {};
+          for (const m of media) {
+            const key = String(m.post_id);
+            (byPost[key] ||= []).push({ url: m.url, media_type: m.media_type, alt_text: m.alt_text });
+          }
+          for (const p of posts) p.media_assets = byPost[String(p.id)] || [];
+        } catch (mediaErr) {
+          console.warn("[Vibe API] Erreur fetchMedia:", mediaErr);
+          for (const p of posts) p.media_assets ||= [];
+        }
+      };
+
       if (type === "trending") {
         const tag = (c.req.query("tag") || "").trim();
+        const rankOffset = rawCursor ? parseRank(rawCursor) ?? 0 : 0;
         let posts;
         if (tag) {
           posts = await sql`
             SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
                    (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : false} as has_liked,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : false} as has_reposted,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : false} as has_bookmarked
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : sql`FALSE`} as has_liked,
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : sql`FALSE`} as has_reposted,
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : sql`FALSE`} as has_bookmarked
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
             WHERE p.visibility = 'public' AND p.content ILIKE ('%' || ${tag} || '%')
             ORDER BY (p.likes_count * 3 + p.reposts_count * 2 + p.replies_count * 2) DESC, p.published_at DESC
-            LIMIT 50
+            LIMIT ${PAGE_SIZE} OFFSET ${rankOffset}
           `;
         } else {
           posts = await sql`
             SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
                    (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : false} as has_liked,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : false} as has_reposted,
-                   ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : false} as has_bookmarked
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : sql`FALSE`} as has_liked,
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : sql`FALSE`} as has_reposted,
+                   ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : sql`FALSE`} as has_bookmarked
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
             WHERE p.visibility = 'public'
             ORDER BY (p.likes_count * 3 + p.reposts_count * 2 + p.replies_count * 2) DESC, p.published_at DESC
-            LIMIT 50
+            LIMIT ${PAGE_SIZE} OFFSET ${rankOffset}
           `;
         }
 
-        for (const post of posts) {
-          const media = await sql`SELECT url, media_type, alt_text FROM media_assets WHERE post_id = ${post.id}::uuid`;
-          post.media_assets = media;
-        }
+        await fetchMedia(posts);
 
         return c.json({
           mode: "trending",
           title: tag ? `Tendances : ${tag}` : "Tendances Populaires",
           count: posts.length,
+          nextCursor: posts.length === PAGE_SIZE ? `rank:${rankOffset + PAGE_SIZE}` : null,
           posts,
         });
       }
 
       if (type === "stream" || type === "following") {
+        // Keyset pagination : (published_at, id) < (ts, id) — stable et indexable
+        const keyset = rawCursor ? parseKeyset(rawCursor) : null;
+        const cursorFilter = (uid: number | null) =>
+          keyset
+            ? sql`AND (p.published_at, p.id) < (${keyset.ts}::timestamptz, ${keyset.id}::uuid)`
+            : sql``;
         let posts;
         if (currentUserId) {
           posts = await sql`
@@ -89,9 +125,9 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
               p.author_id = ${currentUserId}
               OR p.author_id IN (SELECT following_id FROM follows WHERE follower_id = ${currentUserId})
               OR p.visibility = 'public'
-            )
-            ORDER BY p.published_at DESC
-            LIMIT 40
+            ) ${cursorFilter(currentUserId)}
+            ORDER BY p.published_at DESC, p.id DESC
+            LIMIT ${PAGE_SIZE}
           `;
         } else {
           posts = await sql`
@@ -101,37 +137,54 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
-            WHERE p.visibility = 'public'
-            ORDER BY p.published_at DESC
-            LIMIT 40
+            WHERE p.visibility = 'public' ${cursorFilter(currentUserId)}
+            ORDER BY p.published_at DESC, p.id DESC
+            LIMIT ${PAGE_SIZE}
           `;
         }
 
-        for (const post of posts) {
-          const media = await sql`SELECT url, media_type, alt_text FROM media_assets WHERE post_id = ${post.id}::uuid`;
-          post.media_assets = media;
-        }
+        await fetchMedia(posts);
 
+        const last = posts[posts.length - 1];
         return c.json({
           mode: "stream",
           title: "Abonnements",
           count: posts.length,
+          nextCursor:
+            posts.length === PAGE_SIZE && last
+              ? `${new Date(last.published_at).toISOString()}|${last.id}`
+              : null,
           posts,
         });
       }
 
       // "Pour Vous" — Algorithme de recommandation sophistiqué
       let followedAuthorIds = new Set<number>();
+      let affinityByAuthor = new Map<number, number>();
       let blockedKeywords: string[] = [];
       let shouldHideReposts = false;
 
       if (currentUserId) {
         try {
-          const [followsRows, settingsRows] = await Promise.all([
+          const [followsRows, settingsRows, affinityRows] = await Promise.all([
             sql`SELECT following_id FROM follows WHERE follower_id = ${currentUserId}`,
             sql`SELECT blocked_keywords, hide_reposts FROM user_settings WHERE user_id = ${currentUserId} LIMIT 1`,
+            // Affinité réelle : historique d'interactions de l'utilisateur par auteur
+            sql`
+              SELECT p.author_id, COUNT(*)::int AS n
+              FROM post_interactions pi
+              JOIN posts p ON p.id = pi.post_id
+              WHERE pi.user_id = ${currentUserId}
+                AND pi.interaction_type IN ('like', 'repost')
+              GROUP BY p.author_id
+              ORDER BY n DESC
+              LIMIT 50
+            `,
           ]);
           followedAuthorIds = new Set(followsRows.map((f: any) => Number(f.following_id)));
+          for (const row of affinityRows) {
+            affinityByAuthor.set(Number(row.author_id), Math.min(1, Number(row.n) / 5));
+          }
           if (settingsRows[0]) {
             blockedKeywords = (settingsRows[0].blocked_keywords || []).map((k: string) => k.toLowerCase().trim());
             shouldHideReposts = Boolean(settingsRows[0].hide_reposts);
@@ -142,25 +195,23 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       const rawCandidates = await sql`
         SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
                (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
-               ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : false} as has_liked,
-               ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : false} as has_reposted,
-               ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : false} as has_bookmarked
+               ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : sql`FALSE`} as has_liked,
+               ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'repost') > 0` : sql`FALSE`} as has_reposted,
+               ${currentUserId ? sql`(SELECT COUNT(*) FROM bookmarks WHERE post_id = p.id AND user_id = ${currentUserId}) > 0` : sql`FALSE`} as has_bookmarked
         FROM posts p
         JOIN users u ON u.id = p.author_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
         WHERE p.visibility = 'public'
         ORDER BY p.published_at DESC
-        LIMIT 100
+        LIMIT 300
       `;
 
-      for (const post of rawCandidates) {
-        const media = await sql`SELECT url, media_type, alt_text FROM media_assets WHERE post_id = ${post.id}::uuid`;
-        post.media_assets = media;
-      }
+      await fetchMedia(rawCandidates);
 
       // Filtrage selon les paramètres utilisateur
       const filteredCandidates = rawCandidates.filter((post: any) => {
         if (shouldHideReposts && post.is_repost) return false;
+        if (currentUserId && Number(post.author_id) === currentUserId) return true;
         if (blockedKeywords.length > 0) {
           const contentLc = (post.content || '').toLowerCase();
           const hasBlocked = blockedKeywords.some((kw: string) => kw && contentLc.includes(kw));
@@ -181,6 +232,7 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
           hasMedia: Array.isArray(post.media_assets) && post.media_assets.length > 0,
           isVerifiedAuthor: Boolean(post.is_verified),
           isFollowedAuthor: followedAuthorIds.has(Number(post.author_id)),
+          affinity: affinityByAuthor.get(Number(post.author_id)) || 0,
           semanticSimilarity: 0.75,
           candidateSentiment: Number(post.sentiment_score || 0.5),
           toxicityScore: Number(post.toxicity_score || 0),
@@ -196,11 +248,35 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
 
       scoredPosts.sort((a: any, b: any) => b.recommendationScore - a.recommendationScore);
 
+      // Diversification : max 3 posts consécutifs du même auteur
+      const diversified: any[] = [];
+      let streakAuthor: number | null = null;
+      let streakLen = 0;
+      const deferred: any[] = [];
+      for (const post of scoredPosts) {
+        const authorId = Number(post.author_id);
+        if (authorId === streakAuthor && streakLen >= 3) {
+          deferred.push(post);
+          continue;
+        }
+        if (authorId === streakAuthor) streakLen += 1;
+        else {
+          streakAuthor = authorId;
+          streakLen = 1;
+        }
+        diversified.push(post);
+      }
+      const ranked = diversified.concat(deferred);
+
+      const rankOffset = rawCursor ? parseRank(rawCursor) ?? 0 : 0;
+      const page = ranked.slice(rankOffset, rankOffset + PAGE_SIZE);
+
       return c.json({
         mode: "for_you",
         title: "Pour Vous",
-        count: scoredPosts.length,
-        posts: scoredPosts.slice(0, 40),
+        count: page.length,
+        nextCursor: page.length === PAGE_SIZE && rankOffset + PAGE_SIZE < ranked.length ? `rank:${rankOffset + PAGE_SIZE}` : null,
+        posts: page,
       });
     } catch (err: any) {
       console.error("[Vibe API] Error fetching feed:", err);
@@ -269,7 +345,17 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
           const formatted = data.count > 1000
             ? `${(data.count / 1000).toFixed(1)}k`
             : `${data.count}`;
-          return { tag, posts: `${formatted} publications`, post_count: data.count, score };
+          const lc = tag.toLowerCase();
+          const category = lc.includes('mai') || lc.includes('ia') || lc.includes('ai') || lc.includes('llm') || lc.includes('gpt')
+            ? 'Intelligence Artificielle'
+            : lc.includes('tech') || lc.includes('dev') || lc.includes('code') || lc.includes('web')
+            ? 'Technologie'
+            : lc.includes('design') || lc.includes('art') || lc.includes('photo') || lc.includes('ux')
+            ? 'Design & Création'
+            : lc.includes('vibe') || lc.includes('social') || lc.includes('community')
+            ? 'Communauté'
+            : 'Tendances';
+          return { tag, category, posts: `${formatted} publications`, post_count: data.count, score };
         })
         .sort((a, b) => b.score - a.score)
         .slice(0, 10);
@@ -290,6 +376,11 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+
+      // Anti-spam : 10 posts / 5 min / utilisateur
+      if (!rateLimit(`post:${userId}`, 10, 5 * 60_000)) {
+        return c.json({ error: "Vous publiez trop vite. Patientez un instant." }, 429);
+      }
 
       const body = await c.req.json();
       const { content, format = "micro_text", visibility = "public", media_url, media_assets = [] } = body;
@@ -312,18 +403,76 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
 
       const newPost = inserted[0];
 
-      if (media_url) {
-        await sql`
-          INSERT INTO media_assets (owner_id, post_id, url, media_type)
-          VALUES (${userId}, ${newPost.id}::uuid, ${media_url}, 'image/jpeg')
-        `;
+      // Inférence du type MIME à partir de l'extension du fichier
+      const inferMediaType = (url: string, fallback = "image/jpeg"): string => {
+        try {
+          const cleanUrl = url.split("?")[0].split("#")[0];
+          const ext = cleanUrl.split(".").pop()?.toLowerCase();
+          switch (ext) {
+            case "png": return "image/png";
+            case "webp": return "image/webp";
+            case "gif": return "image/gif";
+            case "svg": return "image/svg+xml";
+            case "jpg":
+            case "jpeg": return "image/jpeg";
+            case "mp4": return "video/mp4";
+            case "webm": return "video/webm";
+            case "mov": return "video/quicktime";
+            case "mp3": return "audio/mpeg";
+            case "wav": return "audio/wav";
+            case "ogg": return "audio/ogg";
+            default: return fallback;
+          }
+        } catch {
+          return fallback;
+        }
+      };
+
+      // Normalisation des médias (support de media_url et de la liste media_assets)
+      const normalizedMedia: Array<{
+        url: string;
+        media_type: string;
+        file_size_bytes: number;
+        alt_text: string;
+      }> = [];
+
+      if (Array.isArray(media_assets)) {
+        for (const media of media_assets) {
+          if (!media || !media.url) continue;
+          const urlStr = String(media.url).trim();
+          if (!urlStr) continue;
+          normalizedMedia.push({
+            url: urlStr,
+            media_type: media.media_type || media.type || inferMediaType(urlStr),
+            file_size_bytes: Math.max(0, Math.round(Number(media.file_size_bytes ?? media.size ?? media.file_size ?? 0) || 0)),
+            alt_text: media.alt_text || media.alt || "",
+          });
+        }
       }
 
-      for (const media of media_assets) {
-        await sql`
+      if (media_url && typeof media_url === "string" && media_url.trim()) {
+        const trimmedUrl = media_url.trim();
+        const alreadyPresent = normalizedMedia.some((m) => m.url === trimmedUrl);
+        if (!alreadyPresent) {
+          normalizedMedia.unshift({
+            url: trimmedUrl,
+            media_type: body.media_type || inferMediaType(trimmedUrl),
+            file_size_bytes: Math.max(0, Math.round(Number(body.file_size_bytes ?? body.size ?? body.file_size ?? 0) || 0)),
+            alt_text: body.alt_text || "",
+          });
+        }
+      }
+
+      const insertedMediaList: any[] = [];
+      for (const media of normalizedMedia) {
+        const res = await sql`
           INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text)
-          VALUES (${userId}, ${newPost.id}::uuid, ${media.url}, ${media.media_type || "image/jpeg"}, ${media.size || 1024}, ${media.alt_text || ""})
+          VALUES (${userId}, ${newPost.id}::uuid, ${media.url}, ${media.media_type}, ${media.file_size_bytes}, ${media.alt_text})
+          RETURNING id, url, media_type, file_size_bytes, alt_text
         `;
+        if (res && res[0]) {
+          insertedMediaList.push(res[0]);
+        }
       }
 
       await sql`UPDATE profiles SET posts_count = posts_count + 1 WHERE user_id = ${userId}`;
@@ -338,7 +487,7 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
           username: userRow[0]?.username,
           display_name: profileRow[0]?.display_name || userRow[0]?.username,
           avatar_url: profileRow[0]?.avatar_url,
-          media_assets: media_url ? [{ url: media_url }] : [],
+          media_assets: insertedMediaList,
         },
       }, 201);
     } catch (err: any) {
@@ -431,6 +580,12 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       if (existing.length > 0) {
         await sql`DELETE FROM post_interactions WHERE id = ${existing[0].id}::uuid`;
         await sql`UPDATE posts SET likes_count = GREATEST(0, likes_count - 1) WHERE id = ${postId}::uuid`;
+        try {
+          await sql`
+            DELETE FROM notifications
+            WHERE actor_id = ${userId} AND post_id = ${postId}::uuid AND type = 'like'
+          `;
+        } catch {}
         return c.json({ success: true, liked: false });
       } else {
         await sql`
@@ -440,14 +595,20 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
         `;
         await sql`UPDATE posts SET likes_count = likes_count + 1 WHERE id = ${postId}::uuid`;
 
-        const postAuthor = await sql`SELECT author_id FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-        if (postAuthor.length > 0 && postAuthor[0].author_id !== userId) {
+        const postAuthor = await sql`SELECT author_id, content FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+        if (postAuthor.length > 0) {
+          const recipientId = Number(postAuthor[0].author_id);
+          const rawContent = (postAuthor[0].content || "").trim();
+          const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
+          const msg = recipientId === userId ? `Vous avez aimé votre publication${snippet}` : `a aimé votre publication${snippet}`;
           try {
             await sql`
               INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-              VALUES (${postAuthor[0].author_id}, ${userId}, 'like', ${postId}::uuid, 'a aimé votre publication')
+              VALUES (${recipientId}, ${userId}, 'like', ${postId}::uuid, ${msg})
             `;
-          } catch {}
+          } catch (err) {
+            console.error("[Like Notification Error]:", err);
+          }
         }
 
         return c.json({ success: true, liked: true });
@@ -477,6 +638,12 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       if (existing.length > 0) {
         await sql`DELETE FROM post_interactions WHERE id = ${existing[0].id}::uuid`;
         await sql`UPDATE posts SET reposts_count = GREATEST(0, reposts_count - 1) WHERE id = ${postId}::uuid`;
+        try {
+          await sql`
+            DELETE FROM notifications
+            WHERE actor_id = ${userId} AND post_id = ${postId}::uuid AND type = 'repost'
+          `;
+        } catch {}
         return c.json({ success: true, reposted: false });
       } else {
         await sql`
@@ -486,14 +653,20 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
         `;
         await sql`UPDATE posts SET reposts_count = reposts_count + 1 WHERE id = ${postId}::uuid`;
 
-        const postAuthor = await sql`SELECT author_id FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-        if (postAuthor.length > 0 && postAuthor[0].author_id !== userId) {
+        const postAuthor = await sql`SELECT author_id, content FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+        if (postAuthor.length > 0) {
+          const recipientId = Number(postAuthor[0].author_id);
+          const rawContent = (postAuthor[0].content || "").trim();
+          const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
+          const msg = recipientId === userId ? `Vous avez republié votre publication${snippet}` : `a republié votre publication${snippet}`;
           try {
             await sql`
               INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-              VALUES (${postAuthor[0].author_id}, ${userId}, 'repost', ${postId}::uuid, 'a republié votre publication')
+              VALUES (${recipientId}, ${userId}, 'repost', ${postId}::uuid, ${msg})
             `;
-          } catch {}
+          } catch (err) {
+            console.error("[Repost Notification Error]:", err);
+          }
         }
 
         return c.json({ success: true, reposted: true });
@@ -544,8 +717,22 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       const postId = c.req.param("id");
       const sql = getDb();
 
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId)) {
+        return c.json({ count: 0, aiDigest: null, comments: [] });
+      }
+
+      let currentUserId: number | null = null;
+      const token = extractToken(c.req.raw);
+      if (token) {
+        try {
+          const payload = await verifyToken(token);
+          currentUserId = Number(payload.sub || (payload as any).id);
+        } catch {}
+      }
+
       const comments = await sql`
-        SELECT c.*, u.username, pr.display_name, pr.avatar_url
+        SELECT c.*, u.username, pr.display_name, pr.avatar_url,
+               (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified
         FROM comments c
         JOIN users u ON u.id = c.author_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
@@ -553,20 +740,40 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
         ORDER BY c.depth ASC, c.likes_count DESC, c.created_at ASC
       `;
 
+      let likedIds = new Set<string>();
+      if (currentUserId && comments.length > 0) {
+        try {
+          const likedRows = await sql`
+            SELECT cl.comment_id FROM comment_likes cl
+            JOIN comments c ON c.id = cl.comment_id
+            WHERE cl.user_id = ${currentUserId} AND c.post_id = ${postId}::uuid
+          `;
+          likedIds = new Set(likedRows.map((r: any) => String(r.comment_id)));
+        } catch {}
+      }
+
+      const enriched = comments.map((cm: any) => ({
+        ...cm,
+        liked_by_me: likedIds.has(String(cm.id)),
+      }));
+
       let aiDigest = null;
-      if (comments.length >= 2) {
+      if (enriched.length >= 2) {
         aiDigest = MAIAgentFleet.synthesizeThread(
-          comments.map((cm: any) => ({ author: cm.username, content: cm.content }))
+          enriched.map((cm: any) => ({ author: cm.username, content: cm.content }))
         );
       }
 
-      return c.json({ count: comments.length, aiDigest, comments });
+      return c.json({ count: enriched.length, aiDigest, comments: enriched });
     } catch (err: any) {
+      console.error("[Get Comments Error]:", err);
       return c.json({ error: "Erreur récupération réponses." }, 500);
     }
   };
 
   registerMulti("get", ["/api/vibe/posts/:id/comments", "/vibe/posts/:id/comments", "/v1/posts/:id/comments", "/comments/:id"], handleGetComments);
+
+  const isUuid = (v: any) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 
   const handleAddComment = async (c: any) => {
     try {
@@ -581,15 +788,63 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       if (!content || !content.trim()) {
         return c.json({ error: "Commentaire vide." }, 400);
       }
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
 
       const sql = getDb();
+
+      // Résoudre le parent (profondeur réelle, aplatie au niveau 4 max)
+      let parentDepth = 0;
+      let effectiveParentId: string | null = null;
+      if (parent_comment_id) {
+        if (!isUuid(parent_comment_id)) {
+          return c.json({ error: "Commentaire parent invalide." }, 400);
+        }
+        const parentRows = await sql`
+          SELECT id, depth, parent_comment_id FROM comments WHERE id = ${parent_comment_id}::uuid LIMIT 1
+        `;
+        if (parentRows.length === 0) {
+          return c.json({ error: "Commentaire parent introuvable." }, 404);
+        }
+        const parent = parentRows[0];
+        // On répond toujours à la racine du fil si le parent est déjà profond
+        if (Number(parent.depth) >= 4) {
+          effectiveParentId = parent.parent_comment_id || parent.id;
+          parentDepth = 3;
+        } else {
+          effectiveParentId = parent.id;
+          parentDepth = Number(parent.depth) || 0;
+        }
+      }
+
       const inserted = await sql`
         INSERT INTO comments (post_id, author_id, parent_comment_id, content, depth)
-        VALUES (${postId}::uuid, ${userId}, ${parent_comment_id ? parent_comment_id : null}::uuid, ${content.trim()}, ${parent_comment_id ? 1 : 0})
+        VALUES (${postId}::uuid, ${userId}, ${effectiveParentId || null}::uuid, ${content.trim()}, ${parentDepth + 1})
         RETURNING *
       `;
 
       await sql`UPDATE posts SET replies_count = replies_count + 1 WHERE id = ${postId}::uuid`;
+
+      // Notifier l'auteur du post (ou du commentaire parent) sans se notifier soi-même
+      try {
+        let notifyId: number | null = null;
+        let notifMsg = "a répondu à votre post";
+        if (effectiveParentId) {
+          const pAuthor = await sql`SELECT author_id FROM comments WHERE id = ${effectiveParentId}::uuid LIMIT 1`;
+          notifyId = Number(pAuthor[0]?.author_id) || null;
+          notifMsg = "a répondu à votre commentaire";
+        } else {
+          const pAuthor = await sql`SELECT author_id FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+          notifyId = Number(pAuthor[0]?.author_id) || null;
+        }
+        if (notifyId && notifyId !== userId) {
+          await sql`
+            INSERT INTO notifications (recipient_id, actor_id, type, message)
+            VALUES (${notifyId}, ${userId}, 'reply', ${notifMsg})
+          `;
+        }
+      } catch {}
 
       const userRow = await sql`SELECT username FROM users WHERE id = ${userId} LIMIT 1`;
       const prRow = await sql`SELECT display_name, avatar_url FROM profiles WHERE user_id = ${userId} LIMIT 1`;
@@ -601,12 +856,74 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
           username: userRow[0]?.username,
           display_name: prRow[0]?.display_name || userRow[0]?.username,
           avatar_url: prRow[0]?.avatar_url,
+          liked_by_me: false,
         },
       }, 201);
     } catch (err: any) {
-      return c.json({ error: "Erreur ajout commentaire." }, 500);
+      console.error("[Add Comment Error]:", err);
+      return c.json({ error: err?.message?.includes("relation") ? "Table comments incomplète — migration requise." : "Erreur ajout commentaire." }, 500);
     }
   };
 
   registerMulti("post", ["/api/vibe/posts/:id/comments", "/vibe/posts/:id/comments", "/v1/posts/:id/comments", "/comments/:id"], handleAddComment);
+
+  // 6. LIKE / UNLIKE A COMMENT
+  const handleLikeComment = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const commentId = c.req.param("commentId");
+
+      if (!isUuid(commentId)) {
+        return c.json({ error: "Identifiant de commentaire invalide." }, 400);
+      }
+
+      const sql = getDb();
+
+      let alreadyLiked = false;
+      try {
+        const existing = await sql`
+          SELECT 1 FROM comment_likes WHERE user_id = ${userId} AND comment_id = ${commentId}::uuid LIMIT 1
+        `;
+        alreadyLiked = existing.length > 0;
+      } catch {
+        // Table comment_likes absente : on retombe sur un simple compteur
+      }
+
+      if (alreadyLiked) {
+        try {
+          await sql`DELETE FROM comment_likes WHERE user_id = ${userId} AND comment_id = ${commentId}::uuid`;
+        } catch {}
+        await sql`UPDATE comments SET likes_count = GREATEST(0, COALESCE(likes_count, 0) - 1) WHERE id = ${commentId}::uuid`;
+        const row = await sql`SELECT COALESCE(likes_count, 0) as likes_count FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
+        return c.json({ success: true, liked: false, likes_count: Number(row[0]?.likes_count || 0) });
+      } else {
+        try {
+          await sql`INSERT INTO comment_likes (user_id, comment_id) VALUES (${userId}, ${commentId}::uuid)`;
+        } catch {}
+        await sql`UPDATE comments SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ${commentId}::uuid`;
+        const row = await sql`SELECT COALESCE(likes_count, 0) as likes_count FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
+
+        try {
+          const cm = await sql`SELECT author_id, post_id FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
+          const authorId = Number(cm[0]?.author_id);
+          if (authorId && authorId !== userId) {
+            await sql`
+              INSERT INTO notifications (recipient_id, actor_id, type, message)
+              VALUES (${authorId}, ${userId}, 'like', 'a aimé votre commentaire')
+            `;
+          }
+        } catch {}
+
+        return c.json({ success: true, liked: true, likes_count: Number(row[0]?.likes_count || 0) });
+      }
+    } catch (err: any) {
+      console.error("[Like Comment Error]:", err);
+      return c.json({ error: "Erreur lors du like du commentaire." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/posts/:id/comments/:commentId/like", "/vibe/posts/:id/comments/:commentId/like", "/v1/posts/:id/comments/:commentId/like"], handleLikeComment);
 }

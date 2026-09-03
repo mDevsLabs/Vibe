@@ -92,6 +92,10 @@ async function migrate() {
     'user_settings.allow_dms_from',
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_dms_from VARCHAR(20) DEFAULT 'everyone'`
   );
+  await runAlter(
+    'user_settings.mai_auto_approve_tools',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. usage_logs — Ajouter colonne endpoint (manquante selon schéma)
@@ -141,6 +145,56 @@ async function migrate() {
   await runAlter(
     'direct_messages.read_at',
     `ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE`
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // 8b. comments — Colonnes réponses imbriquées + likes
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n💬 TABLE comments:');
+  await runAlter(
+    'comments.parent_comment_id',
+    `ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`
+  );
+  await runAlter(
+    'comments.depth',
+    `ALTER TABLE comments ADD COLUMN IF NOT EXISTS depth INTEGER DEFAULT 0`
+  );
+  await runAlter(
+    'comments.likes_count',
+    `ALTER TABLE comments ADD COLUMN IF NOT EXISTS likes_count INTEGER DEFAULT 0`
+  );
+  await runAlter(
+    'comments.is_hidden',
+    `ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE`
+  );
+  await runAlter(
+    'table comment_likes',
+    `CREATE TABLE IF NOT EXISTS comment_likes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id BIGINT NOT NULL,
+      comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      UNIQUE (user_id, comment_id)
+    )`
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // 8c. direct_messages — Réponses + réactions DM
+  // ─────────────────────────────────────────────────────────────
+  await runAlter(
+    'direct_messages.reply_to_id',
+    `ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS reply_to_id UUID REFERENCES direct_messages(id) ON DELETE SET NULL`
+  );
+  await runAlter(
+    'table dm_reactions',
+    `CREATE TABLE IF NOT EXISTS dm_reactions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      message_id UUID NOT NULL REFERENCES direct_messages(id) ON DELETE CASCADE,
+      user_id BIGINT NOT NULL,
+      emoji VARCHAR(16) NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      UNIQUE (message_id, user_id, emoji)
+    )`
   );
 
   // ─────────────────────────────────────────────────────────────
@@ -210,6 +264,58 @@ async function migrate() {
     'idx_notifications_unread',
     `CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_id, is_read)`
   );
+
+  // ─────────────────────────────────────────────────────────────
+  // MODÉRATION DM + PERSONNALISATION (ajout 2026-09-02)
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n🛡️  TABLES DM & PERSONNALISATION:');
+  await runAlter(
+    'TABLE blocked_users',
+    `CREATE TABLE IF NOT EXISTS blocked_users (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id BIGINT NOT NULL,
+      blocked_user_id BIGINT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (user_id, blocked_user_id)
+    )`
+  );
+  await runAlter(
+    'TABLE dm_reports',
+    `CREATE TABLE IF NOT EXISTS dm_reports (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      reporter_id BIGINT NOT NULL,
+      reported_user_id BIGINT,
+      message_id UUID,
+      reason TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`
+  );
+  await runAlter(
+    'TABLE dm_conv_meta',
+    `CREATE TABLE IF NOT EXISTS dm_conv_meta (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id BIGINT NOT NULL,
+      partner_id BIGINT NOT NULL,
+      custom_name TEXT,
+      UNIQUE (user_id, partner_id)
+    )`
+  );
+  await runAlter(
+    'TABLE dm_reactions',
+    `CREATE TABLE IF NOT EXISTS dm_reactions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      message_id UUID NOT NULL,
+      user_id BIGINT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (message_id, user_id, emoji)
+    )`
+  );
+  await runAlter('direct_messages.reply_to_id', `ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS reply_to_id UUID`);
+  await runAlter('user_settings.accent_color', `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS accent_color TEXT`);
+  await runAlter('user_settings.font_size', `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS font_size TEXT`);
+  await runAlter('idx_blocked_users_user', `CREATE INDEX IF NOT EXISTS idx_blocked_users_user ON blocked_users(user_id)`);
+  await runAlter('idx_dm_unread', `CREATE INDEX IF NOT EXISTS idx_dm_unread ON direct_messages(conversation_id, recipient_id, is_read)`);
 
   // ─────────────────────────────────────────────────────────────
   // VÉRIFICATION FINALE

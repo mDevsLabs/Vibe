@@ -198,3 +198,109 @@ html.light ::-webkit-scrollbar-thumb:hover,
 .pulse-recording {
   animation: pulse-ring 1.5s infinite;
 }
+
+/* ── Liquid Glass (navigation mobile & surfaces translucides) ── */
+.liquid-glass {
+  background: rgba(20, 20, 28, 0.55);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.liquid-glass-panel {
+  background: linear-gradient(
+    145deg,
+    rgba(30, 30, 42, 0.72) 0%,
+    rgba(16, 16, 24, 0.62) 100%
+  );
+  backdrop-filter: blur(32px) saturate(200%);
+  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+}
+
+html.light .liquid-glass,
+[data-theme="light"] .liquid-glass {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+html.light .liquid-glass-panel,
+[data-theme="light"] .liquid-glass-panel {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.85) 0%, rgba(245, 245, 250, 0.75) 100%);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+html.light .liquid-glass-panel .text-white,
+[data-theme="light"] .liquid-glass-panel .text-white {
+  color: #18181b;
+}
+html.light .liquid-glass-panel .text-white\/75,
+[data-theme="light"] .liquid-glass-panel .text-white\/75 {
+  color: #3f3f46;
+}
+html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
+[data-theme="light"] .liquid-glass-panel .hover\:bg-white\/10:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * ANIMATIONS UI/UX (likes, médias, transitions, pull-to-refresh)
+ * ───────────────────────────────────────────────────────────── */
+@keyframes vibe-fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes vibe-scaleUp {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes vibe-likeBurst {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.45); }
+  60% { transform: scale(0.9); }
+  100% { transform: scale(1); }
+}
+@keyframes vibe-mediaIn {
+  from { opacity: 0; filter: blur(6px); }
+  to { opacity: 1; filter: blur(0); }
+}
+@keyframes vibe-slideDown {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn { animation: vibe-fadeIn 0.25s ease-out both; }
+.animate-scaleUp { animation: vibe-scaleUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.animate-likeBurst { animation: vibe-likeBurst 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.animate-mediaIn { animation: vibe-mediaIn 0.4s ease-out both; }
+.animate-slideDown { animation: vibe-slideDown 0.3s ease-out both; }
+
+/* Transitions de vue : fondu/coulisse si l'API View Transitions est dispo */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root) { animation: vibe-fadeIn 0.15s ease-in reverse; }
+  ::view-transition-new(root) { animation: vibe-fadeIn 0.2s ease-out; }
+}
+
+/* Spinner fin de liste (chargement des pages suivantes) */
+.feed-end-loader {
+  display: flex; justify-content: center; padding: 1.5rem 0 2.5rem;
+}
+.feed-end-loader::after {
+  content: ''; width: 1.25rem; height: 1.25rem; border-radius: 9999px;
+  border: 2px solid var(--color-zinc-800); border-top-color: var(--color-zinc-500);
+  animation: vibe-spin 0.7s linear infinite;
+}
+@keyframes vibe-spin { to { transform: rotate(360deg); } }
+
+/* Sur-scroll du pull-to-refresh */
+@keyframes vibe-spinning { to { transform: rotate(360deg); } }
+.pull-spinner { animation: vibe-spinning 0.8s linear infinite; }

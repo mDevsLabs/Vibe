@@ -22,6 +22,7 @@ import { ApiService } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { NotificationService } from '../../services/notificationService';
+import { ProfileAvatar } from '../common/ProfileAvatar';
 
 interface PostCardProps {
   post: Post;
@@ -31,7 +32,7 @@ interface PostCardProps {
   onOpenProfile?: (username: string) => void;
 }
 
-export const PostCard: React.FC<PostCardProps> = ({
+export const PostCardBase: React.FC<PostCardProps> = ({
   post,
   onPostDeleted,
   onOpenThread,
@@ -46,6 +47,7 @@ export const PostCard: React.FC<PostCardProps> = ({
   const [isBookmarked, setIsBookmarked] = useState(post.has_bookmarked || false);
   const [showMenu, setShowMenu] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [likeBurst, setLikeBurst] = useState(false);
 
   const isAuthor = user && (user.id === post.author_id || user.username === post.username);
 
@@ -54,6 +56,11 @@ export const PostCard: React.FC<PostCardProps> = ({
     const newLikedState = !isLiked;
     setIsLiked(newLikedState);
     setLikesCount((prev) => (newLikedState ? prev + 1 : Math.max(0, prev - 1)));
+    if (newLikedState) {
+      setLikeBurst(true);
+      setTimeout(() => setLikeBurst(false), 450);
+      navigator.vibrate?.(10);
+    }
 
     try {
       await ApiService.toggleLike(post.id);
@@ -144,10 +151,12 @@ export const PostCard: React.FC<PostCardProps> = ({
           }}
           className="shrink-0"
         >
-          <img
-            src={post.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&q=80'}
+          <ProfileAvatar
+            src={post.avatar_url}
             alt={post.username}
-            className="w-10 h-10 rounded-full object-cover border border-zinc-800 hover:opacity-90 transition-opacity"
+            size="md"
+            fallbackName={post.username}
+            className="border border-zinc-800 hover:opacity-90 transition-opacity"
           />
         </div>
 
@@ -252,7 +261,9 @@ export const PostCard: React.FC<PostCardProps> = ({
                     <img
                       src={img.url}
                       alt={img.alt_text || `Média ${i + 1}`}
-                      className="w-full h-full object-cover hover:scale-105 transition-transform duration-300"
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover hover:scale-105 transition-transform duration-300 animate-mediaIn"
                     />
                   </div>
                 ))}
@@ -313,7 +324,7 @@ export const PostCard: React.FC<PostCardProps> = ({
                 isLiked ? 'text-white font-bold' : 'hover:text-white'
               }`}
             >
-              <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
+              <div className={`p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors ${likeBurst ? 'animate-likeBurst' : ''}`}>
                 <Heart className={`w-4 h-4 ${isLiked ? 'fill-white text-white' : ''}`} />
               </div>
               <span>{likesCount}</span>
@@ -336,3 +347,17 @@ export const PostCard: React.FC<PostCardProps> = ({
     </article>
   );
 };
+
+/**
+ * Mémoïsation : la carte ne re-render que si ses données ou ses callbacks
+ * changent — critique pour garder le scroll infini fluide.
+ */
+export const PostCard = React.memo(
+  PostCardBase,
+  (prev, next) =>
+    prev.post === next.post &&
+    prev.onOpenThread === next.onOpenThread &&
+    prev.onOpenProfile === next.onOpenProfile &&
+    prev.onOpenExplain === next.onOpenExplain &&
+    prev.onPostDeleted === next.onPostDeleted
+);

@@ -6,6 +6,14 @@
  */
 
 import { getDb, getWeekData, getTierMaiTokenLimit, getTierDailyImageLimit } from "./config.ts";
+import { executeWebSearch } from "./web.ts";
+
+/**
+ * Outils "sensibles" : ils modifient le compte ou le contenu public de
+ * l'utilisateur. Ils exigent une approbation explicite sauf si le réglage
+ * `mai_auto_approve_tools` a été activé dans les paramètres.
+ */
+export const SENSITIVE_TOOLS = ["create_post", "delete_post", "update_profile", "follow_user"];
 
 export const MAI_TOOLS = [
   {
@@ -62,8 +70,48 @@ export const MAI_TOOLS = [
     },
   },
   {
+    name: "suggest_post",
+    description: "Génère des idées de publications Vibe originales (sans les publier).",
+    parameters: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "Thème ou sujet souhaité" },
+        style: { type: "string", enum: ["viral", "pro", "humour", "inspirant"], description: "Ton du post" },
+      },
+      required: ["topic"],
+    },
+  },
+  {
     name: "check_quotas",
     description: "Consulte les quotas d'utilisation hebdomadaires de mAI et quotidiens pour les images.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "update_profile",
+    description: "Met à jour le profil Vibe de l'utilisateur (nom affiché et/ou bio).",
+    parameters: {
+      type: "object",
+      properties: {
+        display_name: { type: "string", description: "Nouveau nom affiché (2 à 40 caractères)" },
+        bio: { type: "string", description: "Nouvelle bio du profil (max 200 caractères)" },
+      },
+    },
+  },
+  {
+    name: "follow_user",
+    description: "Suit (ou ne suit plus) un compte Vibe désigné par son @username.",
+    parameters: {
+      type: "object",
+      properties: {
+        username: { type: "string", description: "Le nom d'utilisateur Vibe à suivre, sans le @" },
+        follow: { type: "boolean", description: "true pour suivre, false pour ne plus suivre (défaut : true)" },
+      },
+      required: ["username"],
+    },
+  },
+  {
+    name: "get_notifications",
+    description: "Récupère les notifications récentes de l'utilisateur (likes, reposts, réponses, DMs).",
     parameters: { type: "object", properties: {} },
   },
 ];
@@ -100,6 +148,56 @@ export class MAIAgentFleet {
     const count = comments.length;
     const authors = [...new Set(comments.map((c) => c.author))].slice(0, 3).join(", ");
     return `Synthèse (${count} réponses) : Échanges autour des points partagés par @${authors}.`;
+  }
+
+  /**
+   * Récupère une clé OpenRouter (variable d'environnement ou table mprojects_api_keys).
+   */
+  public static async getOpenRouterKey(userId: number): Promise<string> {
+    if (typeof (globalThis as any).Deno !== "undefined" && (globalThis as any).Deno.env?.get("OPENROUTER_API_KEY")) {
+      return (globalThis as any).Deno.env.get("OPENROUTER_API_KEY");
+    }
+    if (typeof process !== "undefined" && process.env?.OPENROUTER_API_KEY) {
+      return process.env.OPENROUTER_API_KEY;
+    }
+    try {
+      const sql = getDb();
+      const keyRows = await sql`SELECT api_key FROM mprojects_api_keys WHERE user_id::text = ${String(userId)}::text LIMIT 1`;
+      return keyRows[0]?.api_key || "";
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Appel générique OpenRouter pour les outils textuels (traduction, reformulation...).
+   */
+  public static async callOpenRouter(userId: number, system: string, user: string, model = "google/gemini-2.5-flash:free"): Promise<string | null> {
+    const apiKey = await this.getOpenRouterKey(userId);
+    if (!apiKey) return null;
+    try {
+      const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://mai.val.run",
+          "X-Title": "mAI Social Assistant",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      });
+      if (!aiRes.ok) return null;
+      const aiData = await aiRes.json();
+      return aiData.choices?.[0]?.message?.content || null;
+    } catch {
+      return null;
+    }
   }
 
   public static async executeTool(
@@ -144,9 +242,12 @@ export class MAIAgentFleet {
           const newPost = inserted[0];
 
           if (media_url) {
+            const cleanUrl = String(media_url).split("?")[0].split("#")[0];
+            const ext = cleanUrl.split(".").pop()?.toLowerCase();
+            const mediaType = (ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : ext === "mp4" ? "video/mp4" : "image/jpeg");
             await sql`
-              INSERT INTO media_assets (owner_id, post_id, url, media_type)
-              VALUES (${uid}, ${newPost.id}::uuid, ${media_url}, 'image/jpeg')
+              INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text)
+              VALUES (${uid}, ${newPost.id}::uuid, ${media_url}, ${mediaType}, 0, '')
             `;
           }
 
@@ -247,6 +348,192 @@ export class MAIAgentFleet {
             dailyImages: { used: imagesUsed, limit: imageLimit, percent: Math.min(100, Math.round((imagesUsed / imageLimit) * 100)) },
             resetAt: nextResetIso,
           };
+          break;
+        }
+
+        case "search_web": {
+          const { query } = args;
+          const search = await executeWebSearch(String(query || ""), 5);
+          if (!search.success || search.results.length === 0) {
+            throw new Error(search.error || "Aucun résultat de recherche web.");
+          }
+          const snippet = search.results
+            .slice(0, 3)
+            .map((r) => `• **${r.title}** — ${r.snippet}\n  ${r.url}`)
+            .join("\n");
+          resultData = { query, snippet, provider: search.provider, results: search.results };
+          break;
+        }
+
+        case "summarize": {
+          const recent = await sql`
+            SELECT p.content, u.username FROM posts p
+            JOIN users u ON u.id = p.author_id
+            ORDER BY p.published_at DESC LIMIT 30
+          `;
+          if (recent.length === 0) {
+            resultData = { summary: "Le fil est calme : aucune publication récente à résumer." };
+            break;
+          }
+          const hashtags: Record<string, number> = {};
+          for (const r of recent) {
+            for (const m of String(r.content).matchAll(/#([\p{L}\p{N}_]{2,30})/gu)) {
+              const tag = m[1].toLowerCase();
+              hashtags[tag] = (hashtags[tag] || 0) + 1;
+            }
+          }
+          const topTags = Object.entries(hashtags).sort((a, b) => b[1] - a[1]).slice(0, 5);
+          const authors = [...new Set(recent.map((r: any) => `@${r.username}`))].slice(0, 5).join(", ");
+          resultData = {
+            summary: [
+              `📄 ${recent.length} publications récentes analysées, principalement par ${authors}.`,
+              topTags.length > 0 ? `🏷️ Sujets dominants : ${topTags.map(([t, n]) => `#${t} (${n})`).join(", ")}.` : "",
+              "💡 Le flux tourne surtout autour de ces thématiques — explorez les tendances pour en savoir plus.",
+            ].filter(Boolean).join("\n\n"),
+          };
+          break;
+        }
+
+        case "fact_check": {
+          const { statement } = args;
+          const search = await executeWebSearch(String(statement || ""), 5).catch(() => null);
+          const sources = search?.success ? search.results.slice(0, 3) : [];
+          const llm = await this.callOpenRouter(
+            uid,
+            "Tu es un vérificateur de faits rigoureux. Réponds en 3 phrases maximum en français : verdict (Vrai / Faux / Plausible / À vérifier) puis justification brève en t'appuyant sur les sources fournies.",
+            `Affirmation : « ${statement} »\n\nSources trouvées :\n${sources.map((s) => `- ${s.title} : ${s.snippet}`).join("\n") || "(aucune)"}`
+          );
+          resultData = {
+            statement,
+            verdict: llm ? "Analyse mAI" : sources.length > 0 ? "À vérifier" : "Sources insuffisantes",
+            confidence: sources.length > 0 ? "Moyen" : "Faible",
+            analysis: llm || (sources.length > 0 ? "Des sources web ont été trouvées, croisez-les pour vous forger un avis." : "Aucune source fiable trouvée sur le web pour cette affirmation."),
+            sources,
+          };
+          break;
+        }
+
+        case "rewrite_post": {
+          const { text, style = "viral" } = args;
+          const tones: Record<string, string> = { viral: "viral", pro: "executive", humour: "viral", concis: "minimal", poétique: "poetic" };
+          const llm = await this.callOpenRouter(
+            uid,
+            `Reformule le texte suivant en français dans un style « ${style} », percutant et adapté à un réseau social. Réponds UNIQUEMENT par le texte reformulé, sans commentaire.`,
+            String(text || "")
+          );
+          const rewritten = llm || (await this.modulateText({ text: String(text || ""), tone: tones[style] || "viral" }));
+          resultData = { rewritten, style };
+          break;
+        }
+
+        case "suggest_post": {
+          const { topic, style = "viral" } = args;
+          const llm = await this.callOpenRouter(
+            uid,
+            `Propose 3 idées de publications courtes pour le réseau social Vibe sur le thème « ${topic} », dans un style « ${style} ». Format : une liste numérotée, chaque post fait 1 à 2 phrases, avec des hashtags pertinents. Réponds UNIQUEMENT par la liste.`,
+            String(topic || "sujets d'actualité")
+          );
+          if (!llm) throw new Error("Génération indisponible : aucune clé IA configurée sur le serveur.");
+          resultData = { suggestions: llm, topic, style };
+          break;
+        }
+
+        case "translate": {
+          const { text, target_language = "anglais" } = args;
+          const llm = await this.callOpenRouter(
+            uid,
+            `Traduis le texte suivant en ${target_language}. Réponds UNIQUEMENT par la traduction, sans commentaire.`,
+            String(text || "")
+          );
+          if (!llm) throw new Error("Traduction indisponible : aucune clé IA configurée sur le serveur.");
+          resultData = { translated: llm, targetLanguage: target_language };
+          break;
+        }
+
+        case "analyze_trends": {
+          const recent = await sql`
+            SELECT content FROM posts WHERE published_at > NOW() - INTERVAL '7 days' ORDER BY published_at DESC LIMIT 200
+          `;
+          const tags: Record<string, number> = {};
+          for (const r of recent) {
+            for (const m of String(r.content).matchAll(/#([\p{L}\p{N}_]{2,30})/gu)) {
+              const tag = m[1].toLowerCase();
+              tags[tag] = (tags[tag] || 0) + 1;
+            }
+          }
+          const trendingTopics = Object.entries(tags)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 8)
+            .map(([name, postsCount]) => ({ name: `#${name}`, postsCount, sentiment: postsCount >= 5 ? "Très actif 🔥" : "Actif 📈" }));
+          resultData = { trendingTopics };
+          break;
+        }
+
+        case "update_profile": {
+          const { display_name, bio } = args;
+          if (!display_name && !bio) throw new Error("Fournissez au moins un champ (display_name ou bio).");
+          if (display_name !== undefined && (String(display_name).length < 2 || String(display_name).length > 40)) {
+            throw new Error("Le nom affiché doit contenir entre 2 et 40 caractères.");
+          }
+          if (bio !== undefined && String(bio).length > 200) {
+            throw new Error("La bio ne doit pas dépasser 200 caractères.");
+          }
+          const updated = await sql`
+            UPDATE profiles SET
+              display_name = COALESCE(${display_name ?? null}, display_name),
+              bio = COALESCE(${bio ?? null}, bio),
+              updated_at = NOW()
+            WHERE user_id = ${uid}
+            RETURNING display_name, bio
+          `;
+          if (updated.length === 0) throw new Error("Profil introuvable.");
+          resultData = { profile: updated[0], message: "Profil mis à jour avec succès." };
+          break;
+        }
+
+        case "follow_user": {
+          const { username, follow = true } = args;
+          const cleanUsername = String(username || "").replace(/^@/, "").trim().toLowerCase();
+          if (!cleanUsername) throw new Error("username est requis.");
+          const target = await sql`SELECT id FROM users WHERE LOWER(username) = ${cleanUsername} LIMIT 1`;
+          if (target.length === 0) throw new Error(`Compte @${cleanUsername} introuvable sur Vibe.`);
+          const targetId = Number(target[0].id);
+          if (targetId === uid) throw new Error("Vous ne pouvez pas vous suivre vous-même.");
+
+          if (follow) {
+            const existing = await sql`SELECT 1 FROM follows WHERE follower_id = ${uid} AND following_id = ${targetId} LIMIT 1`;
+            if (existing.length > 0) {
+              resultData = { followed: true, username: cleanUsername, message: `Vous suivez déjà @${cleanUsername}.` };
+              break;
+            }
+            await sql`INSERT INTO follows (follower_id, following_id) VALUES (${uid}, ${targetId}) ON CONFLICT DO NOTHING`;
+            await Promise.all([
+              sql`UPDATE profiles SET following_count = following_count + 1 WHERE user_id = ${uid}`,
+              sql`UPDATE profiles SET followers_count = followers_count + 1 WHERE user_id = ${targetId}`,
+            ]);
+            resultData = { followed: true, username: cleanUsername, message: `Vous suivez désormais @${cleanUsername} !` };
+          } else {
+            const del = await sql`DELETE FROM follows WHERE follower_id = ${uid} AND following_id = ${targetId} RETURNING 1`;
+            if (del.length > 0) {
+              await Promise.all([
+                sql`UPDATE profiles SET following_count = GREATEST(0, following_count - 1) WHERE user_id = ${uid}`,
+                sql`UPDATE profiles SET followers_count = GREATEST(0, followers_count - 1) WHERE user_id = ${targetId}`,
+              ]);
+            }
+            resultData = { followed: false, username: cleanUsername, message: `Vous ne suivez plus @${cleanUsername}.` };
+          }
+          break;
+        }
+
+        case "get_notifications": {
+          const rows = await sql`
+            SELECT n.*, u.username as actor_username
+            FROM notifications n
+            LEFT JOIN users u ON u.id = n.actor_id
+            WHERE n.recipient_id = ${uid}
+            ORDER BY n.created_at DESC LIMIT 20
+          `;
+          resultData = { count: rows.length, notifications: rows };
           break;
         }
 

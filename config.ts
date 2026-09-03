@@ -5,8 +5,33 @@ import { jwtVerify, SignJWT } from "npm:jose";
 // ─────────────────────────────────────────────
 // Config & Données
 // ─────────────────────────────────────────────
-export const JWT_EXPIRY = "14d";
+export const JWT_EXPIRY = "7d";
 export const BCRYPT_ROUNDS = 12;
+
+// ─────────────────────────────────────────────
+// Rate limiting en mémoire (par clé : ip ou user)
+// ─────────────────────────────────────────────
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+export function rateLimit(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now > bucket.resetAt) {
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.count >= limit) return false;
+  bucket.count += 1;
+  return true;
+}
+
+export function clientIp(c: any): string {
+  return (
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    c.req.header("x-real-ip") ||
+    "unknown"
+  );
+}
 
 export type Tier = "Free" | "Plus" | "Pro" | "Max";
 
@@ -241,6 +266,7 @@ export async function blacklistToken(token: string) {
   try {
     await sqlite.execute({
       sql: "DELETE FROM token_blacklist WHERE revoked_at < datetime('now', '-14 days')",
+      args: [],
     });
   } catch {}
 }

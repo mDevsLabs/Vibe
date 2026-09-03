@@ -163,7 +163,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   ];
 
   return (
-    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-20 select-none">
+    <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
 
       {/* ─── Sticky Header ─────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/90 border-b border-zinc-800/80 p-3 space-y-3">

@@ -9,7 +9,9 @@ import {
   Send,
   TrendingUp,
   BarChart3,
-  Zap
+  Zap,
+  Bell,
+  UserPlus
 } from 'lucide-react';
 import { AVAILABLE_MAI_TOOLS, MAITool } from '../../data/maiTools';
 
@@ -31,6 +33,8 @@ const iconMap: Record<string, React.ElementType> = {
   TrendingUp: TrendingUp,
   BarChart3: BarChart3,
   Zap: Zap,
+  Bell: Bell,
+  UserPlus: UserPlus,
 };
 
 export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
