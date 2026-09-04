@@ -1,15 +1,14 @@
 name: Build Mobile Apps (APK / IPA)
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       build_ios:
         description: 'Build iOS (IPA) aussi — nécessite un runner macOS'
         type: boolean
         default: true
-  push:
-    tags:
-      - 'mobile-v*'
 
 jobs:
   build-android:
@@ -73,7 +72,7 @@ jobs:
   build-ios:
     name: iOS IPA
     runs-on: macos-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ios || github.event_name == 'push' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_ios) || github.event_name == 'push' || github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
 

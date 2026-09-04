@@ -13,13 +13,13 @@ name: 🚀 Deploy Vibe — Vercel
 
 on:
   push:
-    branches:
-      - main
-      - master
   pull_request:
-    branches:
-      - main
-      - master
+  workflow_dispatch:
+    inputs:
+      prod:
+        description: 'Forcer le déploiement en production (--prod)'
+        type: boolean
+        default: false
 
 env:
   VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -58,15 +58,15 @@ jobs:
       - name: 🔗 Lien avec le projet Vercel
         run: vercel link --yes --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: 🚀 Déploiement Preview (PR)
-        if: github.event_name == 'pull_request'
+      - name: 🚀 Déploiement Preview (PR ou branche secondaire)
+        if: github.event_name == 'pull_request' || ((github.ref_name != 'main' && github.ref_name != 'master') && !inputs.prod)
         run: |
           DEPLOY_URL=$(vercel deploy --token=${{ secrets.VERCEL_TOKEN }})
           echo "🔗 Preview URL: $DEPLOY_URL"
           echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
 
-      - name: 🌐 Déploiement Production (main)
-        if: github.event_name == 'push'
+      - name: 🌐 Déploiement Production (main / master ou forcé)
+        if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master' || inputs.prod == true)
         run: |
           DEPLOY_URL=$(vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }})
           echo "✅ Production URL: $DEPLOY_URL"
