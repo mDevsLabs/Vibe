@@ -150,3 +150,69 @@ jobs:
           name: vibe-ios-ipa
           path: vibe-ios-unsigned.ipa
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-android, build-ios]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/canary')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Version détectée : $VERSION"
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: vibe-android-apk
+          path: release-assets/android
+
+      - name: Download iOS IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: vibe-ios-ipa
+          path: release-assets/ios
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-final
+          # Copier et renommer les APK
+          find release-assets/android -name '*.apk' | while read apk; do
+            VARIANT=$(basename "$(dirname "$apk")")
+            cp "$apk" "release-final/vibe-${VARIANT}-${{ steps.pkg.outputs.version }}.apk"
+          done
+          # Copier et renommer l'IPA
+          find release-assets/ios -name '*.ipa' | while read ipa; do
+            cp "$ipa" "release-final/vibe-ios-${{ steps.pkg.outputs.version }}.ipa"
+          done
+          echo "📁 Fichiers de release :"
+          ls -lh release-final/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: "Vibe ${{ steps.pkg.outputs.version }}"
+          body: |
+            ## 📱 Vibe ${{ steps.pkg.outputs.version }}
+
+            ### Téléchargements
+            - **Android** : APK installable (debug ou release selon la configuration)
+            - **iOS** : IPA non signé (nécessite re-signature pour installation)
+
+            ### Notes
+            - Branche : `${{ github.ref_name }}`
+            - Commit : `${{ github.sha }}`
+            - Build : [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          files: release-final/*
+          draft: false
+          prerelease: ${{ github.ref_name == 'canary' }}
+          generate_release_notes: true

@@ -399,7 +399,10 @@ export function getWeekData() {
 // ─────────────────────────────────────────────
 // E-mails & Vérification (SQLite)
 // ─────────────────────────────────────────────
+let sqliteReady = false;
+
 export async function initSQLite() {
+  if (sqliteReady) return;
   await sqlite.execute(`
     CREATE TABLE IF NOT EXISTS verification_codes (
       email TEXT,
@@ -415,12 +418,17 @@ export async function initSQLite() {
       revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  sqliteReady = true;
+  console.log("[SQLite] Tables de vérification initialisées.");
 }
 
 export async function generateVerificationCode(
   email: string,
   action: string
 ): Promise<string> {
+  // Assure que les tables SQLite existent (retry si l'init au démarrage a échoué)
+  await initSQLite();
+
   const isDeletion = action === "delete_account";
   const length = isDeletion ? 8 : 6;
   const min = 10 ** (length - 1);
@@ -447,6 +455,9 @@ export async function verifyVerificationCode(
   code: string,
   action: string
 ): Promise<boolean> {
+  // Assure que les tables SQLite existent
+  await initSQLite();
+
   const result = await sqlite.execute({
     args: [email, action],
     sql: "SELECT code, expires_at FROM verification_codes WHERE email = ? AND action = ?",

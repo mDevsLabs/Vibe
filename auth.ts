@@ -57,7 +57,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ email: cleanEmail, status: "verification_required", success: true });
     } catch (err: any) {
       console.error("Register Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -115,7 +115,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ success: true, tier: user.tier, token });
     } catch (err: any) {
       console.error("Verify Register Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -131,12 +131,18 @@ export function registerAuthRoutes(app: Hono) {
 
   // POST /login
   registerMulti("post", ["/login", "/v1/login", "/api/login", "/api/vibe/login"], async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch (err: any) {
+      return c.json({ error: "Requête JSON invalide (vérifiez les guillemets double de votre payload)." }, 400);
+    }
     try {
       // Anti brute-force : 10 tentatives / IP / 5 min
       if (!rateLimit(`login:${clientIp(c)}`, 10, 5 * 60_000)) {
         return c.json({ error: "Trop de tentatives. Réessayez plus tard." }, 429);
       }
-      const { email, password, identifier } = await c.req.json();
+      const { email, password, identifier } = body;
       const loginId = (identifier || email || "").trim();
       if (!loginId || !password) {
         return c.json({ error: "Champs manquants." }, 400);
@@ -188,15 +194,22 @@ export function registerAuthRoutes(app: Hono) {
         success: true,
       });
     } catch (err: any) {
-      console.error("Login Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      console.error("Login Error:", err?.message || err, err?.stack);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
   // POST /verify-login
   registerMulti("post", ["/verify-login", "/v1/verify-login", "/api/verify-login", "/api/vibe/verify-login"], async (c) => {
+    let body;
     try {
-      const { email, code, identifier } = await c.req.json();
+      body = await c.req.json();
+    } catch (err: any) {
+      return c.json({ error: "Requête JSON invalide (vérifiez les guillemets de votre payload)." }, 400);
+    }
+    
+    try {
+      const { email, code, identifier } = body;
       const loginId = (email || identifier || "").trim();
       if (!loginId || !code) {
         return c.json({ error: "Champs manquants." }, 400);
@@ -318,7 +331,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ success: true, tier: user.tier, token });
     } catch (err: any) {
       console.error("Verify Login Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -355,7 +368,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ success: true });
     } catch (err: any) {
       console.error("Resend Code Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -529,7 +542,7 @@ export function registerAuthRoutes(app: Hono) {
       });
     } catch (err: any) {
       console.error("Verify-Code error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -715,7 +728,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ email: email.trim(), success: true });
     } catch (err: any) {
       console.error("verify-new-email Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -743,7 +756,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ email, success: true });
     } catch (err: any) {
       console.error("request-delete-account Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -802,7 +815,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ success: true });
     } catch (err: any) {
       console.error("confirm-delete-account Error:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 
@@ -883,7 +896,7 @@ export function registerAuthRoutes(app: Hono) {
       return c.json({ keys, success: true });
     } catch (err: any) {
       console.error("Erreur API Keys:", err);
-      return c.json({ error: "Erreur serveur." }, 500);
+      return c.json({ error: err?.message || "Erreur serveur." }, 500);
     }
   });
 }
