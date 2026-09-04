@@ -14,10 +14,13 @@ import {
   verifyVerificationCode,
 } from "./config.ts";
 import { sendVerificationEmail } from "./email.ts";
+import { createRegisterMulti } from "./vibe-common.ts";
 
 export function registerAuthRoutes(app: Hono) {
+  const registerMulti = createRegisterMulti(app);
+
   // POST /register
-  app.post("/register", async (c) => {
+  registerMulti("post", ["/register", "/v1/register", "/api/register", "/api/vibe/register"], async (c) => {
     try {
       // Anti-abus : 5 inscriptions / IP / 15 min
       if (!rateLimit(`register:${clientIp(c)}`, 5, 15 * 60_000)) {
@@ -46,7 +49,7 @@ export function registerAuthRoutes(app: Hono) {
   });
 
   // POST /verify-register
-  app.post("/verify-register", async (c) => {
+  registerMulti("post", ["/verify-register", "/v1/verify-register", "/api/verify-register", "/api/vibe/verify-register"], async (c) => {
     try {
       const { email, username, password, code } = await c.req.json();
       if (!email || !username || !password || !code) {
@@ -101,7 +104,7 @@ export function registerAuthRoutes(app: Hono) {
   });
 
   // POST /login
-  app.post("/login", async (c) => {
+  registerMulti("post", ["/login", "/v1/login", "/api/login", "/api/vibe/login"], async (c) => {
     try {
       // Anti brute-force : 10 tentatives / IP / 5 min
       if (!rateLimit(`login:${clientIp(c)}`, 10, 5 * 60_000)) {
@@ -149,7 +152,7 @@ export function registerAuthRoutes(app: Hono) {
   });
 
   // POST /verify-login
-  app.post("/verify-login", async (c) => {
+  registerMulti("post", ["/verify-login", "/v1/verify-login", "/api/verify-login", "/api/vibe/verify-login"], async (c) => {
     try {
       const { email, code, identifier } = await c.req.json();
       const loginId = (email || identifier || "").trim();
@@ -269,7 +272,7 @@ export function registerAuthRoutes(app: Hono) {
   });
 
   // POST /resend-code
-  app.post("/resend-code", async (c) => {
+  registerMulti("post", ["/resend-code", "/v1/resend-code", "/api/resend-code", "/api/vibe/resend-code"], async (c) => {
     try {
       const { email, action } = await c.req.json();
       if (!email || !action) {

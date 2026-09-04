@@ -52,6 +52,11 @@ export function registerMiddleware(app: Hono) {
       path === "/vibe/" ||
       path === "/api/vibe" ||
       path === "/api/vibe/" ||
+      path === "/v1/login" ||
+      path === "/v1/register" ||
+      path === "/v1/verify-login" ||
+      path === "/v1/verify-register" ||
+      path === "/v1/resend-code" ||
       path.startsWith("/v1/feed") ||
       path.startsWith("/api/vibe/feed") ||
       path.startsWith("/vibe/feed") ||

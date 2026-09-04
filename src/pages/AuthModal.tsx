@@ -5,8 +5,8 @@
  * ============================================================================
  */
 
-import React, { useState } from 'react';
-import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, ArrowRight, Loader2 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { VibeLogo } from '../components/layout/VibeLogo';
@@ -34,6 +34,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
+
+  const handleResendCode = async () => {
+    if (resendCooldown > 0 || !email.trim() || isLoading) return;
+    setError(null);
+    setIsLoading(true);
+    try {
+      await ApiService.resendCode(email.trim(), mode);
+      setNoticeMessage(`Un nouveau code de vérification a été envoyé à ${email}.`);
+      setResendCooldown(60);
+    } catch (err: any) {
+      setError(err.message || "Erreur lors du renvoi du code.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -311,6 +335,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 required
                 autoFocus
               />
+            </div>
+            <div className="flex items-center justify-between text-xs pt-1">
+              <span className="text-zinc-400">Code non reçu ou expiré ?</span>
+              <button
+                type="button"
+                onClick={handleResendCode}
+                disabled={resendCooldown > 0 || isLoading || !email.trim()}
+                className="text-zinc-200 hover:text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {resendCooldown > 0 ? `Renvoyer (${resendCooldown}s)` : 'Renvoyer le code'}
+              </button>
             </div>
           </div>
 

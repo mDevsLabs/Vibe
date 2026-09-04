@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: Install dependencies
         run: npm ci
@@ -39,7 +39,10 @@ jobs:
         run: |
           npm i -D @capacitor/cli
           npm i @capacitor/core @capacitor/android
-          npx cap sync android || npx cap add android && npx cap sync android
+          if [ ! -d "android" ]; then
+            npx cap add android || true
+          fi
+          npx cap sync android
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
@@ -93,7 +96,17 @@ jobs:
         run: |
           npm i -D @capacitor/cli
           npm i @capacitor/core @capacitor/ios
-          npx cap sync ios || npx cap add ios && npx cap sync ios
+          if [ ! -d "ios" ]; then
+            npx cap add ios || true
+          fi
+          # Mettre à jour le deployment target iOS vers 15.0 pour satisfaire les specs de Capacitor
+          if [ -f "ios/App/Podfile" ]; then
+            sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '15.0'/" ios/App/Podfile
+          fi
+          if [ -f "ios/App/App.xcodeproj/project.pbxproj" ]; then
+            sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/g" ios/App/App.xcodeproj/project.pbxproj
+          fi
+          npx cap sync ios
 
       - name: Build archive (non signé sans secrets Apple)
         run: |
