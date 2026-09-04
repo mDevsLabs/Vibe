@@ -62,6 +62,10 @@ export function registerMiddleware(app: Hono) {
       path.startsWith("/api/vibe/trends") ||
       path.startsWith("/v1/profiles") ||
       path.startsWith("/api/vibe/profiles") ||
+      path.startsWith("/v1/search") ||
+      path.startsWith("/api/vibe/search") ||
+      path.startsWith("/vibe/search") ||
+      path.startsWith("/search") ||
       path === "/v1/models" ||
       path === "/models" ||
       path === "/v1beta/models" ||

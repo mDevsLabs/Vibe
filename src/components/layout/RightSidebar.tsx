@@ -6,9 +6,10 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Search, TrendingUp, CheckCircle, ArrowUpRight, Sparkles } from 'lucide-react';
+import { Search, TrendingUp, ArrowUpRight } from 'lucide-react';
 import { ApiService } from '../../services/api';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import { VerifiedBadge } from '../common/VerifiedBadge';
 
 interface RightSidebarProps {
   onSearch?: (query: string) => void;
@@ -130,9 +131,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       <span className="text-xs font-bold text-white group-hover:underline truncate">
                         {acc.display_name || acc.username}
                       </span>
-                      {acc.is_verified && (
-                        <CheckCircle className="w-3 h-3 text-[#1D9BF0] fill-[#1D9BF0] shrink-0" />
-                      )}
+                      <VerifiedBadge isVerified={acc.is_verified} tier={acc.tier} size="xs" />
                     </div>
                     <span className="text-[11px] text-zinc-500 font-mono">@{acc.username}</span>
                   </div>

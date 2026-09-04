@@ -185,7 +185,9 @@ export function getTierStorageLimitBytes(tier?: string | null): number {
 }
 
 export function getDb() {
-  const url = Deno.env.get("DATABASE_URL");
+  const url =
+    (typeof (globalThis as any).Deno !== "undefined" ? (globalThis as any).Deno.env?.get("DATABASE_URL") : null) ||
+    (typeof process !== "undefined" ? process.env?.DATABASE_URL : null);
   if (!url) {
     throw new Error("DATABASE_URL not set");
   }

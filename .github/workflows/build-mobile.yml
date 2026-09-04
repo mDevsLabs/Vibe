@@ -45,34 +45,29 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build signed release APK (si keystore fourni)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      - name: Build Android APK (Release si keystore, sinon Debug)
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
-          cat > android/keystore.properties <<EOF
-          storeFile=../release.keystore
-          storePassword=$ANDROID_KEYSTORE_PASSWORD
-          keyAlias=$ANDROID_KEY_ALIAS
-          keyPassword=$ANDROID_KEY_PASSWORD
-          EOF
-          cd android && ./gradlew assembleRelease
-
-      - name: Build debug APK (fallback sans keystore)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 == '' }}
-        run: cd android && ./gradlew assembleDebug
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "🔑 Keystore détecté : compilation de l'APK Release signé..."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+            printf "storeFile=../release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
+              "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" > android/keystore.properties
+            cd android && ./gradlew assembleRelease
+          else
+            echo "⚙️ Aucun keystore fourni : compilation de l'APK Debug (installable sans certificat de release)..."
+            cd android && ./gradlew assembleDebug
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: vibe-android-apk
-          path: |
-            android/app/build/outputs/apk/release/*.apk
-            android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
   build-ios:
@@ -99,8 +94,7 @@ jobs:
         run: |
           npm i -D @capacitor/cli
           npm i @capacitor/core @capacitor/ios
-          npx cap add ios
-          npx cap sync ios
+          npx cap sync ios || npx cap add ios && npx cap sync ios
 
       - name: Build archive (non signé sans secrets Apple)
         run: |

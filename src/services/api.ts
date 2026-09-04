@@ -254,12 +254,36 @@ export class ApiService {
       try {
         return await this.request(`/api/vibe/search/users?q=${encodeURIComponent(q)}`);
       } catch {
-        // Fallback : utiliser l'endpoint DM users
         try {
           return await this.request(`/v1/dms/users?q=${encodeURIComponent(q)}`);
         } catch {
           return { users: [] };
         }
+      }
+    }
+  }
+
+  public static async searchPosts(q: string, limit: number = 20, offset: number = 0): Promise<{ posts: Post[]; count: number }> {
+    try {
+      return await this.request(`/v1/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
+    } catch {
+      try {
+        return await this.request(`/api/vibe/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
+      } catch {
+        return { posts: [], count: 0 };
+      }
+    }
+  }
+
+  public static async getUserLikedPosts(username: string): Promise<{ posts: Post[] }> {
+    const cleanUser = username.trim().replace(/^@/, '');
+    try {
+      return await this.cachedRequest<{ posts: Post[] }>(`/v1/profiles/${encodeURIComponent(cleanUser)}/likes`, 15000);
+    } catch {
+      try {
+        return await this.request<{ posts: Post[] }>(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/likes`);
+      } catch {
+        return { posts: [] };
       }
     }
   }

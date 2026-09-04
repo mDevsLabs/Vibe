@@ -5,13 +5,14 @@
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
-import { Sparkles, Send, Heart, Mic, MicOff, Loader2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Sparkles, Heart, Mic, MicOff, Loader2, AlertCircle } from 'lucide-react';
 import { Comment } from '../../types/vibe';
 import { ApiService } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import { FormattedText } from '../common/FormattedText';
 
 interface CommentSectionProps {
   postId: string;
@@ -30,7 +31,6 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
 
   const {
     isListening,
-    transcript,
     isSupported,
     startListening,
     stopListening,
@@ -41,7 +41,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     },
   });
 
-  const fetchComments = async () => {
+  const fetchComments = useCallback(async () => {
     setIsLoading(true);
     setLoadError(null);
     try {
@@ -56,11 +56,11 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [postId]);
 
   useEffect(() => {
     fetchComments();
-  }, [postId]);
+  }, [fetchComments]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -116,7 +116,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
       )
     );
     try {
-      const res = await (ApiService as any).likeComment(postId, id);
+      const res = await ApiService.likeComment(postId, id);
       if (typeof res?.likes_count === 'number') {
         setComments((prev) =>
           prev.map((c) => (String(c.id) === id ? { ...c, likes_count: res.likes_count } : c))
@@ -168,7 +168,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
             Répondre
           </button>
         </div>
-        <p className="text-xs text-zinc-200 pl-8 whitespace-pre-wrap break-words">{cm.content}</p>
+        <div className="text-xs text-zinc-200 pl-8 whitespace-pre-wrap break-words">
+          <FormattedText text={cm.content} />
+        </div>
         <div className="flex items-center gap-4 pl-8 pt-0.5">
           <button
             onClick={() => handleLikeComment(cm)}
