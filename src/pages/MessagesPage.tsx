@@ -23,7 +23,6 @@ import {
   Loader2,
   AlertCircle,
   X,
-  CheckCircle,
   Play,
   MoreVertical,
   Smile,

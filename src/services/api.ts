@@ -20,9 +20,11 @@ import type {
 
 export const API_BASE =
   (import.meta as any).env?.VITE_API_URL ||
+  (import.meta as any).env?.VITE_API_BASE ||
   (typeof window !== 'undefined' &&
    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') &&
-   !(import.meta as any).env?.VITE_API_URL
+   !(import.meta as any).env?.VITE_API_URL &&
+   !(import.meta as any).env?.VITE_API_BASE
     ? ''
     : 'https://mai.val.run');
 
@@ -122,8 +124,12 @@ export class ApiService {
       });
     } catch (networkErr: any) {
       // Si la requête vers l'URL absolue échoue (ex. CORS ou Failed to fetch),
-      // et qu'un serveur local est actif, on tente via le proxy relatif local
-      if (url.startsWith('https://mai.val.run') && typeof window !== 'undefined') {
+      // et qu'un serveur local est actif, on tente via le proxy relatif local UNIQUEMENT en local
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+      if (url.startsWith('https://mai.val.run') && isLocalhost) {
         try {
           response = await fetch(endpoint, {
             ...options,
@@ -203,6 +209,13 @@ export class ApiService {
     return res;
   }
 
+  public static async resendCode(email: string, action: string = 'login') {
+    return this.request<{ success: boolean; error?: string }>('/resend-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, action }),
+    });
+  }
+
   public static async getCurrentUser(): Promise<{ user: User; profile: Profile; quotas: MAIQuotas }> {
     try {
       return await this.request<{ user: User; profile: Profile; quotas: MAIQuotas }>('/v1/me');
@@ -254,12 +267,36 @@ export class ApiService {
       try {
         return await this.request(`/api/vibe/search/users?q=${encodeURIComponent(q)}`);
       } catch {
-        // Fallback : utiliser l'endpoint DM users
         try {
           return await this.request(`/v1/dms/users?q=${encodeURIComponent(q)}`);
         } catch {
           return { users: [] };
         }
+      }
+    }
+  }
+
+  public static async searchPosts(q: string, limit: number = 20, offset: number = 0): Promise<{ posts: Post[]; count: number }> {
+    try {
+      return await this.request(`/v1/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
+    } catch {
+      try {
+        return await this.request(`/api/vibe/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
+      } catch {
+        return { posts: [], count: 0 };
+      }
+    }
+  }
+
+  public static async getUserLikedPosts(username: string): Promise<{ posts: Post[] }> {
+    const cleanUser = username.trim().replace(/^@/, '');
+    try {
+      return await this.cachedRequest<{ posts: Post[] }>(`/v1/profiles/${encodeURIComponent(cleanUser)}/likes`, 15000);
+    } catch {
+      try {
+        return await this.request<{ posts: Post[] }>(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/likes`);
+      } catch {
+        return { posts: [] };
       }
     }
   }

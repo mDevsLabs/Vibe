@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle } from 'lucide-react';
 import { Post } from '../types/vibe';
 import { PostCard } from '../components/feed/PostCard';
 import { CommentSection } from '../components/comments/CommentSection';
@@ -25,30 +25,22 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
 }) => {
   const [post, setPost] = useState<Post | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
     const fetchPost = async () => {
       setIsLoading(true);
+      setNotFound(false);
       try {
         const data = await ApiService.getPost(postId);
-        setPost(data.post);
-      } catch {
-        // Mock fallback
-        setPost({
-          id: postId,
-          author_id: 'mathias-id',
-          username: 'mathias_dev',
-          display_name: 'Mathias',
-          avatar_url: undefined,
-          content: 'Bienvenue sur Vibe ! Le réseau social nouvelle génération fusionnant l’expérience fluide de X/Twitter avec l’intelligence artificielle autonome mAI.',
-          format: 'micro_text',
-          visibility: 'public',
-          likes_count: 142,
-          reposts_count: 38,
-          replies_count: 12,
-          bookmarks_count: 24,
-          published_at: new Date().toISOString(),
-        });
+        if (data?.post) {
+          setPost(data.post);
+        } else {
+          setNotFound(true);
+        }
+      } catch (err) {
+        console.error('Erreur chargement post:', err);
+        setNotFound(true);
       } finally {
         setIsLoading(false);
       }
@@ -70,17 +62,54 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
         <h1 className="text-lg font-bold text-white tracking-tight">Publication</h1>
       </header>
 
-      {/* Main Post */}
-      {post && (
-        <div className="border-b border-zinc-800">
-          <PostCard post={post} onOpenProfile={onOpenProfile} />
+      {/* Loading state */}
+      {isLoading && (
+        <div className="p-16 flex flex-col items-center justify-center gap-3 text-zinc-500">
+          <Loader2 className="w-8 h-8 animate-spin text-zinc-400" />
+          <span className="text-sm font-medium">Chargement de la publication…</span>
         </div>
       )}
 
-      {/* Comment Section & Discussion Synthesis */}
-      <div className="p-4">
-        <CommentSection postId={postId} />
-      </div>
+      {/* Not Found state */}
+      {!isLoading && (notFound || !post) && (
+        <div className="p-16 flex flex-col items-center justify-center gap-4 text-center">
+          <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-base font-bold text-white">Cette publication n'existe pas</h2>
+            <p className="text-xs text-zinc-500 max-w-xs">
+              Elle a peut-être été supprimée par son auteur ou le lien est invalide.
+            </p>
+          </div>
+          <button
+            onClick={onBack}
+            className="mt-2 px-5 py-2 rounded-full bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors"
+          >
+            Retour au fil d'actualité
+          </button>
+        </div>
+      )}
+
+      {/* Main Post & Comments */}
+      {!isLoading && post && (
+        <>
+          <div className="border-b border-zinc-800">
+            <PostCard
+              post={post}
+              onOpenProfile={onOpenProfile}
+              onPostDeleted={() => {
+                onBack();
+              }}
+            />
+          </div>
+
+          {/* Comment Section & Discussion Synthesis */}
+          <div className="p-4">
+            <CommentSection postId={postId} />
+          </div>
+        </>
+      )}
     </div>
   );
 };

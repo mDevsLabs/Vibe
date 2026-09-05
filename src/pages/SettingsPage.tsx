@@ -11,16 +11,9 @@ import {
   Bell,
   Shield,
   Download,
-  Lock,
   Check,
-  LogOut,
-  Mail,
-  MessageSquare,
   Sliders,
   EyeOff,
-  AtSign,
-  KeyRound,
-  Trash2,
   Sparkles,
   Palette,
   Type,
@@ -67,7 +60,7 @@ const DevicePermissionHint: React.FC = () => {
 };
 
 export const SettingsPage: React.FC = () => {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const { theme, setTheme, accentColor, setAccentColor, fontSize, setFontSize } = useTheme();
 
   // Feed customization
@@ -85,6 +78,7 @@ export const SettingsPage: React.FC = () => {
   const [blurSensitive, setBlurSensitive] = useState(true);
   const [emailNotifs, setEmailNotifs] = useState(true);
   const [pushNotifs, setPushNotifs] = useState(true);
+  const [maiAutoApproveTools, setMaiAutoApproveTools] = useState(false);
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -109,6 +103,9 @@ export const SettingsPage: React.FC = () => {
           setBlurSensitive(s.blur_sensitive_content ?? true);
           setEmailNotifs(s.email_notifications ?? true);
           setPushNotifs(s.push_notifications ?? true);
+          if (s.mai_auto_approve_tools !== undefined) {
+            setMaiAutoApproveTools(Boolean(s.mai_auto_approve_tools));
+          }
           if (s.accent_color && s.accent_color in ACCENT_COLORS) {
             setAccentColor(s.accent_color as any);
           }
@@ -146,6 +143,7 @@ export const SettingsPage: React.FC = () => {
         theme_preference: theme,
         accent_color: accentColor,
         font_size: fontSize,
+        mai_auto_approve_tools: maiAutoApproveTools,
       });
 
       setSavedSuccess(true);
@@ -531,6 +529,31 @@ export const SettingsPage: React.FC = () => {
               </div>
 
               <DevicePermissionHint />
+            </div>
+          </div>
+
+          {/* Section 5: Agent Autonome & mAI */}
+          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+            <div className="flex items-center gap-2 text-white font-bold text-sm">
+              <Sparkles className="w-4 h-4 text-purple-400" />
+              <span>Intelligence Artificielle mAI</span>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-semibold text-white">Approbation automatique des outils mAI</span>
+                  <p className="text-zinc-500 text-[11px]">
+                    Autoriser l'agent mAI à exécuter ses requêtes et outils d'assistance sans confirmation manuelle
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={maiAutoApproveTools}
+                  onChange={(e) => setMaiAutoApproveTools(e.target.checked)}
+                  className="w-4 h-4 accent-purple-500 cursor-pointer"
+                />
+              </div>
             </div>
           </div>
 

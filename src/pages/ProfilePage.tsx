@@ -5,7 +5,7 @@
  * ============================================================================
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Calendar,
   Edit3,
@@ -24,6 +24,7 @@ import { useAuth } from '../context/AuthContext';
 import { PostCard } from '../components/feed/PostCard';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
+import { FormattedText } from '../components/common/FormattedText';
 
 interface ProfilePageProps {
   username?: string;
@@ -45,6 +46,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [likedPosts, setLikedPosts] = useState<Post[]>([]);
+  const [isLoadingLiked, setIsLoadingLiked] = useState(false);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
@@ -66,7 +69,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchProfile = async () => {
+  const fetchProfile = useCallback(async () => {
     setIsLoadingProfile(true);
     setProfileError(null);
     try {
@@ -93,7 +96,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     } finally {
       setIsLoadingProfile(false);
     }
-  };
+  }, [targetUsername, isSelf, authProfile, user?.username]);
 
   useEffect(() => {
     if (!username && isLoadingSession) return;
@@ -105,7 +108,18 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     return () => {
       window.removeEventListener('vibe:post_updated', handlePostUpdated);
     };
-  }, [targetUsername, isLoadingSession, username]);
+  }, [fetchProfile, username, isLoadingSession]);
+
+  // Charger les publications aimées au clic sur l'onglet 'likes'
+  useEffect(() => {
+    if (activeTab === 'likes' && likedPosts.length === 0) {
+      setIsLoadingLiked(true);
+      ApiService.getUserLikedPosts(targetUsername)
+        .then((res) => setLikedPosts(res.posts || []))
+        .catch(() => setLikedPosts([]))
+        .finally(() => setIsLoadingLiked(false));
+    }
+  }, [activeTab, targetUsername, likedPosts.length]);
 
   const handleFollowToggle = async () => {
     const next = !isFollowing;
@@ -214,6 +228,19 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     (isSelf && user?.is_verified) ||
     ['plus', 'pro', 'max'].includes(((isSelf ? user?.tier : (profile as any)?.tier) || '').toLowerCase().trim())
   );
+
+  const displayedPosts = useMemo(() => {
+    if (activeTab === 'media') {
+      return posts.filter((p) => p.media_assets && p.media_assets.length > 0);
+    }
+    if (activeTab === 'likes') {
+      return likedPosts;
+    }
+    if (activeTab === 'replies') {
+      return posts.filter((p) => (p as any).is_reply || Number(p.replies_count || 0) > 0);
+    }
+    return posts;
+  }, [activeTab, posts, likedPosts]);
 
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
@@ -353,9 +380,12 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             <span className="text-xs text-zinc-500 font-mono">@{targetUsername}</span>
           </div>
 
-          <p className="text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap">
-            {profile?.bio || 'Membre actif de la communauté Vibe.'}
-          </p>
+          <div className="text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap">
+            <FormattedText
+              text={profile?.bio || 'Membre actif de la communauté Vibe.'}
+              onOpenProfile={onOpenProfile}
+            />
+          </div>
 
           {/* Interests Tags */}
           {profile?.interests && profile.interests.length > 0 && (
@@ -383,9 +413,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
               </div>
             )}
             {isVerified && (
-              <div className="flex items-center gap-1 text-[#1D9BF0]">
-                <BadgeCheck className="w-3.5 h-3.5" />
-                <span>Compte Vérifié</span>
+              <div className="flex items-center gap-1">
+                <VerifiedBadge isVerified={true} tier={isSelf ? user?.tier : (profile as any)?.tier} size="xs" />
+                <span className="text-zinc-400">Compte Vérifié</span>
               </div>
             )}
           </div>
@@ -422,14 +452,18 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
       {/* Real Posts Stream from DB */}
       <div className="divide-y divide-zinc-900">
-        {isLoadingProfile && (
+        {(isLoadingProfile || (activeTab === 'likes' && isLoadingLiked)) && (
           <div className="p-16 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
             <Loader2 className="w-6 h-6 animate-spin text-zinc-500" />
-            <span>Chargement des publications…</span>
+            <span>
+              {activeTab === 'likes'
+                ? 'Chargement des mentions J’aime…'
+                : 'Chargement des publications…'}
+            </span>
           </div>
         )}
 
-        {!isLoadingProfile && profileError && (
+        {!isLoadingProfile && !(activeTab === 'likes' && isLoadingLiked) && profileError && (
           <div className="p-16 text-center text-zinc-500 text-xs flex flex-col items-center gap-3">
             <span>{profileError}</span>
             <button
@@ -441,19 +475,28 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         )}
 
-        {!isLoadingProfile && !profileError && posts.map((p) => (
+        {!isLoadingProfile && !(activeTab === 'likes' && isLoadingLiked) && !profileError && displayedPosts.map((p) => (
           <PostCard
             key={p.id}
             post={p}
-            onPostDeleted={(postId) => setPosts((prev) => prev.filter((x) => String(x.id) !== String(postId)))}
+            onPostDeleted={(postId) => {
+              setPosts((prev) => prev.filter((x) => String(x.id) !== String(postId)));
+              setLikedPosts((prev) => prev.filter((x) => String(x.id) !== String(postId)));
+            }}
             onOpenThread={onOpenThread}
             onOpenProfile={onOpenProfile}
           />
         ))}
 
-        {!isLoadingProfile && !profileError && posts.length === 0 && (
+        {!isLoadingProfile && !(activeTab === 'likes' && isLoadingLiked) && !profileError && displayedPosts.length === 0 && (
           <div className="p-16 text-center text-zinc-500 text-xs">
-            Aucune vibe publiée pour le moment.
+            {activeTab === 'media'
+              ? 'Aucun média partagé pour le moment.'
+              : activeTab === 'likes'
+              ? 'Aucune mention J’aime pour le moment.'
+              : activeTab === 'replies'
+              ? 'Aucune réponse publiée pour le moment.'
+              : 'Aucune vibe publiée pour le moment.'}
           </div>
         )}
       </div>

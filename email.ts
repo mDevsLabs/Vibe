@@ -149,7 +149,7 @@ export async function sendHtmlEmail(to: string, subject: string, html: string): 
 
   if (googleScriptsUrl && googleScriptSecret) {
     try {
-      const res = await fetch(googleScriptsUrl, {
+      let res = await fetch(googleScriptsUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -161,10 +161,29 @@ export async function sendHtmlEmail(to: string, subject: string, html: string): 
           htmlBody: html,
           body: "Veuillez activer l'affichage HTML pour lire cet e-mail mAI.",
         }),
+        redirect: "manual",
       });
 
+      // Google Apps Script renvoie un code 302 avec une URL de redirection temporaire vers script.googleusercontent.com/macros/echo.
+      // Si le client HTTP suit la redirection en conservant la méthode POST, macros/echo rejette la requête avec un 405 Method Not Allowed.
+      // Il faut obligatoirement suivre la redirection avec la méthode GET.
+      if (
+        res.status === 301 ||
+        res.status === 302 ||
+        res.status === 303 ||
+        res.status === 307 ||
+        res.status === 308
+      ) {
+        const location = res.headers.get("Location") || res.headers.get("location");
+        if (location) {
+          res = await fetch(location, {
+            method: "GET",
+          });
+        }
+      }
+
       if (res.ok) {
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (data.success) {
           const maskedTo = to.replace(/(.{2}).*(@.*)/, "$1***$2");
           console.log(`[EMAIL] Google Apps Script OK to=${maskedTo}`);

@@ -7,9 +7,10 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Search, Hash, Users, FileText, TrendingUp, ArrowUpRight,
-  Loader2, X, CheckCircle2, ChevronRight
+  Loader2, X, ChevronRight
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { PostCard } from '../components/feed/PostCard';
@@ -41,6 +42,7 @@ interface TrendItem {
 }
 
 export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenThread }) => {
+  const location = useLocation();
   const [query, setQuery] = useState('');
   const [activeTab, setActiveTab] = useState<SearchTab>('posts');
   const [hasSearched, setHasSearched] = useState(false);
@@ -75,7 +77,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   useEffect(() => { fetchTrends(); }, []);
 
   // ─── Recherche multi-catégories ────────────────────────────────────────────
-  const performSearch = useCallback(async (q: string) => {
+  const performSearch = useCallback(async (q: string, overrideTab?: SearchTab) => {
     if (!q.trim()) {
       setHasSearched(false);
       setPostResults([]);
@@ -89,19 +91,25 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
 
     const cleanQ = q.trim();
     const isHashtag = cleanQ.startsWith('#');
-    const searchQ = isHashtag ? cleanQ.replace('#', '') : cleanQ;
+    const searchQ = isHashtag ? cleanQ.replace(/^#/, '') : cleanQ;
 
     // Lance les 3 recherches en parallèle
     const [postsRes, usersRes, trendsRes] = await Promise.allSettled([
-      // Publications — feed trending filtré par mot-clé
-      ApiService.getFeed('trending', isHashtag ? searchQ : undefined).then(res => {
-        if (!res?.posts) return [];
-        if (isHashtag) return res.posts;
-        return res.posts.filter(p =>
-          (p.content || '').toLowerCase().includes(cleanQ.toLowerCase()) ||
-          (p.username || '').toLowerCase().includes(cleanQ.toLowerCase()) ||
-          (p.display_name || '').toLowerCase().includes(cleanQ.toLowerCase())
-        );
+      // Publications — nouvelle API recherche backend dédiée avec fallback
+      ApiService.searchPosts(cleanQ).then(res => {
+        if (res?.posts && res.posts.length > 0) return res.posts;
+        return ApiService.getFeed('trending', isHashtag ? searchQ : undefined).then(f => {
+          if (!f?.posts) return [];
+          if (isHashtag) return f.posts;
+          return f.posts.filter(p =>
+            (p.content || '').toLowerCase().includes(cleanQ.toLowerCase()) ||
+            (p.username || '').toLowerCase().includes(cleanQ.toLowerCase()) ||
+            (p.display_name || '').toLowerCase().includes(cleanQ.toLowerCase())
+          );
+        });
+      }).catch(async () => {
+        const f = await ApiService.getFeed('trending', isHashtag ? searchQ : undefined);
+        return f?.posts || [];
       }),
 
       // Comptes
@@ -120,8 +128,10 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
     setUserResults(usersRes.status === 'fulfilled' ? usersRes.value : []);
     setHashtagResults(trendsRes.status === 'fulfilled' ? trendsRes.value : []);
 
-    // Sélectionner l'onglet le plus pertinent
-    if (isHashtag) {
+    // Sélectionner l'onglet demandé ou le plus pertinent
+    if (overrideTab) {
+      setActiveTab(overrideTab);
+    } else if (isHashtag) {
       setActiveTab('hashtags');
     } else if (usersRes.status === 'fulfilled' && usersRes.value.length > (postsRes.status === 'fulfilled' ? postsRes.value.length : 0)) {
       setActiveTab('accounts');
@@ -131,6 +141,19 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
 
     setIsSearching(false);
   }, []);
+
+  // Détection des URL query params (ex: ?q=%23tech&tab=hashtags)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      const urlQ = params.get('q');
+      const urlTab = params.get('tab') as SearchTab | null;
+      if (urlQ) {
+        setQuery(urlQ);
+        performSearch(urlQ, urlTab || undefined);
+      }
+    } catch {}
+  }, [location.search, performSearch]);
 
   // Debounce automatique à la frappe
   useEffect(() => {
@@ -151,8 +174,9 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   };
 
   const handleTrendClick = (tag: string) => {
-    setQuery(tag);
-    performSearch(tag);
+    const formattedTag = tag.startsWith('#') ? tag : `#${tag}`;
+    setQuery(formattedTag);
+    performSearch(formattedTag, 'hashtags');
   };
 
   // ─── Onglets de résultats ─────────────────────────────────────────────────
@@ -310,10 +334,14 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
                   Aucun hashtag trouvé pour « {query} »
                 </div>
               ) : (
-                hashtagResults.map((item, idx) => (
+                hashtagResults.map((item) => (
                   <button
                     key={item.tag}
-                    onClick={() => handleTrendClick(item.tag)}
+                    onClick={() => {
+                      const tag = item.tag.startsWith('#') ? item.tag : `#${item.tag}`;
+                      setQuery(tag);
+                      performSearch(tag, 'posts');
+                    }}
                     className="w-full p-4 hover:bg-zinc-900/60 transition-colors flex items-center justify-between group text-left"
                   >
                     <div className="flex items-center gap-3">

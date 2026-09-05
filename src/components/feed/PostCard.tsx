@@ -14,8 +14,7 @@ import {
   MoreHorizontal,
   Trash2,
   Sparkles,
-  HelpCircle,
-  Play
+  HelpCircle
 } from 'lucide-react';
 import { Post } from '../../types/vibe';
 import { ApiService } from '../../services/api';
@@ -23,6 +22,7 @@ import { useAuth } from '../../context/AuthContext';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import { FormattedText } from '../common/FormattedText';
 
 interface PostCardProps {
   post: Post;
@@ -231,9 +231,9 @@ export const PostCardBase: React.FC<PostCardProps> = ({
           </div>
 
           {/* Post Text (Unlimited) */}
-          <p className="text-zinc-100 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words">
-            {post.content}
-          </p>
+          <div className="text-zinc-100 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words">
+            <FormattedText text={post.content} onOpenProfile={onOpenProfile} />
+          </div>
 
           {/* Multi-Image Grid Gallery (Up to 5 images) */}
           {images.length > 0 && (

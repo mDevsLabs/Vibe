@@ -5,8 +5,8 @@
  * ============================================================================
  */
 
-import React, { useState } from 'react';
-import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Lock, Mail, User as UserIcon, KeyRound, AlertCircle, Eye, EyeOff, ArrowRight, Loader2 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { VibeLogo } from '../components/layout/VibeLogo';
@@ -34,6 +34,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
+
+  const handleResendCode = async () => {
+    if (resendCooldown > 0 || !email.trim() || isLoading) return;
+    setError(null);
+    setIsLoading(true);
+    try {
+      await ApiService.resendCode(email.trim(), mode);
+      setNoticeMessage(`Un nouveau code de vérification a été envoyé à ${email}.`);
+      setResendCooldown(60);
+    } catch (err: any) {
+      setError(err.message || "Erreur lors du renvoi du code.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -145,6 +169,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
             <span className="flex-1">{error}</span>
           </div>
+          {step === 'credentials' && mode === 'login' && error.includes('Aucun compte') && (
+            <div className="pt-2 border-t border-zinc-800 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-zinc-400">Nouveau sur Vibe ?</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('register');
+                  setError(null);
+                  setNoticeMessage('Renseignez vos informations pour créer votre compte.');
+                }}
+                className="px-2.5 py-1 rounded-lg bg-white text-black font-bold text-xs hover:bg-zinc-200 transition-colors shrink-0"
+              >
+                Créer mon compte →
+              </button>
+            </div>
+          )}
           {step === 'credentials' && (
             <div className="pt-2 border-t border-zinc-800 flex items-center justify-between gap-2">
               <span className="text-[11px] text-zinc-400">Code déjà reçu dans vos e-mails ?</span>
@@ -185,6 +225,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={mode === 'register' ? 'nom@exemple.com' : 'Votre nom ou email'}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                 required
               />
@@ -201,6 +244,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={username}
                   onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/\s+/g, '_'))}
                   placeholder="nom_utilisateur"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500 font-mono"
                   required
                 />
@@ -290,6 +336,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={email}
                 onChange={(e) => setEmail(e.target.value.trim())}
                 placeholder="votre@email.com"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                 required
               />
@@ -307,10 +356,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 onChange={(e) => setOtpCode(e.target.value.trim())}
                 placeholder="123456"
                 maxLength={6}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-base text-white text-center tracking-widest font-mono font-bold focus:outline-none focus:border-zinc-500"
                 required
                 autoFocus
               />
+            </div>
+            <div className="flex items-center justify-between text-xs pt-1">
+              <span className="text-zinc-400">Code non reçu ou expiré ?</span>
+              <button
+                type="button"
+                onClick={handleResendCode}
+                disabled={resendCooldown > 0 || isLoading || !email.trim()}
+                className="text-zinc-200 hover:text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {resendCooldown > 0 ? `Renvoyer (${resendCooldown}s)` : 'Renvoyer le code'}
+              </button>
             </div>
           </div>
 
