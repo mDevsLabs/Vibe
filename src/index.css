@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
@@ -250,6 +250,52 @@ html.light .liquid-glass-panel .text-white\/75,
 html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
 [data-theme="light"] .liquid-glass-panel .hover\:bg-white\/10:hover {
   background: rgba(0, 0, 0, 0.06);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * SAFE AREAS & MOBILE (encoches iOS, barre d'onglets, clavier)
+ * ───────────────────────────────────────────────────────────── */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-safe {
+  bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Header sticky : statut-bar iOS + hauteur de contenu standard */
+.header-safe {
+  padding-top: max(env(safe-area-inset-top, 0px), 0.25rem);
+}
+
+/* Focus ring harmonisé sur toute l'app (clavier & a11y) */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--vibe-accent, #7c8cff) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 0.75rem;
+}
+
+/* Cartes & menus : élévation plus douce (liquid-glass raffiné) */
+html.dark .vibe-menu,
+[data-theme="dark"] .vibe-menu {
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+html.light .vibe-menu,
+[data-theme="light"] .vibe-menu {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 /* ─────────────────────────────────────────────────────────────

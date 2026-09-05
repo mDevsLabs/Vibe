@@ -40,6 +40,24 @@ export interface MediaAsset {
   alt_text?: string;
 }
 
+/** Publication citée intégrée à un post (données simplifiées). */
+export interface QuotedPost {
+  id: string;
+  author_id?: string;
+  username: string;
+  display_name?: string;
+  avatar_url?: string;
+  is_verified?: boolean;
+  content: string;
+  format?: Post['format'];
+  likes_count?: number;
+  replies_count?: number;
+  published_at?: string;
+  created_via?: Post['created_via'];
+  ai_generated?: boolean;
+  media_assets?: MediaAsset[];
+}
+
 export interface Post {
   id: string;
   author_id: string;
@@ -59,6 +77,13 @@ export interface Post {
   toxicity_score?: number;
   sentiment_score?: number;
   created_via?: 'web' | 'mai_agent' | 'api';
+  /** Badge « Créé avec l'IA » déclaré par l'auteur (ou défaut de ses réglages). */
+  ai_generated?: boolean;
+  /** Post original cité (quote-post), s'il y en a un. */
+  quoted_post_id?: string | null;
+  quoted_post?: QuotedPost | null;
+  /** Retour d'algorithme de l'utilisateur courant sur ce post. */
+  my_feedback?: 'more' | 'less' | null;
   published_at: string;
   has_liked?: boolean;
   has_reposted?: boolean;
@@ -72,6 +97,7 @@ export interface Post {
     semanticScore: number;
     graphProximityScore: number;
     safetyFactor: number;
+    interestFactor?: number;
   };
   media_url?: string;
   media_assets?: MediaAsset[];
@@ -124,7 +150,7 @@ export interface NotificationItem {
   actor_id?: string;
   actor_username?: string;
   actor_avatar_url?: string;
-  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction';
+  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction' | 'quote';
   post_id?: string;
   message: string;
   is_read: boolean;
@@ -166,6 +192,8 @@ export interface UserSettings {
   age_restriction_enabled: boolean;
   theme_preference: string;
   mai_auto_approve_tools?: boolean;
+  /** Les nouvelles publications sont-elles marquées « créées avec l'IA » par défaut ? */
+  posts_ai_generated_by_default?: boolean;
   accent_color?: string;
   font_size?: 'small' | 'medium' | 'large';
 }

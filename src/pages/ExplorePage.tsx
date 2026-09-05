@@ -43,7 +43,13 @@ interface TrendItem {
 
 export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenThread }) => {
   const location = useLocation();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('q') || '';
+    } catch {
+      return '';
+    }
+  });
   const [activeTab, setActiveTab] = useState<SearchTab>('posts');
   const [hasSearched, setHasSearched] = useState(false);
 
@@ -61,7 +67,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Chargement des tendances réelles ────────────────────────────────────
-  const fetchTrends = async () => {
+  const fetchTrends = useCallback(async () => {
     setIsLoadingTrends(true);
     try {
       const res = await ApiService.getTrends();
@@ -72,9 +78,11 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
     } finally {
       setIsLoadingTrends(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { fetchTrends(); }, []);
+  useEffect(() => {
+    fetchTrends();
+  }, [fetchTrends]);
 
   // ─── Recherche multi-catégories ────────────────────────────────────────────
   const performSearch = useCallback(async (q: string, overrideTab?: SearchTab) => {
@@ -148,12 +156,14 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
       const params = new URLSearchParams(location.search);
       const urlQ = params.get('q');
       const urlTab = params.get('tab') as SearchTab | null;
-      if (urlQ) {
+      if (urlQ && urlQ !== query) {
         setQuery(urlQ);
+        performSearch(urlQ, urlTab || undefined);
+      } else if (urlQ && !hasSearched) {
         performSearch(urlQ, urlTab || undefined);
       }
     } catch {}
-  }, [location.search, performSearch]);
+  }, [location.search, performSearch, query, hasSearched]);
 
   // Debounce automatique à la frappe
   useEffect(() => {
@@ -190,7 +200,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
 
       {/* ─── Sticky Header ─────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/90 border-b border-zinc-800/80 p-3 space-y-3">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/90 border-b border-zinc-800/80 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 space-y-3">
 
         {/* Barre de recherche */}
         <div className="relative">

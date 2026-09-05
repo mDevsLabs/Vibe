@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Loader2, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle, Sparkles } from 'lucide-react';
 import { Post } from '../types/vibe';
 import { PostCard } from '../components/feed/PostCard';
 import { CommentSection } from '../components/comments/CommentSection';
@@ -52,7 +52,7 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8">
       {/* Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 py-3 flex items-center gap-4">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 flex items-center gap-4">
         <button
           onClick={onBack}
           className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
@@ -60,6 +60,17 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
           <ArrowLeft className="w-5 h-5" />
         </button>
         <h1 className="text-lg font-bold text-white tracking-tight">Publication</h1>
+        <button
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId } }))
+          }
+          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-semibold hover:bg-zinc-800 transition-colors"
+          title="Mentionner cette publication à l'assistant mAI (contenu, médias, commentaires et stats transmis)"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Mentionner dans mAI</span>
+          <span className="sm:hidden">mAI</span>
+        </button>
       </header>
 
       {/* Loading state */}

@@ -14,6 +14,8 @@ import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { FormattedText } from '../common/FormattedText';
 
+const nextToastId = () => Date.now();
+
 interface CommentSectionProps {
   postId: string;
 }
@@ -91,7 +93,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
       window.dispatchEvent(
         new CustomEvent('vibe:in_app_toast', {
           detail: {
-            id: Date.now(),
+            id: nextToastId(),
             title: 'Connexion requise',
             message: 'Connectez-vous pour aimer un commentaire.',
           },

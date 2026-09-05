@@ -14,7 +14,11 @@ import {
   MoreHorizontal,
   Trash2,
   Sparkles,
-  HelpCircle
+  HelpCircle,
+  ThumbsUp,
+  ThumbsDown,
+  Quote,
+  Check
 } from 'lucide-react';
 import { Post } from '../../types/vibe';
 import { ApiService } from '../../services/api';
@@ -32,6 +36,21 @@ interface PostCardProps {
   onOpenProfile?: (username: string) => void;
 }
 
+const formatTimeAgo = (dateStr: string): string => {
+  try {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "À l'instant";
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}j`;
+  } catch {
+    return '';
+  }
+};
+
 export const PostCardBase: React.FC<PostCardProps> = ({
   post,
   onPostDeleted,
@@ -48,8 +67,45 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const [showMenu, setShowMenu] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [likeBurst, setLikeBurst] = useState(false);
+  // Retour d'algorithme : « Cela m'intéresse » / « Cela ne m'intéresse pas »
+  const [myFeedback, setMyFeedback] = useState<'more' | 'less' | null>(post.my_feedback || null);
 
   const isAuthor = user && (user.id === post.author_id || user.username === post.username);
+
+  /**
+   * Affine l'algorithme : enregistre/retire un retour d'intérêt qui
+   * influence le classement des futures Vibes (« Pour Vous »).
+   */
+  const applyFeedback = async (value: 'more' | 'less') => {
+    const newValue = myFeedback === value ? null : value;
+    setMyFeedback(newValue);
+    try {
+      await ApiService.sendPostFeedback(post.id, newValue);
+      NotificationService.showInAppToast(
+        newValue === 'more'
+          ? "Cela m'intéresse"
+          : newValue === 'less'
+          ? "Cela ne m'intéresse pas"
+          : 'Préférence retirée',
+        newValue
+          ? 'Vos Vibes futures seront affinées.'
+          : "Ce post n'influence plus votre algorithme.",
+        'info'
+      );
+    } catch {
+      setMyFeedback(myFeedback);
+    }
+  };
+
+  const handleQuote = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    window.dispatchEvent(new CustomEvent('vibe:open_composer', { detail: { quotedPost: post } }));
+  };
+
+  const handleAskMAI = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId: post.id } }));
+  };
 
   const handleLike = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -113,21 +169,6 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     }
   };
 
-  const timeAgo = (dateStr: string) => {
-    try {
-      const diff = Date.now() - new Date(dateStr).getTime();
-      const mins = Math.floor(diff / 60000);
-      if (mins < 1) return "À l'instant";
-      if (mins < 60) return `${mins}m`;
-      const hours = Math.floor(mins / 60);
-      if (hours < 24) return `${hours}h`;
-      const days = Math.floor(hours / 24);
-      return `${days}j`;
-    } catch {
-      return '';
-    }
-  };
-
   const allMedia: Array<{ url: string; media_type?: string; alt_text?: string }> = post.media_assets && post.media_assets.length > 0
     ? post.media_assets
     : post.media_url
@@ -136,6 +177,11 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
   const images = allMedia.filter((m) => m.media_type !== 'video' && !m.url?.endsWith('.mp4'));
   const videos = allMedia.filter((m) => m.media_type === 'video' || m.url?.endsWith('.mp4'));
+
+  const quotedPost = post.quoted_post;
+  const quotedImage = quotedPost?.media_assets?.find(
+    (m) => (m.media_type || 'image') !== 'video' && !m.url?.endsWith('.mp4')
+  );
 
   return (
     <article
@@ -177,12 +223,19 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               <VerifiedBadge isVerified={post.is_verified || (post as any).isVerified} tier={(post as any).tier} size="sm" />
               <span className="text-zinc-500 text-xs">@{post.username}</span>
               <span className="text-zinc-600 text-xs">·</span>
-              <span className="text-zinc-500 text-xs font-mono">{timeAgo(post.published_at)}</span>
+              <span className="text-zinc-500 text-xs font-mono">{formatTimeAgo(post.published_at)}</span>
 
               {post.created_via === 'mai_agent' && (
                 <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300 font-mono">
                   <Sparkles className="w-2.5 h-2.5" />
                   mAI Post
+                </span>
+              )}
+
+              {post.ai_generated && post.created_via !== 'mai_agent' && (
+                <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-violet-500/15 border border-violet-500/30 text-violet-500 font-semibold">
+                  <Sparkles className="w-2.5 h-2.5" />
+                  Créé avec l'IA
                 </span>
               )}
             </div>
@@ -200,7 +253,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               </button>
 
               {showMenu && (
-                <div className="absolute right-0 top-6 z-20 w-44 bg-zinc-900 border border-zinc-700 rounded-2xl p-1.5 shadow-2xl space-y-1">
+                <div className="absolute right-0 top-6 z-20 w-48 vibe-menu rounded-2xl p-1.5 space-y-1">
                   {onOpenExplain && (
                     <button
                       onClick={(e) => {
@@ -214,6 +267,45 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                       <span>Pourquoi ce post ?</span>
                     </button>
                   )}
+
+                  {/* Affinement de l'algorithme (Vibes futures) */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMenu(false);
+                      applyFeedback('more');
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs hover:bg-zinc-800 flex items-center gap-2 transition-colors ${
+                      myFeedback === 'more' ? 'text-white font-bold' : 'text-zinc-300 hover:text-white'
+                    }`}
+                  >
+                    <ThumbsUp className="w-3.5 h-3.5 text-white" />
+                    <span>Cela m'intéresse</span>
+                    {myFeedback === 'more' && <Check className="w-3 h-3 ml-auto" />}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMenu(false);
+                      applyFeedback('less');
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs hover:bg-zinc-800 flex items-center gap-2 transition-colors ${
+                      myFeedback === 'less' ? 'text-white font-bold' : 'text-zinc-300 hover:text-white'
+                    }`}
+                  >
+                    <ThumbsDown className="w-3.5 h-3.5 text-white" />
+                    <span>Cela ne m'intéresse pas</span>
+                    {myFeedback === 'less' && <Check className="w-3 h-3 ml-auto" />}
+                  </button>
+
+                  {/* Mentionner la publication à l'assistant mAI */}
+                  <button
+                    onClick={handleAskMAI}
+                    className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-white" />
+                    <span>Demander à mAI</span>
+                  </button>
 
                   {isAuthor && (
                     <button
@@ -234,6 +326,51 @@ export const PostCardBase: React.FC<PostCardProps> = ({
           <div className="text-zinc-100 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words">
             <FormattedText text={post.content} onOpenProfile={onOpenProfile} />
           </div>
+
+          {/* Publication citée (quote-post) : post original intégré, cliquable */}
+          {quotedPost && (
+            <div
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onOpenThread) onOpenThread(quotedPost as unknown as Post);
+              }}
+              className="mt-1 rounded-2xl border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900/70 transition-colors p-3 cursor-pointer"
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <ProfileAvatar
+                  src={quotedPost.avatar_url}
+                  alt={quotedPost.username}
+                  size="xs"
+                  fallbackName={quotedPost.username}
+                />
+                <span className="text-xs font-bold text-white truncate">
+                  {quotedPost.display_name || quotedPost.username}
+                </span>
+                <VerifiedBadge isVerified={quotedPost.is_verified} size="sm" />
+                <span className="text-xs text-zinc-500 truncate">@{quotedPost.username}</span>
+                {quotedPost.published_at && (
+                  <>
+                    <span className="text-zinc-600 text-xs shrink-0">·</span>
+                    <span className="text-xs text-zinc-500 font-mono shrink-0">
+                      {formatTimeAgo(quotedPost.published_at)}
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="text-sm text-zinc-300 mt-1.5 line-clamp-4 whitespace-pre-wrap break-words">
+                {quotedPost.content}
+              </p>
+              {quotedImage && (
+                <img
+                  src={quotedImage.url}
+                  alt={quotedImage.alt_text || 'Média cité'}
+                  loading="lazy"
+                  decoding="async"
+                  className="mt-2 rounded-xl border border-zinc-800 max-h-44 w-full object-cover"
+                />
+              )}
+            </div>
+          )}
 
           {/* Multi-Image Grid Gallery (Up to 5 images) */}
           {images.length > 0 && (
@@ -315,6 +452,17 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                 <Repeat className="w-4 h-4" />
               </div>
               <span>{repostsCount}</span>
+            </button>
+
+            {/* Citer (quote-post : nouvelle publication avec l'original intégré) */}
+            <button
+              onClick={handleQuote}
+              className="flex items-center gap-1.5 hover:text-white transition-colors group"
+              title="Citer cette publication dans un nouveau post"
+            >
+              <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
+                <Quote className="w-4 h-4" />
+              </div>
             </button>
 
             {/* Like */}

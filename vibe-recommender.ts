@@ -30,6 +30,9 @@ export interface PostCandidate {
   candidateTopic?: string;
   candidateSentiment?: number;
   toxicityScore?: number;
+  /** Signal d'affinement -1..1 issu des retours « Cela m'intéresse / pas » + intérêts. */
+  interestSignal?: number;
+  matchedInterestTags?: string[];
   tuner?: FeedTunerWeights;
 }
 
@@ -45,6 +48,7 @@ export interface RecommendationSignal {
     graphProximityScore: number;
     safetyFactor: number;
     boostFactor: number;
+    interestFactor: number;
   };
 }
 
@@ -93,6 +97,10 @@ export class HybridRecommender {
     if (candidate.isVerifiedAuthor) boostFactor *= 1.15; // +15% pour comptes vérifiés
     if (candidate.hasMedia) boostFactor *= 1.10;          // +10% pour publications avec médias
 
+    // Affinement utilisateur : retours « Cela m'intéresse / pas » + centres d'intérêt
+    const interestSignal = Math.max(-1, Math.min(1, candidate.interestSignal || 0));
+    const interestFactor = 1 + 0.35 * interestSignal; // ×0.65 (pas intéressé) .. ×1.35 (intéressé)
+
     const rawScore =
       tuner.freshness * freshnessScore +
       tuner.popularity * engagementScore +
@@ -100,10 +108,17 @@ export class HybridRecommender {
       tuner.novelty * velocityScore +
       tuner.serendipity * (1 - semanticScore * 0.4);
 
-    const totalScore = Math.max(0, Math.min(100, Math.round(rawScore * safetyFactor * boostFactor * 100)));
+    const totalScore = Math.max(
+      0,
+      Math.min(100, Math.round(rawScore * safetyFactor * boostFactor * interestFactor * 100))
+    );
 
     let explanationText = "Recommandé selon vos centres d'intérêt et l'engagement.";
-    if (candidate.isFollowedAuthor) {
+    if (interestSignal >= 0.4) {
+      explanationText = "🎯 Affiné d'après vos retours « Cela m'intéresse ».";
+    } else if (interestSignal <= -0.4) {
+      explanationText = "📉 Moins mis en avant : retour « Cela ne m'intéresse pas ».";
+    } else if (candidate.isFollowedAuthor) {
       explanationText = "Publication d'un créateur que vous suivez.";
     } else if (velocityScore > 0.6) {
       explanationText = "🔥 Publication en forte progression.";
@@ -116,7 +131,12 @@ export class HybridRecommender {
     return {
       totalScore,
       explanationText,
-      matchedInterests: candidate.candidateTopic ? [candidate.candidateTopic] : ["Général"],
+      matchedInterests:
+        candidate.matchedInterestTags && candidate.matchedInterestTags.length > 0
+          ? candidate.matchedInterestTags
+          : candidate.candidateTopic
+          ? [candidate.candidateTopic]
+          : ["Général"],
       breakdown: {
         freshnessScore: Math.round(freshnessScore * 100),
         engagementScore: Math.round(engagementScore * 100),
@@ -125,6 +145,7 @@ export class HybridRecommender {
         graphProximityScore: Math.round(graphProximityScore * 100),
         safetyFactor: Number(safetyFactor.toFixed(2)),
         boostFactor: Number(boostFactor.toFixed(2)),
+        interestFactor: Number(interestFactor.toFixed(2)),
       },
     };
   }

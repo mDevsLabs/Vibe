@@ -166,7 +166,7 @@ export function registerAudioRoutes(app: Hono) {
         freeSpeechModels.length > 0 ? freeSpeechModels : FALLBACK_SPEECH_MODELS;
 
       return c.json({ data: finalModels, object: "list" });
-    } catch (_err) {
+    } catch {
       return c.json({ data: FALLBACK_SPEECH_MODELS, object: "list" });
     }
   };

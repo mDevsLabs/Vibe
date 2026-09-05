@@ -17,6 +17,7 @@ import type {
   UserSettings,
   User,
 } from '../types/vibe';
+import { AppStorage } from './storageAdapter';
 
 export const API_BASE =
   (import.meta as any).env?.VITE_API_URL ||
@@ -90,16 +91,16 @@ export class ApiService {
     this.cachedRequest(endpoint, 60000).catch(() => {});
   }
   public static getToken(): string | null {
-    return localStorage.getItem('vibe_jwt_token');
+    return AppStorage.getItem('vibe_jwt_token');
   }
 
   public static setToken(token: string) {
-    localStorage.setItem('vibe_jwt_token', token);
+    AppStorage.setItem('vibe_jwt_token', token);
   }
 
   public static removeToken() {
-    localStorage.removeItem('vibe_jwt_token');
-    localStorage.removeItem('vibe_user_data');
+    AppStorage.removeItem('vibe_jwt_token');
+    AppStorage.removeItem('vibe_user_data');
   }
 
   private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -241,9 +242,29 @@ export class ApiService {
     if (cursor) queryParams.append('cursor', cursor);
 
     try {
-      return await this.request(`/v1/feed?${queryParams.toString()}`);
-    } catch {
-      return await this.request(`/api/vibe/feed?${queryParams.toString()}`);
+      let res: { posts: Post[]; mode: string; title: string; nextCursor?: string | null };
+      try {
+        res = await this.request(`/v1/feed?${queryParams.toString()}`);
+      } catch {
+        res = await this.request(`/api/vibe/feed?${queryParams.toString()}`);
+      }
+
+      // Mettre en cache localement le flux principal pour consultation hors-ligne
+      if (!cursor && !tag && res?.posts && res.posts.length > 0) {
+        AppStorage.setJSON(`vibe_offline_feed_${type}`, res);
+      }
+      return res;
+    } catch (networkErr) {
+      // Fallback gracieux en mode hors-ligne : récupérer le dernier flux en cache local
+      const cached = AppStorage.getJSON<{ posts: Post[]; mode: string; title: string } | null>(`vibe_offline_feed_${type}`, null);
+      if (cached && cached.posts && cached.posts.length > 0) {
+        return {
+          ...cached,
+          title: `${cached.title || 'Flux'} (Hors-ligne)`,
+          nextCursor: null,
+        };
+      }
+      throw networkErr;
     }
   }
 
@@ -304,17 +325,25 @@ export class ApiService {
   public static async createPost(
     content: string,
     media_url?: string,
-    media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>
+    media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
+    options?: { aiGenerated?: boolean; quotedPostId?: string }
   ): Promise<{ success: boolean; post: Post }> {
+    const payload = {
+      content,
+      media_url,
+      media_assets,
+      ai_generated: options?.aiGenerated,
+      quoted_post_id: options?.quotedPostId,
+    };
     try {
       return await this.request('/v1/posts', {
         method: 'POST',
-        body: JSON.stringify({ content, media_url, media_assets }),
+        body: JSON.stringify(payload),
       });
     } catch {
       return await this.request('/api/vibe/posts', {
         method: 'POST',
-        body: JSON.stringify({ content, media_url, media_assets }),
+        body: JSON.stringify(payload),
       });
     }
   }
@@ -356,6 +385,21 @@ export class ApiService {
       return await this.request(`/v1/posts/${id}/bookmark`, { method: 'POST' });
     } catch {
       return await this.request(`/api/vibe/posts/${id}/bookmark`, { method: 'POST' });
+    }
+  }
+
+  /** Retour d'algorithme sur un post : 'more' | 'less' | null (désactive). */
+  public static async sendPostFeedback(id: string, value: 'more' | 'less' | null): Promise<{ success: boolean; my_feedback: 'more' | 'less' | null }> {
+    try {
+      return await this.request(`/v1/posts/${id}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/posts/${id}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      });
     }
   }
 
@@ -579,17 +623,19 @@ export class ApiService {
   public static async chatMAI(
     message: string,
     execute_tool?: { name: string; args: any },
-    model?: string
+    model?: string,
+    context?: { post_id?: string }
   ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any } }> {
+    const payload = { message, execute_tool, model, context };
     try {
       return await this.request('/v1/mai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, execute_tool, model }),
+        body: JSON.stringify(payload),
       });
     } catch {
       return await this.request('/api/vibe/mai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, execute_tool, model }),
+        body: JSON.stringify(payload),
       });
     }
   }

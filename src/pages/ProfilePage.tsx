@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Calendar,
   Edit3,
@@ -13,10 +14,12 @@ import {
   X,
   Camera,
   LogOut,
+  Settings as SettingsIcon,
   Upload,
   Loader2,
   BadgeCheck,
-  AlertCircle
+  AlertCircle,
+  Share2
 } from 'lucide-react';
 import type { Profile, Post } from '../types/vibe';
 import { ApiService } from '../services/api';
@@ -25,6 +28,7 @@ import { PostCard } from '../components/feed/PostCard';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { FormattedText } from '../components/common/FormattedText';
+import { ProfileShareModal } from '../components/profile/ProfileShareModal';
 
 interface ProfilePageProps {
   username?: string;
@@ -39,6 +43,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   onOpenThread,
   onOpenProfile,
 }) => {
+  const navigate = useNavigate();
   const { user, profile: authProfile, updateUserAvatar, updateUser, refreshProfile, logout, isLoadingSession } = useAuth();
   const rawTarget = username || user?.username || 'utilisateur';
   const targetUsername = rawTarget.replace(/^@/, '');
@@ -53,6 +58,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
   const [isFollowing, setIsFollowing] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
+  const [isShareOpen, setIsShareOpen] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
   // Edit fields
@@ -261,7 +267,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       />
 
       {/* Top Bar */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
           {onBack && (
             <button onClick={onBack} className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900">
@@ -279,16 +285,35 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
 
-        {isSelf && (
+        <div className="flex items-center gap-2">
+          {isSelf && (
+            <button
+              onClick={() => navigate('/settings')}
+              className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+              title="Paramètres & Personnalisation"
+            >
+              <SettingsIcon className="w-4 h-4" />
+            </button>
+          )}
           <button
-            onClick={logout}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-900/50 bg-red-950/20 text-red-400 text-xs font-medium hover:bg-red-950/40 transition-colors"
-            title="Se déconnecter"
+            onClick={() => setIsShareOpen(true)}
+            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+            title="Partager le profil (Carte, QR Code, Lien)"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Déconnexion</span>
+            <Share2 className="w-4 h-4 text-cyan-400" />
           </button>
-        )}
+
+          {isSelf && (
+            <button
+              onClick={logout}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-900/50 bg-red-950/20 text-red-400 text-xs font-medium hover:bg-red-950/40 transition-colors"
+              title="Se déconnecter"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Déconnexion</span>
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Banner */}
@@ -347,27 +372,38 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             )}
           </div>
 
-          {isSelf ? (
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setIsEditOpen(true)}
-              className="py-2 px-5 rounded-full border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
+              onClick={() => setIsShareOpen(true)}
+              className="py-2 px-4 rounded-full border border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-white font-semibold text-xs transition-all flex items-center gap-1.5 shadow-sm hover:border-zinc-500"
+              title="Partager le compte Vibe (Carte HD, QR Code, Lien)"
             >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Modifier le profil</span>
+              <Share2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Partager</span>
             </button>
-          ) : (
-            <button
-              onClick={handleFollowToggle}
-              style={!isFollowing ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
-              className={`py-2 px-6 rounded-full font-bold text-xs transition-all ${
-                isFollowing
-                  ? 'border border-zinc-700 bg-transparent text-white hover:bg-zinc-900'
-                  : 'bg-white text-black hover:brightness-90'
-              }`}
-            >
-              {isFollowing ? 'Abonné' : 'Suivre'}
-            </button>
-          )}
+
+            {isSelf ? (
+              <button
+                onClick={() => setIsEditOpen(true)}
+                className="py-2 px-5 rounded-full border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>Modifier le profil</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleFollowToggle}
+                style={!isFollowing ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
+                className={`py-2 px-6 rounded-full font-bold text-xs transition-all ${
+                  isFollowing
+                    ? 'border border-zinc-700 bg-transparent text-white hover:bg-zinc-900'
+                    : 'bg-white text-black hover:brightness-90'
+                }`}
+              >
+                {isFollowing ? 'Abonné' : 'Suivre'}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* User Info */}
@@ -621,6 +657,16 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Profile Share Modal (Carte HD, QR Code Amélioré, Liens) */}
+      <ProfileShareModal
+        isOpen={isShareOpen}
+        onClose={() => setIsShareOpen(false)}
+        profile={profile}
+        targetUsername={targetUsername}
+        isVerified={isVerified}
+        tier={isSelf ? user?.tier : (profile as any)?.tier}
+      />
     </div>
   );
 };

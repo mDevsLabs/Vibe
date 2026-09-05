@@ -28,18 +28,8 @@ initSQLite().catch(console.error);
 const app = new Hono();
 
 // ─────────────────────────────────────────────
-// CORS strict par allowlist + headers de sécurité
+// CORS ouvert : toutes les origines sont acceptées (l'origine est reflétée)
 // ─────────────────────────────────────────────
-const ALLOWED_ORIGINS = new Set([
-  "https://mai-vibe.vercel.app",
-  "https://mai-vibe-git-main-mcompany.vercel.app",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "capacitor://localhost",
-  "https://localhost",
-]);
 
 app.use(
   "*",
@@ -63,14 +53,9 @@ app.use(
     allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     exposeHeaders: ["Content-Type", "Authorization", "x-user-id"],
     maxAge: 86_400,
-    // Rejette toute origine non autorisée (au lieu de la refléter avec credentials)
-    origin: (origin) => {
-      if (!origin) return null;
-      if (ALLOWED_ORIGINS.has(origin)) return origin;
-      if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
-      if (/^https:\/\/mai-vibe[a-z0-9-]*\.vercel\.app$/.test(origin)) return origin;
-      return null;
-    },
+    // Reflète n'importe quelle origine. On ne renvoie PAS "*" car les
+    // navigateurs refusent "*" combiné à credentials: true.
+    origin: (origin) => origin,
     credentials: true,
   })
 );

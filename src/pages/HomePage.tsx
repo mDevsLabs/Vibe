@@ -181,7 +181,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
 
       {/* Sticky Top Header with 3 Feed Tabs */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800">
-        <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3">
           <div className="flex items-center gap-2.5">
             <div className="sm:hidden shrink-0">
               <VibeLogo size={24} showText={false} />

@@ -15,6 +15,7 @@ import {
   MessageSquare,
   Sparkles,
   UserPlus,
+  Quote as QuoteIcon,
   Check,
   Loader2,
   AlertCircle
@@ -85,7 +86,7 @@ export const NotificationsPage: React.FC = () => {
 
   const handleNotificationClick = (notif: NotificationItem) => {
     if (notif.post_id) {
-      navigate(`/posts/${notif.post_id}`);
+      navigate(`/post/${notif.post_id}`);
     } else if (notif.actor_username) {
       navigate(`/@${notif.actor_username}`);
     }
@@ -98,6 +99,8 @@ export const NotificationsPage: React.FC = () => {
         return <Heart className="w-4 h-4 text-rose-500 fill-rose-500" />;
       case 'repost':
         return <Repeat className="w-4 h-4 text-emerald-400" />;
+      case 'quote':
+        return <QuoteIcon className="w-4 h-4 text-emerald-400" />;
       case 'reply':
       case 'mention':
         return <MessageSquare className="w-4 h-4 text-sky-400" />;
@@ -122,8 +125,11 @@ export const NotificationsPage: React.FC = () => {
   // Regroupement par jour (Aujourd'hui / Hier / date)
   const grouped = useMemo(() => {
     const groups: { label: string; items: NotificationItem[] }[] = [];
-    const today = new Date().toDateString();
-    const yesterday = new Date(Date.now() - 86400000).toDateString();
+    const now = new Date();
+    const today = now.toDateString();
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = yesterdayDate.toDateString();
 
     for (const n of filteredNotifications) {
       const d = new Date(n.created_at).toDateString();
@@ -140,7 +146,7 @@ export const NotificationsPage: React.FC = () => {
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4 flex items-center justify-between">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4 flex items-center justify-between">
         <div>
           <h1 className="text-base font-bold text-white tracking-tight">Notifications</h1>
           <p className="text-xs text-zinc-500">Activités, mentions et mentions J'aime</p>

@@ -16,6 +16,7 @@ import {
 } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 import { selectStorageNode, uploadWithFallback } from "./storage.ts";
+import { attachQuotedPosts } from "./vibe-posts.ts";
 
 export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiFn) {
   // 1. CURRENT USER PROFILE & QUOTAS VIA JWT
@@ -243,6 +244,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
             p.media_assets = mediaByPost.get(String(p.id)) || [];
           }
         }
+        await attachQuotedPosts(posts);
       } catch (postErr: any) {
         console.error("[Get Profile] Erreur chargement posts:", postErr);
         posts = [];
@@ -329,6 +331,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           p.media_assets = mediaByPost.get(String(p.id)) || [];
         }
       }
+      await attachQuotedPosts(posts);
 
       return c.json({ posts });
     } catch (err: any) {

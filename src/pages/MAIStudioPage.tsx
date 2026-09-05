@@ -12,8 +12,6 @@ import {
   Send,
   RefreshCw,
   Zap,
-  Cpu,
-  CheckCircle,
   Loader2,
   Copy,
   Check,
@@ -26,7 +24,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { ApiService } from '../services/api';
 import { ToolAutocomplete } from '../components/layout/ToolAutocomplete';
-import { AVAILABLE_MAI_TOOLS, MAITool } from '../data/maiTools';
+import { MAITool } from '../data/maiTools';
 import { ModelDropdown } from '../components/common/ModelDropdown';
 
 interface ChatMessage {
@@ -244,7 +242,7 @@ export const MAIStudioPage: React.FC = () => {
   return (
     <div className="flex-1 h-screen border-r border-zinc-800 bg-black flex flex-col select-none">
       {/* Top Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4 flex items-center justify-between">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-2xl bg-white text-black flex items-center justify-center font-black">
             <Sparkles className="w-5 h-5 text-black" />

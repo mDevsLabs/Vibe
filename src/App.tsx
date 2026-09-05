@@ -10,7 +10,7 @@ import { BrowserRouter, Routes, Route, useNavigate, useLocation, useParams } fro
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { Sidebar } from './components/layout/Sidebar';
-import { MobileNav } from './components/layout/MobileNav';
+import { MobileTabBar } from './components/layout/MobileTabBar';
 import { MAIDrawer } from './components/layout/MAIDrawer';
 import { PostComposer } from './components/feed/PostComposer';
 import { HomePage } from './pages/HomePage';
@@ -20,6 +20,7 @@ import { Post } from './types/vibe';
 import { X, CheckCircle } from 'lucide-react';
 import { InAppToast } from './services/notificationService';
 import { ApiService } from './services/api';
+import { OfflineBanner } from './components/common/OfflineBanner';
 
 // Code splitting : chaque page est chargée à la demande
 const PostDetailPage = lazy(() =>
@@ -75,12 +76,13 @@ function ScrollManager() {
 }
 
 function VibeApp() {
-  const { user, profile, isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
   const [isComposerModalOpen, setIsComposerModalOpen] = useState(false);
-  const [composerDraft, setComposerDraft] = useState<{ content?: string; imageUrl?: string } | null>(null);
+  const [composerDraft, setComposerDraft] = useState<{ content?: string; imageUrl?: string; quotedPost?: Post } | null>(null);
+  const [maiAttachedPostId, setMaiAttachedPostId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<InAppToast[]>([]);
   // Compteurs non lus pour les badges de la navigation
   const [unreadNotifications, setUnreadNotifications] = useState(0);
@@ -119,7 +121,8 @@ function VibeApp() {
     };
   }, [isAuthenticated, location.pathname, refreshUnreadCounts]);
 
-  // Ouverture du composer préremplie (ex : « Publier sur Vibe » depuis mAI)
+  // Ouverture du composer préremplie (ex : « Publier sur Vibe » depuis mAI,
+  // ou « Citer » depuis un post avec quotedPost)
   useEffect(() => {
     const handleOpenComposer = (e: any) => {
       setComposerDraft(e?.detail || null);
@@ -127,6 +130,18 @@ function VibeApp() {
     };
     window.addEventListener('vibe:open_composer', handleOpenComposer);
     return () => window.removeEventListener('vibe:open_composer', handleOpenComposer);
+  }, []);
+
+  // Mention d'un post vers l'assistant mAI (bouton « Mentionner dans mAI »)
+  useEffect(() => {
+    const handleOpenMAI = (e: any) => {
+      const postId = e?.detail?.postId;
+      if (!postId) return;
+      setMaiAttachedPostId(postId);
+      setIsMAIDrawerOpen(true);
+    };
+    window.addEventListener('vibe:open_mai', handleOpenMAI);
+    return () => window.removeEventListener('vibe:open_mai', handleOpenMAI);
   }, []);
 
   useEffect(() => {
@@ -163,8 +178,6 @@ function VibeApp() {
     );
   }
 
-  const activeAvatar = profile?.avatarUrl || user?.avatar_url || null;
-
   return (
     <div className="min-h-screen bg-black text-white flex justify-center font-sans antialiased selection:bg-white selection:text-black">
       <ScrollManager />
@@ -178,7 +191,7 @@ function VibeApp() {
         />
 
         {/* Center Main Viewport (Pleine largeur étendue) */}
-        <main className="flex-1 w-full min-h-screen border-r border-zinc-800">
+        <main className="flex-1 w-full min-h-screen border-r border-zinc-800 pb-20 sm:pb-0">
           <Suspense fallback={<PageSkeleton />}>
             <Routes>
               <Route path="/" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
@@ -197,10 +210,10 @@ function VibeApp() {
           </Suspense>
         </main>
 
-        {/* Mobile Retractable Side Navigation (Liquid Glass) */}
-        <MobileNav
+        {/* Mobile Bottom Tab Bar (< 640px) */}
+        <MobileTabBar
           onOpenComposer={() => setIsComposerModalOpen(true)}
-          avatarUrl={activeAvatar}
+          onToggleMAIDrawer={() => setIsMAIDrawerOpen(!isMAIDrawerOpen)}
           unreadNotifications={unreadNotifications}
           unreadMessages={unreadMessages}
         />
@@ -208,7 +221,12 @@ function VibeApp() {
         {/* Retractable mAI Drawer */}
         <MAIDrawer
           isOpen={isMAIDrawerOpen}
-          onClose={() => setIsMAIDrawerOpen(false)}
+          onClose={() => {
+            setIsMAIDrawerOpen(false);
+            setMaiAttachedPostId(null);
+          }}
+          attachedPostId={maiAttachedPostId}
+          onClearAttachedPost={() => setMaiAttachedPostId(null)}
           onPostCreated={() => {
             if (location.pathname === '/') {
               window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
@@ -218,9 +236,9 @@ function VibeApp() {
 
         {/* Modal Post Composer */}
         {isComposerModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 sm:pt-20 bg-black/70 backdrop-blur-sm p-4 animate-fadeIn">
-            <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl animate-scaleUp">
-              <div className="p-3 border-b border-zinc-800 flex justify-between items-center bg-black/60">
+          <div className="fixed inset-0 z-50 flex items-end sm:items-start justify-center sm:pt-20 bg-black/70 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn h-dvh">
+            <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl animate-scaleUp max-h-[92dvh] flex flex-col">
+              <div className="p-3 pt-safe sm:pt-3 border-b border-zinc-800 flex justify-between items-center bg-black/60 shrink-0">
                 <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">Poster une vibe</span>
                 <button
                   onClick={() => setIsComposerModalOpen(false)}
@@ -229,15 +247,18 @@ function VibeApp() {
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <PostComposer
-                initialContent={composerDraft?.content}
-                initialMediaUrl={composerDraft?.imageUrl}
-                onPostCreated={() => {
-                  setIsComposerModalOpen(false);
-                  setComposerDraft(null);
-                  window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
-                }}
-              />
+              <div className="overflow-y-auto">
+                <PostComposer
+                  initialContent={composerDraft?.content}
+                  initialMediaUrl={composerDraft?.imageUrl}
+                  initialQuotedPost={composerDraft?.quotedPost}
+                  onPostCreated={() => {
+                    setIsComposerModalOpen(false);
+                    setComposerDraft(null);
+                    window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
+                  }}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -264,6 +285,8 @@ function VibeApp() {
             ))}
           </div>
         )}
+        {/* Offline status banner */}
+        <OfflineBanner />
       </div>
     </div>
   );

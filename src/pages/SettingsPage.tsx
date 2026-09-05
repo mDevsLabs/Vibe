@@ -28,11 +28,9 @@ import { NotificationService } from '../services/notificationService';
 
 /** Encart indiquant l'état réel de la permission notifications de l'appareil */
 const DevicePermissionHint: React.FC = () => {
-  const [state, setState] = useState<ReturnType<typeof NotificationService.getPermissionState>>('default');
-
-  useEffect(() => {
-    setState(NotificationService.getPermissionState());
-  }, []);
+  const [state, setState] = useState<ReturnType<typeof NotificationService.getPermissionState>>(() =>
+    NotificationService.getPermissionState()
+  );
 
   if (state === 'granted' || state === 'unsupported') return null;
 
@@ -79,6 +77,7 @@ export const SettingsPage: React.FC = () => {
   const [emailNotifs, setEmailNotifs] = useState(true);
   const [pushNotifs, setPushNotifs] = useState(true);
   const [maiAutoApproveTools, setMaiAutoApproveTools] = useState(false);
+  const [postsAIGeneratedByDefault, setPostsAIGeneratedByDefault] = useState(false);
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -106,6 +105,9 @@ export const SettingsPage: React.FC = () => {
           if (s.mai_auto_approve_tools !== undefined) {
             setMaiAutoApproveTools(Boolean(s.mai_auto_approve_tools));
           }
+          if (s.posts_ai_generated_by_default !== undefined) {
+            setPostsAIGeneratedByDefault(Boolean(s.posts_ai_generated_by_default));
+          }
           if (s.accent_color && s.accent_color in ACCENT_COLORS) {
             setAccentColor(s.accent_color as any);
           }
@@ -116,7 +118,7 @@ export const SettingsPage: React.FC = () => {
       } catch {}
     };
     loadSettings();
-  }, []);
+  }, [setTheme, setAccentColor, setFontSize]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,6 +146,7 @@ export const SettingsPage: React.FC = () => {
         accent_color: accentColor,
         font_size: fontSize,
         mai_auto_approve_tools: maiAutoApproveTools,
+        posts_ai_generated_by_default: postsAIGeneratedByDefault,
       });
 
       setSavedSuccess(true);
@@ -178,7 +181,7 @@ export const SettingsPage: React.FC = () => {
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4">
         <h1 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
           <Settings className="w-5 h-5 text-white" />
           <span>Paramètres & Personnalisation</span>
@@ -551,6 +554,21 @@ export const SettingsPage: React.FC = () => {
                   type="checkbox"
                   checked={maiAutoApproveTools}
                   onChange={(e) => setMaiAutoApproveTools(e.target.checked)}
+                  className="w-4 h-4 accent-purple-500 cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-semibold text-white">Publications créées par l'IA par défaut</span>
+                  <p className="text-zinc-500 text-[11px]">
+                    Vos nouvelles publications seront automatiquement marquées « Créé avec l'IA » (modifiable à chaque post)
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={postsAIGeneratedByDefault}
+                  onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
                   className="w-4 h-4 accent-purple-500 cursor-pointer"
                 />
               </div>

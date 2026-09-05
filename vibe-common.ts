@@ -6,7 +6,7 @@
  */
 
 import type { Hono } from "npm:hono@4";
-import { extractToken, verifyToken, getDb } from "./config.ts";
+import { extractToken, verifyToken } from "./config.ts";
 
 export type RegisterMultiFn = (
   method: "get" | "post" | "delete",

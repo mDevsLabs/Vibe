@@ -235,8 +235,8 @@ export class MAIAgentFleet {
           if (!safety.isSafe) throw new Error(`Publication refusée par mAI : ${safety.flagReason}`);
 
           const inserted = await sql`
-            INSERT INTO posts (author_id, content, format, created_via, toxicity_score)
-            VALUES (${uid}, ${content.trim()}, ${format}, 'mai_agent', ${safety.toxicityScore})
+            INSERT INTO posts (author_id, content, format, created_via, toxicity_score, ai_generated)
+            VALUES (${uid}, ${content.trim()}, ${format}, 'mai_agent', ${safety.toxicityScore}, TRUE)
             RETURNING *
           `;
           const newPost = inserted[0];

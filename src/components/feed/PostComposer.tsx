@@ -14,12 +14,14 @@ import {
   X,
   AlertCircle,
   Loader2,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { ApiService } from '../../services/api';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import type { Post } from '../../types/vibe';
 
 interface PostComposerProps {
   onPostCreated: () => void;
@@ -28,6 +30,8 @@ interface PostComposerProps {
   onClose?: () => void;
   initialContent?: string;
   initialMediaUrl?: string;
+  /** Post original cité (quote-post) prérempli (bouton « Citer »). */
+  initialQuotedPost?: Post | null;
 }
 
 interface UploadedMedia {
@@ -44,6 +48,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   onClose,
   initialContent,
   initialMediaUrl,
+  initialQuotedPost,
 }) => {
   const { user, profile } = useAuth();
   const [content, setContent] = useState(initialContent || '');
@@ -53,6 +58,17 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Badge « Créé avec l'IA » : défaut issu des réglages utilisateur
+  const [isAIGenerated, setIsAIGenerated] = useState(false);
+  const [quotedPost, setQuotedPost] = useState<Post | null>(initialQuotedPost || null);
+
+  useEffect(() => {
+    ApiService.getSettings()
+      .then((res: any) => {
+        setIsAIGenerated(Boolean(res?.settings?.posts_ai_generated_by_default));
+      })
+      .catch(() => {});
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -155,7 +171,10 @@ export const PostComposer: React.FC<PostComposerProps> = ({
         media_type: m.media_type === 'video' ? 'video/mp4' : 'image/jpeg',
       }));
 
-      const res = await ApiService.createPost(content.trim(), primaryMedia, mediaAssets);
+      const res = await ApiService.createPost(content.trim(), primaryMedia, mediaAssets, {
+        aiGenerated: isAIGenerated,
+        quotedPostId: quotedPost?.id,
+      });
       NotificationService.notifyPostPublished(content.trim());
       window.dispatchEvent(new CustomEvent('vibe:post_updated'));
       // Insertion optimiste : le fil affiche le post immédiatement, sans recharger
@@ -164,6 +183,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       }
       setContent('');
       setMediaList([]);
+      setQuotedPost(null);
       onPostCreated();
       if (isModal && onClose) {
         onClose();
@@ -204,6 +224,36 @@ export const PostComposer: React.FC<PostComposerProps> = ({
             rows={3}
             className="w-full bg-transparent border-none text-white text-sm sm:text-base placeholder-zinc-500 focus:outline-none resize-none leading-relaxed"
           />
+
+          {/* Publication citée (quote-post) */}
+          {quotedPost && (
+            <div className="relative rounded-2xl border border-zinc-800 bg-zinc-950 p-3 flex items-start gap-2.5">
+              <ProfileAvatar
+                src={quotedPost.avatar_url}
+                alt={quotedPost.username}
+                size="sm"
+                fallbackName={quotedPost.username}
+                className="border border-zinc-800 shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-bold text-white truncate">
+                  {quotedPost.display_name || quotedPost.username}{' '}
+                  <span className="text-zinc-500 font-normal">@{quotedPost.username}</span>
+                </div>
+                <p className="text-xs text-zinc-400 line-clamp-3 mt-0.5 leading-relaxed">
+                  {quotedPost.content}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuotedPost(null)}
+                className="p-1 rounded-full bg-black/80 text-white hover:bg-black transition-colors shrink-0"
+                title="Retirer la citation"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* Upload indicator */}
           {isUploading && (
@@ -257,6 +307,20 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                 title="Ajouter photos ou vidéos (max 5 photos, 2 vidéos)"
               >
                 <ImageIcon className="w-4 h-4" />
+              </button>
+
+              {/* Badge « Créé avec l'IA » (défaut = réglage posts_ai_generated_by_default) */}
+              <button
+                type="button"
+                onClick={() => setIsAIGenerated(!isAIGenerated)}
+                className={`p-2 rounded-full transition-colors ${
+                  isAIGenerated
+                    ? 'bg-violet-500/20 text-violet-300'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+                }`}
+                title={isAIGenerated ? 'Publication marquée « créée avec l\'IA » — cliquer pour retirer' : 'Marquer cette publication comme créée avec l\'IA'}
+              >
+                <Sparkles className="w-4 h-4" />
               </button>
 
               {isSupported && (

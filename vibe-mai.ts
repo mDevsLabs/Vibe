@@ -150,6 +150,105 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
     }
   }
 
+  // ── Contexte de post joint à une question mAI ────────────────────────────
+  // Le post est transmis avec ses statistiques, ses premiers commentaires et
+  // ses médias. Les images sont jointes comme FICHIERS (octets récupérés puis
+  // encodés en base64 data-URL), jamais comme simples URLs.
+  const VISION_CAPABLE_MODELS = new Set([
+    "openai/gpt-4o",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+    "anthropic/claude-3.7-sonnet",
+    "mai-1.5-apex",
+  ]);
+  const MAX_CONTEXT_IMAGES = 3;
+  const MAX_CONTEXT_IMAGE_BYTES = 3.5 * 1024 * 1024;
+
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)) as any);
+    }
+    return btoa(binary);
+  }
+
+  async function buildPostContext(sql: any, postId: string): Promise<{ text: string; imageParts: any[] } | null> {
+    try {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId)) return null;
+
+      const rows = await sql`
+        SELECT p.id, p.content, p.likes_count, p.reposts_count, p.replies_count, p.views_count,
+               p.published_at, p.created_via, p.ai_generated,
+               u.username, pr.display_name
+        FROM posts p
+        JOIN users u ON u.id = p.author_id
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE p.id = ${postId}::uuid
+        LIMIT 1
+      `;
+      if (rows.length === 0) return null;
+      const post = rows[0];
+
+      let commentsText = "";
+      try {
+        const comments = await sql`
+          SELECT c.content, u.username
+          FROM comments c
+          JOIN users u ON u.id = c.author_id
+          WHERE c.post_id = ${postId}::uuid AND c.is_hidden = FALSE
+          ORDER BY c.depth ASC, c.likes_count DESC, c.created_at ASC
+          LIMIT 10
+        `;
+        if (comments.length > 0) {
+          const lines = comments
+            .map((cm: any) => `  • @${cm.username} : ${String(cm.content || "").slice(0, 200)}`)
+            .join("\n");
+          commentsText = `\n\nPremiers commentaires :\n${lines}`;
+        }
+      } catch {}
+
+      let media: any[] = [];
+      try {
+        media = await sql`SELECT url, media_type FROM media_assets WHERE post_id = ${postId}::uuid`;
+      } catch {}
+
+      const text =
+        `📌 Post mentionné de @${post.username} (${post.display_name || post.username})` +
+        `${post.ai_generated ? " [marqué « créé avec l'IA » par son auteur]" : ""}\n` +
+        `Publié le ${new Date(post.published_at).toLocaleString("fr-FR")}\n\n` +
+        `« ${post.content} »\n\n` +
+        `Statistiques : ${post.likes_count} J'aime · ${post.replies_count} réponses · ${post.reposts_count} republications · ${post.views_count || 0} vues` +
+        commentsText;
+
+      const imageParts: any[] = [];
+      for (const m of media) {
+        if (imageParts.length >= MAX_CONTEXT_IMAGES) break;
+        const url = String(m.url || "");
+        const isImage =
+          String(m.media_type || "").startsWith("image") ||
+          /\.(png|jpe?g|webp|gif)(\?|$)/i.test(url);
+        if (!url || !isImage) continue;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) continue;
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength === 0 || buf.byteLength > MAX_CONTEXT_IMAGE_BYTES) continue;
+          const contentType = res.headers.get("content-type") || "image/jpeg";
+          imageParts.push({
+            type: "image_url",
+            image_url: { url: `data:${contentType};base64,${bytesToBase64(new Uint8Array(buf))}` },
+          });
+        } catch {}
+      }
+
+      return { text, imageParts };
+    } catch (err) {
+      console.warn("[mAI Chat] buildPostContext:", (err as any)?.message);
+      return null;
+    }
+  }
+
   // 1. mAI CHAT & TOOL EXECUTION
   const handleMAIChat = async (c: any) => {
     try {
@@ -158,12 +257,23 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
-      const { message, execute_tool, model = "poolside/laguna-xs-2.1:free" } = await c.req.json();
+      const { message, execute_tool, model = "poolside/laguna-xs-2.1:free", context } = await c.req.json();
       if (!message || !message.trim()) return c.json({ error: "Message requis." }, 400);
 
       const sql = getDb();
       const userRows = await sql`SELECT username, tier FROM users WHERE id = ${userId} LIMIT 1`;
       const username = userRows[0]?.username || "Ami";
+
+      // Post mentionné : contenu + stats + premiers commentaires + médias (fichiers)
+      let postContextBlock = "";
+      let postImageParts: any[] = [];
+      if (context?.post_id) {
+        const postCtx = await buildPostContext(sql, String(context.post_id));
+        if (postCtx) {
+          postContextBlock = `\n\n---\n${postCtx.text}`;
+          postImageParts = postCtx.imageParts;
+        }
+      }
 
       let toolToRun: string | null = execute_tool?.name || null;
       let toolArgs: any = execute_tool?.args || {};
@@ -222,10 +332,28 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
           return m;
         };
 
-        const primaryModel = resolveModel(model);
+        const hasImages = postImageParts.length > 0;
+        let primaryModel = resolveModel(model);
+        // Images jointes → forcer un modèle vision si le modèle choisi ne l'est pas
+        if (hasImages && !VISION_CAPABLE_MODELS.has(primaryModel)) {
+          primaryModel = "openai/gpt-4o";
+        }
         const modelsToTry = [primaryModel];
-        if (primaryModel !== "openrouter/free") modelsToTry.push("openrouter/free");
-        if (!modelsToTry.includes("nvidia/nemotron-3.5-lightning:free")) modelsToTry.push("nvidia/nemotron-3.5-lightning:free");
+        if (hasImages) {
+          if (!modelsToTry.includes("google/gemini-2.5-flash")) modelsToTry.push("google/gemini-2.5-flash");
+        } else {
+          if (primaryModel !== "openrouter/free") modelsToTry.push("openrouter/free");
+          if (!modelsToTry.includes("nvidia/nemotron-3.5-lightning:free")) modelsToTry.push("nvidia/nemotron-3.5-lightning:free");
+        }
+
+        const userText = `${message.trim()}${postContextBlock}`;
+        const userContent: any = hasImages
+          ? [{ type: "text", text: userText }, ...postImageParts]
+          : userText;
+        const systemContent =
+          "Tu es mAI, l'intelligence artificielle intégrée au réseau social Vibe. Tu es concis, créatif, pertinent et tu réponds en français avec des émojis." +
+          (hasImages ? " Des images sont jointes à la publication mentionnée : analyse-les directement." : "") +
+          (postContextBlock ? " Une publication Vibe est jointe à la fin du message : base ta réponse sur son contenu, ses statistiques et ses commentaires." : "");
 
         if (openRouterApiKey) {
           for (const candidate of modelsToTry) {
@@ -243,9 +371,9 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
                   messages: [
                     {
                       role: "system",
-                      content: "Tu es mAI, l'intelligence artificielle intégrée au réseau social Vibe. Tu es concis, créatif, pertinent et tu réponds en français avec des émojis.",
+                      content: systemContent,
                     },
-                    { role: "user", content: message.trim() },
+                    { role: "user", content: userContent },
                   ],
                 }),
               });

@@ -705,7 +705,7 @@ async function callCometImageGeneration(params: {
     if (chatRes.ok) {
       const chatJson = await chatRes.json();
       const content = chatJson.choices?.[0]?.message?.content || "";
-      const match = content.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/) || content.match(/(https?:\/\/[^\s\)]+\.(?:png|jpg|jpeg|webp))/i);
+      const match = content.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/) || content.match(/(https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|webp))/i);
       if (match && match[1]) {
         return {
           data: [

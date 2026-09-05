@@ -5,17 +5,14 @@
  * ============================================================================
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Send,
   Image as ImageIcon,
-  Video,
   Mic,
   MicOff,
-  User,
   Search,
   ArrowLeft,
-  CheckCheck,
   Check,
   Eye,
   Lock,
@@ -23,9 +20,7 @@ import {
   Loader2,
   AlertCircle,
   X,
-  Play,
   MoreVertical,
-  Smile,
   Reply,
   Forward,
   Copy,
@@ -103,7 +98,7 @@ export const MessagesPage: React.FC = () => {
     },
   });
 
-  const fetchConversations = async () => {
+  const fetchConversations = useCallback(async () => {
     try {
       const res = await ApiService.getConversations();
       // Si une conversation est actuellement affichée, son compteur de non lu passe à 0
@@ -118,9 +113,9 @@ export const MessagesPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activePartnerId]);
 
-  const fetchMessages = async (partnerId: string | number) => {
+  const fetchMessages = useCallback(async (partnerId: string | number) => {
     try {
       // Invalider le cache pour forcer la lecture réelle et fraîche
       ApiService.invalidateCache(`/v1/dms/messages/${partnerId}`);
@@ -147,7 +142,7 @@ export const MessagesPage: React.FC = () => {
     } catch (err: any) {
       setErrorMessage(err.message || 'Impossible de charger les messages.');
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchConversations();
@@ -163,7 +158,7 @@ export const MessagesPage: React.FC = () => {
     };
     schedule();
     return () => clearInterval(timer);
-  }, [activePartnerId]);
+  }, [activePartnerId, fetchConversations, fetchMessages]);
 
   const handleSelectConversation = (conv: DMConversation) => {
     setActivePartnerId(conv.partner_id);
@@ -627,7 +622,7 @@ export const MessagesPage: React.FC = () => {
         {activePartner ? (
           <>
             {/* Chat Top Header */}
-            <div className="p-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/80 backdrop-blur-md sticky top-0 z-10">
+            <div className="px-3.5 pt-[max(0.875rem,env(safe-area-inset-top))] pb-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/80 backdrop-blur-md sticky top-0 z-10">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setActivePartnerId(null)}
@@ -826,7 +821,7 @@ export const MessagesPage: React.FC = () => {
                     <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500 px-1 font-mono">
                       <span>{formatTime(m.created_at)}</span>
                       {isMe && (
-                        Boolean(m.is_read || (m as any).read_at) ? (
+                        (m.is_read || (m as any).read_at) ? (
                           <span title="Vu" className="inline-flex items-center gap-0.5 text-sky-400 font-medium">
                             <Eye className="w-3 h-3" />
                             <span className="text-[9px]">Vu</span>

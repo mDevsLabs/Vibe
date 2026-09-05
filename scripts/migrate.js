@@ -96,6 +96,10 @@ async function migrate() {
     'user_settings.mai_auto_approve_tools',
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`
   );
+  await runAlter(
+    'user_settings.posts_ai_generated_by_default',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. usage_logs — Ajouter colonne endpoint (manquante selon schéma)
@@ -127,6 +131,14 @@ async function migrate() {
   await runAlter(
     'posts.is_repost',
     `ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_repost BOOLEAN DEFAULT FALSE`
+  );
+  await runAlter(
+    'posts.ai_generated',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN DEFAULT FALSE`
+  );
+  await runAlter(
+    'posts.quoted_post_id',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id UUID REFERENCES posts(id) ON DELETE SET NULL`
   );
 
   // ─────────────────────────────────────────────────────────────
@@ -255,6 +267,22 @@ async function migrate() {
   await runAlter(
     'idx_posts_published_at',
     `CREATE INDEX IF NOT EXISTS idx_posts_published_at ON posts(published_at DESC)`
+  );
+  await runAlter(
+    'idx_posts_visibility_published',
+    `CREATE INDEX IF NOT EXISTS idx_posts_visibility_published ON posts(visibility, published_at DESC)`
+  );
+  await runAlter(
+    'extension_pg_trgm',
+    `CREATE EXTENSION IF NOT EXISTS pg_trgm`
+  );
+  await runAlter(
+    'idx_posts_content_trgm',
+    `CREATE INDEX IF NOT EXISTS idx_posts_content_trgm ON posts USING gin (content gin_trgm_ops)`
+  );
+  await runAlter(
+    'idx_users_username_trgm',
+    `CREATE INDEX IF NOT EXISTS idx_users_username_trgm ON users USING gin (username gin_trgm_ops)`
   );
   await runAlter(
     'idx_post_interactions_lookup',
