@@ -9,9 +9,11 @@ import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 
 import { BrowserRouter, Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { AudioPlayerProvider } from './context/AudioPlayerContext';
 import { Sidebar } from './components/layout/Sidebar';
 import { MobileTabBar } from './components/layout/MobileTabBar';
 import { MAIDrawer } from './components/layout/MAIDrawer';
+import { FloatingAudioPlayer } from './components/feed/FloatingAudioPlayer';
 import { PostComposer } from './components/feed/PostComposer';
 import { HomePage } from './pages/HomePage';
 import { AuthModal } from './pages/AuthModal';
@@ -20,6 +22,7 @@ import { Post } from './types/vibe';
 import { X, CheckCircle } from 'lucide-react';
 import { InAppToast } from './services/notificationService';
 import { ApiService } from './services/api';
+import { RealtimeService } from './services/realtimeService';
 import { OfflineBanner } from './components/common/OfflineBanner';
 
 // Code splitting : chaque page est chargée à la demande
@@ -43,6 +46,9 @@ const ProfilePage = lazy(() =>
 );
 const SettingsPage = lazy(() =>
   import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage }))
+);
+const BooksPage = lazy(() =>
+  import('./pages/BooksPage').then((m) => ({ default: m.BooksPage }))
 );
 
 // Restauration de la position de scroll par route (deep-link => haut de page)
@@ -81,9 +87,15 @@ function VibeApp() {
   const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
   const [isComposerModalOpen, setIsComposerModalOpen] = useState(false);
-  const [composerDraft, setComposerDraft] = useState<{ content?: string; imageUrl?: string; quotedPost?: Post } | null>(null);
+  const [composerDraft, setComposerDraft] = useState<{
+    content?: string;
+    imageUrl?: string;
+    quotedPost?: Post;
+    editPost?: Post;
+  } | null>(null);
   const [maiAttachedPostId, setMaiAttachedPostId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<InAppToast[]>([]);
+  const editingPost = composerDraft?.editPost || null;
   // Compteurs non lus pour les badges de la navigation
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
@@ -112,14 +124,39 @@ function VibeApp() {
   useEffect(() => {
     if (!isAuthenticated) return;
     refreshUnreadCounts();
-    const interval = setInterval(refreshUnreadCounts, 15000);
+
+    // Temps réel (SSE) : badges poussés par le serveur, plus de polling 15 s.
+    // L'intervalle ne sert que de filet de sécurité.
+    const token = ApiService.getToken();
+    if (token) RealtimeService.start(token);
     const handleUnread = () => refreshUnreadCounts();
+    const handleRealtimeUnread = (e: any) => {
+      const d = e?.detail;
+      if (!d) return;
+      if (d.unread_notifications !== undefined) setUnreadNotifications(Number(d.unread_notifications) || 0);
+      if (d.unread_messages !== undefined) setUnreadMessages(Number(d.unread_messages) || 0);
+    };
+    // Notification ou message reçu : re-synchronise les badges (cache court)
+    const handleRealtime = (e: any) => {
+      const type = e?.detail?.type;
+      if (type === 'notification' || type === 'dm_message') refreshUnreadCounts();
+    };
+    window.addEventListener('vibe:realtime_unread', handleRealtimeUnread);
+    window.addEventListener('vibe:realtime', handleRealtime);
     window.addEventListener('vibe:unread_updated', handleUnread);
+    const interval = setInterval(refreshUnreadCounts, 60000);
     return () => {
       clearInterval(interval);
+      window.removeEventListener('vibe:realtime_unread', handleRealtimeUnread);
+      window.removeEventListener('vibe:realtime', handleRealtime);
       window.removeEventListener('vibe:unread_updated', handleUnread);
     };
   }, [isAuthenticated, location.pathname, refreshUnreadCounts]);
+
+  // Déconnexion : coupe le flux temps réel
+  useEffect(() => {
+    if (!isAuthenticated) RealtimeService.stop();
+  }, [isAuthenticated]);
 
   // Ouverture du composer préremplie (ex : « Publier sur Vibe » depuis mAI,
   // ou « Citer » depuis un post avec quotedPost)
@@ -185,7 +222,6 @@ function VibeApp() {
         {/* Left Navigation Sidebar (Desktop / Tablet) */}
         <Sidebar
           onOpenComposer={() => setIsComposerModalOpen(true)}
-          onToggleMAIDrawer={() => setIsMAIDrawerOpen(!isMAIDrawerOpen)}
           unreadNotifications={unreadNotifications}
           unreadMessages={unreadMessages}
         />
@@ -204,6 +240,9 @@ function VibeApp() {
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/mai" element={<MAIStudioPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              {/* Livres : avant le catch-all /:username */}
+              <Route path="/books" element={<BooksPage />} />
+              <Route path="/books/:bookId" element={<BooksPage />} />
               <Route path="/:username" element={<ProfileRoute />} />
               <Route path="*" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
             </Routes>
@@ -234,12 +273,14 @@ function VibeApp() {
           }}
         />
 
-        {/* Modal Post Composer */}
+        {/* Modal Post Composer (hauteur étendue pour la rédaction) */}
         {isComposerModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-end sm:items-start justify-center sm:pt-20 bg-black/70 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn h-dvh">
-            <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl animate-scaleUp max-h-[92dvh] flex flex-col">
+          <div className="fixed inset-0 z-50 flex items-end sm:items-start justify-center sm:pt-10 bg-black/70 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn h-dvh">
+            <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl animate-scaleUp h-[94dvh] max-h-[94dvh] flex flex-col">
               <div className="p-3 pt-safe sm:pt-3 border-b border-zinc-800 flex justify-between items-center bg-black/60 shrink-0">
-                <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">Poster une vibe</span>
+                <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">
+                  {editingPost ? 'Modifier la vibe' : 'Poster une vibe'}
+                </span>
                 <button
                   onClick={() => setIsComposerModalOpen(false)}
                   className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
@@ -247,8 +288,10 @@ function VibeApp() {
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <div className="overflow-y-auto">
+              <div className="overflow-y-auto flex-1">
                 <PostComposer
+                  isModal
+                  editingPost={editingPost}
                   initialContent={composerDraft?.content}
                   initialMediaUrl={composerDraft?.imageUrl}
                   initialQuotedPost={composerDraft?.quotedPost}
@@ -285,6 +328,9 @@ function VibeApp() {
             ))}
           </div>
         )}
+        {/* Mini-lecteur audio flottant mAI (posts & fils de discussion) */}
+        <FloatingAudioPlayer />
+
         {/* Offline status banner */}
         <OfflineBanner />
       </div>
@@ -329,7 +375,9 @@ export default function App() {
     <ThemeProvider>
       <AuthProvider>
         <BrowserRouter>
-          <VibeApp />
+          <AudioPlayerProvider>
+            <VibeApp />
+          </AudioPlayerProvider>
         </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>

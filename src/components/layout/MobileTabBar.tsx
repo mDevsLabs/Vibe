@@ -15,6 +15,7 @@ import {
   PenSquare,
   Bell,
   MessageCircle,
+  Library,
   User as UserIcon,
 } from 'lucide-react';
 
@@ -45,6 +46,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
     { path: '/explore', label: 'Explorer', icon: Compass, active: location.pathname.startsWith('/explore'), badge: 0 },
     { path: '/notifications', label: 'Notifications', icon: Bell, active: location.pathname.startsWith('/notifications'), badge: unreadNotifications },
     { path: '/messages', label: 'Messages', icon: MessageCircle, active: location.pathname.startsWith('/messages'), badge: unreadMessages },
+    { path: '/books', label: 'Livres', icon: Library, active: location.pathname.startsWith('/books'), badge: 0 },
     { path: profilePath, label: 'Profil', icon: UserIcon, active: Boolean(isProfileActive), badge: 0 },
   ];
 
@@ -70,7 +72,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
 
       {/* Barre d'onglets fixe */}
       <nav className="sm:hidden fixed bottom-0 inset-x-0 z-50 bg-black/85 backdrop-blur-2xl border-t border-zinc-800 pb-safe">
-        <div className="grid grid-cols-5 items-stretch">
+        <div className="grid grid-cols-6 items-stretch">
           {tabs.map(({ path, label, icon: Icon, active, badge }) => (
             <Link
               key={label}

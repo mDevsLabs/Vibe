@@ -6,11 +6,12 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Loader2, AlertCircle, Sparkles } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle, Sparkles, Volume2 } from 'lucide-react';
 import { Post } from '../types/vibe';
 import { PostCard } from '../components/feed/PostCard';
 import { CommentSection } from '../components/comments/CommentSection';
 import { ApiService } from '../services/api';
+import { useAudioPlayer } from '../context/AudioPlayerContext';
 
 interface PostDetailPageProps {
   postId: string;
@@ -26,6 +27,37 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
   const [post, setPost] = useState<Post | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [isQueueingThread, setIsQueueingThread] = useState(false);
+  const { playQueue } = useAudioPlayer();
+
+  /** Écoute tout le fil avec la voix mAI : post principal puis commentaires. */
+  const handleListenThread = async () => {
+    if (!post || isQueueingThread) return;
+    setIsQueueingThread(true);
+    try {
+      const snippet = (post.content || '').trim().slice(0, 48);
+      const segments: Array<{ id: string; title: string; text: string }> = [
+        {
+          id: `post-${post.id}`,
+          title: `@${post.username}${snippet ? ` — ${snippet}${(post.content || '').length > 48 ? '…' : ''}` : ''}`,
+          text: post.content || '',
+        },
+      ];
+      try {
+        const res = await ApiService.getComments(post.id);
+        for (const c of (res.comments || []).slice(0, 30)) {
+          segments.push({
+            id: `comment-${c.id}`,
+            title: `Réponse de @${c.username}`,
+            text: c.content || '',
+          });
+        }
+      } catch {}
+      playQueue(segments);
+    } finally {
+      setIsQueueingThread(false);
+    }
+  };
 
   useEffect(() => {
     const fetchPost = async () => {
@@ -60,6 +92,18 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
           <ArrowLeft className="w-5 h-5" />
         </button>
         <h1 className="text-lg font-bold text-white tracking-tight">Publication</h1>
+        {post?.content?.trim() && (
+          <button
+            onClick={handleListenThread}
+            disabled={isQueueingThread}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-semibold hover:bg-zinc-800 transition-colors disabled:opacity-40"
+            title="Écouter la publication et son fil de discussion avec la voix de mAI"
+          >
+            {isQueueingThread ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Volume2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">Écouter le fil</span>
+            <span className="sm:hidden">Écouter</span>
+          </button>
+        )}
         <button
           onClick={() =>
             window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId } }))

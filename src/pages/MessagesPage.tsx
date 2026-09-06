@@ -28,9 +28,15 @@ import {
   Flag,
   Trash2,
   Ban,
-  Pencil
+  Pencil,
+  Scissors,
+  Expand,
+  Drama,
+  Wand2,
+  PenLine
 } from 'lucide-react';
 import { ApiService } from '../services/api';
+import { RealtimeService } from '../services/realtimeService';
 import { DirectMessage, DMConversation } from '../types/vibe';
 import { useAuth } from '../context/AuthContext';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -62,6 +68,9 @@ export const MessagesPage: React.FC = () => {
   const [replyTo, setReplyTo] = useState<DirectMessage | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<DirectMessage | null>(null);
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const [customPresetOpen, setCustomPresetOpen] = useState(false);
+  const [customPresetText, setCustomPresetText] = useState('');
 
   // Modération : menu conversation, renommage, signalement, blocage, suppression
   const [convMenuOpen, setConvMenuOpen] = useState(false);
@@ -85,6 +94,12 @@ export const MessagesPage: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Indicateur de frappe du partenaire (« @x est en train d'écrire… »)
+  const [partnerTyping, setPartnerTyping] = useState(false);
+  const typingHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Heartbeat de notre propre frappe (throttlé côté client)
+  const lastTypingSentRef = useRef(0);
 
   const {
     isListening,
@@ -146,19 +161,66 @@ export const MessagesPage: React.FC = () => {
 
   useEffect(() => {
     fetchConversations();
-    // Polling adaptatif : 10s avec conversation ouverte, 25s sinon, jamais en arrière-plan
-    let timer: ReturnType<typeof setInterval>;
-    const schedule = () => {
-      clearInterval(timer);
-      timer = setInterval(() => {
-        if (document.hidden) return;
-        if (activePartnerId) fetchMessages(activePartnerId);
-        fetchConversations();
-      }, activePartnerId ? 10000 : 25000);
-    };
-    schedule();
+    // Filet de sécurité : rafraîchissement léger toutes les 60 s.
+    // L'instantanéité est assurée par le flux SSE (RealtimeService).
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      if (activePartnerId) fetchMessages(activePartnerId);
+      fetchConversations();
+    }, 60000);
     return () => clearInterval(timer);
   }, [activePartnerId, fetchConversations, fetchMessages]);
+
+  // ── Temps réel (SSE) : nouveaux messages + indicateur de frappe ──
+  useEffect(() => {
+    const unsubscribe = RealtimeService.on((type, payload) => {
+      if (type === 'dm_message' && payload) {
+        const fromActivePartner =
+          activePartnerId != null && String(payload.sender_id) === String(activePartnerId);
+        const mine = payload.sender_id != null && user && String(payload.sender_id) === String(user.id);
+        if (fromActivePartner && !mine) {
+          // Dédupliqué contre l'optimiste/le rafraîchissement par id
+          setMessages((prev) => {
+            if (prev.some((m) => String(m.id) === String(payload.id))) return prev;
+            return [...prev, payload as DirectMessage];
+          });
+          // Marque lu côté serveur + purge les caches DM (rattrapage silencieux)
+          ApiService.invalidateCache(`/dms/messages/${activePartnerId}`);
+          ApiService.getMessages(activePartnerId).catch(() => {});
+          ApiService.invalidateCache('/dms/conversations');
+          fetchConversations();
+          setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+          }, 60);
+        } else if (!mine) {
+          // Autre conversation : met à jour la liste (aperçu, tri, badge)
+          ApiService.invalidateCache('/dms/');
+          fetchConversations();
+        }
+      } else if (type === 'dm_typing' && payload) {
+        const fromActivePartner =
+          activePartnerId != null && String(payload.user_id) === String(activePartnerId);
+        if (!fromActivePartner) return;
+        if (typingHideTimeoutRef.current) clearTimeout(typingHideTimeoutRef.current);
+        if (payload.typing === false) {
+          setPartnerTyping(false);
+        } else {
+          setPartnerTyping(true);
+          // Disparaît si aucun nouveau signal n'arrive (l'émetteur throttle à 2,5 s)
+          typingHideTimeoutRef.current = setTimeout(() => setPartnerTyping(false), 6000);
+        }
+      }
+    });
+    return () => {
+      unsubscribe();
+      if (typingHideTimeoutRef.current) clearTimeout(typingHideTimeoutRef.current);
+    };
+  }, [activePartnerId, user, fetchConversations]);
+
+  // Réinitialise l'indicateur de frappe quand on change de conversation
+  useEffect(() => {
+    setPartnerTyping(false);
+  }, [activePartnerId]);
 
   const handleSelectConversation = (conv: DMConversation) => {
     setActivePartnerId(conv.partner_id);
@@ -352,6 +414,17 @@ export const MessagesPage: React.FC = () => {
     }
   };
 
+  /** Heartbeat « en train d'écrire » : throttlé à 2,5 s pendant la saisie. */
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setMessageInput(e.target.value);
+    if (!activePartnerId || activePartnerBlocked) return;
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 2500) {
+      lastTypingSentRef.current = now;
+      ApiService.sendTyping(activePartnerId, true).catch(() => {});
+    }
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const mediaUrls = attachedMediaList.map((m) => m.url).join(' ');
@@ -360,6 +433,10 @@ export const MessagesPage: React.FC = () => {
       : messageInput.trim();
 
     if (!textToSend || !activePartnerId || isSending || activePartnerBlocked) return;
+
+    // Cesse l'indicateur de frappe dès l'envoi
+    lastTypingSentRef.current = 0;
+    ApiService.sendTyping(activePartnerId, false).catch(() => {});
 
     if (isListening) {
       stopListening();
@@ -442,16 +519,34 @@ export const MessagesPage: React.FC = () => {
     }
   };
 
-  const handleGenerateSuggestion = async () => {
+  const PRESET_OPTIONS: { key: 'shorten' | 'extend' | 'tone' | 'improve' | 'custom'; label: string; icon: React.ReactNode }[] = [
+    { key: 'shorten', label: 'Réduire', icon: <Scissors className="w-3.5 h-3.5" /> },
+    { key: 'extend', label: 'Allonger', icon: <Expand className="w-3.5 h-3.5" /> },
+    { key: 'tone', label: 'Changer le ton', icon: <Drama className="w-3.5 h-3.5" /> },
+    { key: 'improve', label: 'Améliorer', icon: <Wand2 className="w-3.5 h-3.5" /> },
+    { key: 'custom', label: 'Personnalisé…', icon: <PenLine className="w-3.5 h-3.5" /> },
+  ];
+
+  const handleGenerateSuggestion = async (
+    preset: 'improve' | 'shorten' | 'extend' | 'tone' | 'custom' = 'improve',
+    customPrompt?: string
+  ) => {
     if (!activePartnerId || isGeneratingSuggestion) return;
     if (!messageInput.trim()) {
       setErrorMessage("Veuillez d'abord écrire un texte dans la bulle de message pour que mAI puisse l'améliorer.");
       return;
     }
+    if (preset === 'custom' && !customPrompt?.trim()) {
+      setCustomPresetOpen(true);
+      setPresetMenuOpen(false);
+      return;
+    }
     setIsGeneratingSuggestion(true);
     setErrorMessage(null);
+    setPresetMenuOpen(false);
+    setCustomPresetOpen(false);
     try {
-      const res = await ApiService.generateDMReply(activePartnerId, messageInput.trim());
+      const res = await ApiService.generateDMReply(activePartnerId, messageInput.trim(), preset, customPrompt?.trim() || undefined);
       if (res?.suggestion) {
         const clean = res.suggestion
           .replace(/User Safety:\s*safe\.?/gi, '')
@@ -719,6 +814,22 @@ export const MessagesPage: React.FC = () => {
               </div>
             )}
 
+            {/* Indicateur de frappe du partenaire (temps réel) */}
+            {partnerTyping && !activePartnerBlocked && (
+              <div className="px-4 pt-1.5 pb-0.5 flex items-center gap-2 animate-fadeIn" aria-live="polite">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-800">
+                  <span className="flex gap-0.5">
+                    <span className="w-1 h-1 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                  <span className="text-[11px] text-zinc-400">
+                    @{activePartner?.username} est en train d'écrire…
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Messages Thread */}
             <div className="flex-1 p-4 space-y-3 overflow-y-auto max-h-[calc(100vh-140px)]">
               {messages.map((m) => {
@@ -883,6 +994,46 @@ export const MessagesPage: React.FC = () => {
                 </div>
               )}
 
+              {customPresetOpen && !isGeneratingSuggestion && (
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                    <PenLine className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <input
+                      type="text"
+                      value={customPresetText}
+                      onChange={(e) => setCustomPresetText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleGenerateSuggestion('custom', customPresetText);
+                        }
+                      }}
+                      autoFocus
+                      placeholder="Votre consigne pour mAI (ex. : rends-le plus drôle)…"
+                      className="flex-1 bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateSuggestion('custom', customPresetText)}
+                    disabled={!customPresetText.trim()}
+                    style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
+                    className="p-1.5 rounded-full bg-white text-black disabled:opacity-40 shrink-0"
+                    title="Appliquer la consigne"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCustomPresetOpen(false)}
+                    className="p-1.5 rounded-full text-zinc-500 hover:text-white shrink-0"
+                    title="Annuler"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               <div className="flex items-center gap-2">
               <input
                 type="file"
@@ -916,29 +1067,51 @@ export const MessagesPage: React.FC = () => {
                 </button>
               )}
 
-              {/* Amélioration de message par mAI */}
-              <button
-                type="button"
-                onClick={handleGenerateSuggestion}
-                disabled={isGeneratingSuggestion || !messageInput.trim()}
-                className={`p-2 rounded-full transition-colors ${
-                  !messageInput.trim()
-                    ? 'text-zinc-600 opacity-40 cursor-not-allowed'
-                    : 'text-white hover:bg-zinc-900 cursor-pointer shadow-sm'
-                }`}
-                title={
-                  !messageInput.trim()
-                    ? "Veuillez d'abord écrire un texte dans la bulle pour que mAI l'améliore"
-                    : "Améliorer mon message avec mAI"
-                }
-              >
-                {isGeneratingSuggestion ? <Loader2 className="w-4 h-4 animate-spin text-white" /> : <Sparkles className="w-4 h-4" />}
-              </button>
+              {/* Presets mAI : Réduire, Allonger, Changer le ton, Améliorer, Personnalisé */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setPresetMenuOpen((v) => !v)}
+                  disabled={isGeneratingSuggestion || !messageInput.trim()}
+                  className={`p-2 rounded-full transition-colors ${
+                    !messageInput.trim()
+                      ? 'text-zinc-600 opacity-40 cursor-not-allowed'
+                      : 'text-white hover:bg-zinc-900 cursor-pointer shadow-sm'
+                  }`}
+                  title={
+                    !messageInput.trim()
+                      ? "Veuillez d'abord écrire un texte dans la bulle pour que mAI l'améliore"
+                      : "Presets mAI : réduire, allonger, changer le ton, améliorer ou consigne personnalisée"
+                  }
+                >
+                  {isGeneratingSuggestion ? <Loader2 className="w-4 h-4 animate-spin text-white" /> : <Sparkles className="w-4 h-4" />}
+                </button>
+
+                {presetMenuOpen && !isGeneratingSuggestion && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setPresetMenuOpen(false)} />
+                    <div className="absolute bottom-full left-0 mb-2 z-50 w-48 rounded-2xl border border-zinc-800 bg-zinc-950 shadow-xl py-1.5 overflow-hidden">
+                      <p className="px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-wide text-zinc-500 font-semibold">mAI · Presets</p>
+                      {PRESET_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => handleGenerateSuggestion(opt.key)}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900 hover:text-white transition-colors text-left"
+                        >
+                          {opt.icon}
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
 
               <input
                 type="text"
                 value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
+                onChange={handleInputChange}
                 placeholder={isListening ? 'Parlez, dictée en cours...' : 'Écrire un message...'}
                 className="flex-1 py-2 px-3.5 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
               />

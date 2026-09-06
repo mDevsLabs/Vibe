@@ -16,7 +16,8 @@ import {
 } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 import { selectStorageNode, uploadWithFallback } from "./storage.ts";
-import { attachQuotedPosts } from "./vibe-posts.ts";
+import { attachQuotedPosts, publishDuePosts } from "./vibe-posts.ts";
+import { ensureCircleTable } from "./vibe-circle.ts";
 
 export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiFn) {
   // 1. CURRENT USER PROFILE & QUOTAS VIA JWT
@@ -201,6 +202,9 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
 
       const row = userRows[0];
       let isFollowing = false;
+      let blockedByMe = false;
+      let blockedMe = false;
+      let mutedByMe = false;
       if (currentUserId && currentUserId !== Number(row.id)) {
         try {
           const followRows = await sql`
@@ -208,10 +212,25 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           `;
           isFollowing = followRows.length > 0;
         } catch {}
+        // Statuts sociaux pour l'UI (bannière de blocage, option « Masquer »)
+        try {
+          const socialRows = await sql`
+            SELECT
+              EXISTS (SELECT 1 FROM blocked_users WHERE user_id = ${currentUserId} AND blocked_user_id = ${row.id}) AS blocked_by_me,
+              EXISTS (SELECT 1 FROM blocked_users WHERE user_id = ${row.id} AND blocked_user_id = ${currentUserId}) AS blocked_me,
+              EXISTS (SELECT 1 FROM muted_users WHERE user_id = ${currentUserId} AND muted_user_id = ${row.id}) AS muted_by_me
+          `;
+          blockedByMe = Boolean(socialRows[0]?.blocked_by_me);
+          blockedMe = Boolean(socialRows[0]?.blocked_me);
+          mutedByMe = Boolean(socialRows[0]?.muted_by_me);
+        } catch {}
       }
 
       let posts: any[] = [];
       try {
+        // Publication paresseuse des vibes planifiées arrivées à échéance
+        await publishDuePosts();
+        await ensureCircleTable().catch(() => {});
         posts = await sql`
           SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
                  (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
@@ -222,7 +241,14 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           JOIN users u ON u.id = p.author_id
           LEFT JOIN profiles pr ON pr.user_id = u.id
           WHERE p.author_id = ${row.id}
-          ORDER BY p.published_at DESC
+            AND (p.status = 'published' OR ${currentUserId}::bigint = p.author_id)
+            AND (
+              p.visibility = 'public'
+              OR ${currentUserId ? sql`p.author_id = ${currentUserId}
+                OR (p.visibility = 'followers' AND EXISTS (SELECT 1 FROM follows f3 WHERE f3.follower_id = ${currentUserId} AND f3.following_id = p.author_id))
+                OR (p.visibility = 'circle' AND EXISTS (SELECT 1 FROM circle_members cm3 WHERE cm3.user_id = p.author_id AND cm3.member_user_id = ${currentUserId}))` : sql`FALSE`}
+            )
+          ORDER BY p.is_pinned DESC, p.published_at DESC
           LIMIT 40
         `;
 
@@ -265,6 +291,9 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           postsCount: row.posts_count || posts.length,
           is_verified: Boolean(row.is_verified),
           isFollowing,
+          blocked_by_me: blockedByMe,
+          blocked_me: blockedMe,
+          muted_by_me: mutedByMe,
         },
         posts,
       });
@@ -540,6 +569,19 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
         await sql`UPDATE profiles SET followers_count = GREATEST(0, followers_count - 1) WHERE user_id = ${targetId}`;
         return c.json({ success: true, following: false });
       } else {
+        // Blocage (dans un sens ou l'autre) : interdit de s'abonner
+        try {
+          const blockRows = await sql`
+            SELECT 1 FROM blocked_users
+            WHERE (user_id = ${currentUserId} AND blocked_user_id = ${targetId})
+               OR (user_id = ${targetId} AND blocked_user_id = ${currentUserId})
+            LIMIT 1
+          `;
+          if (blockRows.length > 0) {
+            return c.json({ error: "Impossible de suivre ce compte : un blocage est actif.", blocked: true }, 403);
+          }
+        } catch {}
+
         await sql`INSERT INTO follows (follower_id, following_id) VALUES (${currentUserId}, ${targetId})`;
         await sql`UPDATE profiles SET following_count = following_count + 1 WHERE user_id = ${currentUserId}`;
         await sql`UPDATE profiles SET followers_count = followers_count + 1 WHERE user_id = ${targetId}`;
@@ -559,4 +601,171 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
   };
 
   registerMulti("post", ["/api/vibe/profiles/:username/follow", "/vibe/profiles/:username/follow", "/v1/profiles/:username/follow"], handleFollow);
+
+  // 7b. POST NOTIFICATIONS SUBSCRIPTION — être notifié des posts d'un compte
+  const ensurePostSubscriptionsTable = async (sql: any) => {
+    await sql`
+      CREATE TABLE IF NOT EXISTS post_subscriptions (
+        subscriber_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (subscriber_id, author_id)
+      )
+    `;
+  };
+
+  // Statut d'abonnement aux notifications de posts d'un compte
+  const handleGetSubscription = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const currentUserId = Number(payload.sub || (payload as any).id);
+      const rawParam = c.req.param("username") || "";
+      const targetUsername = rawParam.toLowerCase().trim().replace(/^@/, "");
+
+      const sql = getDb();
+      await ensurePostSubscriptionsTable(sql);
+      const targetUser = await sql`SELECT id FROM users WHERE LOWER(username) = ${targetUsername} LIMIT 1`;
+      if (targetUser.length === 0) return c.json({ error: "Utilisateur introuvable." }, 404);
+
+      const rows = await sql`
+        SELECT 1 FROM post_subscriptions
+        WHERE subscriber_id = ${currentUserId} AND author_id = ${Number(targetUser[0].id)}
+      `;
+      return c.json({ success: true, subscribed: rows.length > 0 });
+    } catch (err: any) {
+      console.error("[vibe-users] Get subscription error:", err);
+      return c.json({ error: "Erreur lecture abonnement." }, 500);
+    }
+  };
+  registerMulti("get", ["/api/vibe/profiles/:username/subscribe", "/vibe/profiles/:username/subscribe", "/v1/profiles/:username/subscribe"], handleGetSubscription);
+
+  // Toggle : s'abonner / se désabonner aux notifications de posts
+  const handleToggleSubscription = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const currentUserId = Number(payload.sub || (payload as any).id);
+      const rawParam = c.req.param("username") || "";
+      const targetUsername = rawParam.toLowerCase().trim().replace(/^@/, "");
+
+      const sql = getDb();
+      await ensurePostSubscriptionsTable(sql);
+      const targetUser = await sql`SELECT id FROM users WHERE LOWER(username) = ${targetUsername} LIMIT 1`;
+      if (targetUser.length === 0) return c.json({ error: "Utilisateur introuvable." }, 404);
+      const targetId = Number(targetUser[0].id);
+
+      if (targetId === currentUserId) {
+        return c.json({ error: "Impossible de s'abonner à ses propres posts." }, 400);
+      }
+
+      const existing = await sql`
+        SELECT 1 FROM post_subscriptions WHERE subscriber_id = ${currentUserId} AND author_id = ${targetId}
+      `;
+
+      if (existing.length > 0) {
+        await sql`DELETE FROM post_subscriptions WHERE subscriber_id = ${currentUserId} AND author_id = ${targetId}`;
+        return c.json({ success: true, subscribed: false });
+      } else {
+        await sql`INSERT INTO post_subscriptions (subscriber_id, author_id) VALUES (${currentUserId}, ${targetId}) ON CONFLICT DO NOTHING`;
+        return c.json({ success: true, subscribed: true });
+      }
+    } catch (err: any) {
+      console.error("[vibe-users] Toggle subscription error:", err);
+      return c.json({ error: "Erreur abonnement." }, 500);
+    }
+  };
+  registerMulti("post", ["/api/vibe/profiles/:username/subscribe", "/vibe/profiles/:username/subscribe", "/v1/profiles/:username/subscribe"], handleToggleSubscription);
+
+  // 8. MUTE / UNMUTE — masquage silencieux (l'autre compte n'est pas informé)
+  // Table créée paresseusement ici + en migration 009 (idempotent).
+  let socialTablesReady = false;
+  const ensureSocialTables = async () => {
+    if (socialTablesReady) return;
+    try {
+      const sql = getDb();
+      await sql`
+        CREATE TABLE IF NOT EXISTS muted_users (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id BIGINT NOT NULL,
+          muted_user_id BIGINT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE (user_id, muted_user_id)
+        )
+      `;
+      socialTablesReady = true;
+    } catch (err) {
+      console.warn("[vibe-users] ensureSocialTables skipped:", (err as any)?.message);
+    }
+  };
+
+  const handleMuteUser = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const currentUserId = Number(payload.sub || (payload as any).id);
+
+      const rawParam = c.req.param("username") || "";
+      const targetUsername = rawParam.toLowerCase().trim().replace(/^@/, "");
+      const body = await c.req.json().catch(() => ({} as any));
+      const muted = body.muted !== false; // défaut : masquer
+
+      await ensureSocialTables();
+      const sql = getDb();
+      const targetUser = await sql`SELECT id FROM users WHERE LOWER(username) = ${targetUsername} LIMIT 1`;
+      if (targetUser.length === 0) return c.json({ error: "Utilisateur introuvable." }, 404);
+      const targetId = Number(targetUser[0].id);
+      if (targetId === currentUserId) {
+        return c.json({ error: "Impossible de se masquer soi-même." }, 400);
+      }
+
+      if (muted) {
+        await sql`
+          INSERT INTO muted_users (user_id, muted_user_id)
+          VALUES (${currentUserId}, ${targetId})
+          ON CONFLICT (user_id, muted_user_id) DO NOTHING
+        `;
+      } else {
+        await sql`DELETE FROM muted_users WHERE user_id = ${currentUserId} AND muted_user_id = ${targetId}`;
+      }
+      return c.json({ success: true, muted });
+    } catch (err: any) {
+      console.error("[Mute User Error]:", err);
+      return c.json({ error: "Erreur lors du masquage du compte." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/users/:username/mute", "/vibe/users/:username/mute", "/v1/users/:username/mute"], handleMuteUser);
+
+  const handleListMuted = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const currentUserId = Number(payload.sub || (payload as any).id);
+
+      await ensureSocialTables();
+      const sql = getDb();
+      const rows = await sql`
+        SELECT m.id, m.muted_user_id, u.username AS muted_username,
+               COALESCE(pr.display_name, u.username) AS muted_display_name,
+               COALESCE(pr.avatar_url, u.avatar_url) AS muted_avatar_url,
+               m.created_at
+        FROM muted_users m
+        JOIN users u ON u.id = m.muted_user_id
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE m.user_id = ${currentUserId}
+        ORDER BY m.created_at DESC
+      `;
+      return c.json({ muted: rows });
+    } catch (err: any) {
+      console.error("[List Muted Error]:", err);
+      return c.json({ muted: [] });
+    }
+  };
+
+  registerMulti("get", ["/api/vibe/users/muted", "/vibe/users/muted", "/v1/users/muted"], handleListMuted);
 }

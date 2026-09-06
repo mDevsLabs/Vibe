@@ -19,7 +19,13 @@ import {
   Type,
   Sun,
   Moon,
-  Laptop
+  Laptop,
+  Ban,
+  Loader2,
+  Users,
+  Volume2,
+  Cpu,
+  X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme, ACCENT_COLORS } from '../context/ThemeContext';
@@ -78,6 +84,13 @@ export const SettingsPage: React.FC = () => {
   const [pushNotifs, setPushNotifs] = useState(true);
   const [maiAutoApproveTools, setMaiAutoApproveTools] = useState(false);
   const [postsAIGeneratedByDefault, setPostsAIGeneratedByDefault] = useState(false);
+  // mAI : modèle par défaut (toutes les requêtes mAI) + voix de lecture
+  const [maiDefaultModel, setMaiDefaultModel] = useState('poolside/laguna-xs-2.1:free');
+  const [maiTtsVoice, setMaiTtsVoice] = useState('flux-alexis-en');
+  const [models, setModels] = useState<Array<{ id: string; name: string; provider?: string }>>([]);
+  const [voices, setVoices] = useState<Array<{ id: string; name: string }>>([]);
+  // Cercle Privé (membres autorisés à voir les posts « Cercle Privé »)
+  const [circleMembers, setCircleMembers] = useState<Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string }>>([]);
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -108,6 +121,10 @@ export const SettingsPage: React.FC = () => {
           if (s.posts_ai_generated_by_default !== undefined) {
             setPostsAIGeneratedByDefault(Boolean(s.posts_ai_generated_by_default));
           }
+          if (s.mai_default_model) {
+            setMaiDefaultModel(String(s.mai_default_model));
+          }
+          setMaiTtsVoice(s.mai_tts_voice || 'flux-alexis-en');
           if (s.accent_color && s.accent_color in ACCENT_COLORS) {
             setAccentColor(s.accent_color as any);
           }
@@ -147,6 +164,8 @@ export const SettingsPage: React.FC = () => {
         font_size: fontSize,
         mai_auto_approve_tools: maiAutoApproveTools,
         posts_ai_generated_by_default: postsAIGeneratedByDefault,
+        mai_default_model: maiDefaultModel,
+        mai_tts_voice: maiTtsVoice,
       });
 
       setSavedSuccess(true);
@@ -175,6 +194,68 @@ export const SettingsPage: React.FC = () => {
       alert(err?.message || "Erreur lors de l'export. Vérifiez votre connexion.");
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  // ── Comptes bloqués & masqués (mute) ─────────────────────────────────
+  const [blockedAccounts, setBlockedAccounts] = useState<Array<{ id: string; blocked_user_id: string; blocked_username?: string; blocked_display_name?: string; blocked_avatar_url?: string }>>([]);
+  const [mutedAccounts, setMutedAccounts] = useState<Array<{ id: string; muted_user_id: string; muted_username?: string; muted_display_name?: string; muted_avatar_url?: string }>>([]);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      ApiService.getBlockedUsers().catch(() => ({ blocked: [] })),
+      ApiService.getMutedUsers().catch(() => ({ muted: [] })),
+    ])
+      .then(([blockedRes, mutedRes]) => {
+        setBlockedAccounts(blockedRes?.blocked || []);
+        setMutedAccounts(mutedRes?.muted || []);
+      })
+      .finally(() => setIsLoadingAccounts(false));
+
+    // Liste des modèles mAI (API /v1/models) et des voix de lecture (API speech)
+    ApiService.getModels().then((res) => setModels(res.models || [])).catch(() => {});
+    ApiService.getSpeechVoices().then((res) => setVoices(res.voices || [])).catch(() => {});
+    // Membres du Cercle Privé
+    ApiService.getCircle().then((res) => setCircleMembers(res.members || [])).catch(() => {});
+  }, []);
+
+  const handleRemoveFromCircle = async (username: string) => {
+    try {
+      await ApiService.removeFromCircle(username);
+      setCircleMembers((prev) => prev.filter((m) => m.username !== username));
+      NotificationService.showInAppToast('Cercle Privé', `@${username} a été retiré de votre cercle.`, 'info');
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le retrait du cercle a échoué.', 'error');
+    }
+  };
+
+  const handleUnblockAccount = async (userId: string, username?: string) => {
+    try {
+      await ApiService.unblockUser(userId);
+      setBlockedAccounts((prev) => prev.filter((b) => b.blocked_user_id !== userId));
+      NotificationService.showInAppToast(
+        'Compte débloqué',
+        `@${username || 'ce compte'} peut de nouveau interagir avec vous.`,
+        'info'
+      );
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le déblocage a échoué.', 'error');
+    }
+  };
+
+  const handleUnmuteAccount = async (username?: string) => {
+    if (!username) return;
+    try {
+      await ApiService.muteUser(username, false);
+      setMutedAccounts((prev) => prev.filter((m) => m.muted_username !== username));
+      NotificationService.showInAppToast(
+        'Compte réactivé',
+        `Les publications de @${username} réapparaissent dans votre fil.`,
+        'info'
+      );
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'La réactivation a échoué.', 'error');
     }
   };
 
@@ -497,6 +578,124 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Section 3b: Comptes bloqués & masqués */}
+          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+            <div className="flex items-center gap-2 text-white font-bold text-sm">
+              <Ban className="w-4 h-4 text-red-400" />
+              <span>Comptes bloqués &amp; masqués</span>
+            </div>
+
+            {isLoadingAccounts ? (
+              <div className="flex items-center gap-2 text-xs text-zinc-500 py-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Chargement des listes…
+              </div>
+            ) : (
+              <div className="space-y-4 text-xs">
+                {/* Comptes bloqués */}
+                <div className="space-y-2">
+                  <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                    <Ban className="w-3 h-3" />
+                    Bloqués ({blockedAccounts.length}) — contact coupé
+                  </p>
+                  {blockedAccounts.length === 0 ? (
+                    <p className="text-zinc-600 text-[11px]">Aucun compte bloqué.</p>
+                  ) : (
+                    <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+                      {blockedAccounts.map((b) => (
+                        <div key={b.id} className="flex items-center gap-3 p-3">
+                          <div className="flex-1 min-w-0">
+                            <span className="font-semibold text-white block truncate">
+                              {b.blocked_display_name || b.blocked_username}
+                            </span>
+                            <span className="text-zinc-500">@{b.blocked_username}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleUnblockAccount(b.blocked_user_id, b.blocked_username)}
+                            className="px-3 py-1.5 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 transition-colors shrink-0"
+                          >
+                            Débloquer
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Comptes masqués */}
+                <div className="space-y-2">
+                  <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                    <EyeOff className="w-3 h-3" />
+                    Masqués ({mutedAccounts.length}) — silencieux
+                  </p>
+                  {mutedAccounts.length === 0 ? (
+                    <p className="text-zinc-600 text-[11px]">Aucun compte masqué.</p>
+                  ) : (
+                    <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+                      {mutedAccounts.map((m) => (
+                        <div key={m.id} className="flex items-center gap-3 p-3">
+                          <div className="flex-1 min-w-0">
+                            <span className="font-semibold text-white block truncate">
+                              {m.muted_display_name || m.muted_username}
+                            </span>
+                            <span className="text-zinc-500">@{m.muted_username}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleUnmuteAccount(m.muted_username)}
+                            className="px-3 py-1.5 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 transition-colors shrink-0"
+                          >
+                            Réactiver
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Section 3c: Cercle Privé */}
+          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+            <div className="flex items-center gap-2 text-white font-bold text-sm">
+              <Users className="w-4 h-4 text-emerald-400" />
+              <span>Cercle Privé</span>
+            </div>
+
+            <p className="text-xs text-zinc-400">
+              Les membres de votre cercle sont les seuls à pouvoir voir les publications publiées avec l'audience
+              <strong className="text-white"> « Cercle Privé » </strong>. Ajoutez des membres depuis leur profil via le
+              bouton « Ajouter au cercle ».
+            </p>
+
+            {circleMembers.length === 0 ? (
+              <p className="text-zinc-600 text-[11px]">Votre cercle est vide pour l'instant.</p>
+            ) : (
+              <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+                {circleMembers.map((m) => (
+                  <div key={m.id} className="flex items-center gap-3 p-3">
+                    <div className="flex-1 min-w-0">
+                      <span className="font-semibold text-white block truncate">
+                        {m.display_name || m.username}
+                      </span>
+                      <span className="text-zinc-500">@{m.username}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFromCircle(m.username)}
+                      className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors shrink-0"
+                      title={`Retirer @${m.username} du cercle`}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Section 4: Notifications */}
           <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
             <div className="flex items-center gap-2 text-white font-bold text-sm">
@@ -571,6 +770,66 @@ export const SettingsPage: React.FC = () => {
                   onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
                   className="w-4 h-4 accent-purple-500 cursor-pointer"
                 />
+              </div>
+
+              {/* Modèle mAI par défaut (toutes les requêtes mAI) — liste via API */}
+              <div className="space-y-1.5 pt-2 border-t border-zinc-900">
+                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                  <Cpu className="w-3 h-3" />
+                  Modèle mAI par défaut
+                </label>
+                <p className="text-zinc-500 text-[11px]">
+                  Utilisé pour l'assistant mAI, les outils du composer (corriger, allonger, réduire, ton, suggestions Tab)
+                  et la traduction. Modifiable aussi directement dans le panneau mAI.
+                </p>
+                {models.length > 0 ? (
+                  <select
+                    value={maiDefaultModel}
+                    onChange={(e) => setMaiDefaultModel(e.target.value)}
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                  >
+                    {models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}{m.provider ? ` — ${m.provider}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="flex items-center gap-2 text-zinc-500 py-1">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Chargement des modèles via l'API…</span>
+                  </div>
+                )}
+                <p className="text-zinc-600 text-[10px] font-mono">{maiDefaultModel}</p>
+              </div>
+
+              {/* Voix de lecture mAI (mini-lecteur audio) */}
+              <div className="space-y-1.5">
+                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                  <Volume2 className="w-3 h-3" />
+                  Voix de lecture mAI
+                </label>
+                <p className="text-zinc-500 text-[11px]">
+                  Voix utilisée par le mini-lecteur audio flottant pour lire vos posts et fils de discussion.
+                </p>
+                {voices.length > 0 ? (
+                  <select
+                    value={maiTtsVoice}
+                    onChange={(e) => setMaiTtsVoice(e.target.value)}
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                  >
+                    {voices.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name || v.id}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="flex items-center gap-2 text-zinc-500 py-1">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Chargement des voix…</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

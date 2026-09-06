@@ -11,7 +11,6 @@ import { AlertCircle, PenSquare, TrendingUp, X, ArrowUp } from 'lucide-react';
 import { PostComposer } from '../components/feed/PostComposer';
 import { PostCard } from '../components/feed/PostCard';
 import { ExplainModal } from '../components/feed/ExplainModal';
-import { IntroBanner } from '../components/common/IntroBanner';
 import { PostCardSkeleton } from '../components/common/PageSkeleton';
 import { VibeLogo } from '../components/layout/VibeLogo';
 import type { Post } from '../types/vibe';
@@ -251,9 +250,6 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
           </button>
         </div>
       </header>
-
-      {/* Intro Video Banner (2026 / mAI) */}
-      <IntroBanner />
 
       {/* Main Post Composer */}
       <PostComposer

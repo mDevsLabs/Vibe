@@ -101,9 +101,43 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
         }
       } catch {}
     };
+    // Le modèle par défaut choisi ici est persisté (user_settings.mai_default_model)
+    ApiService.getSettings()
+      .then((res: any) => {
+        const saved = res?.settings?.mai_default_model;
+        if (saved) setSelectedModel(String(saved));
+      })
+      .catch(() => {});
     if (isOpen) {
       loadModels();
     }
+  }, [isOpen]);
+
+  /** Changement de modèle depuis le picker mAI : appliqué et enregistré en base. */
+  const handleSelectModel = (modelId: string) => {
+    setSelectedModel(modelId);
+    ApiService.updateSettings({ mai_default_model: modelId }).catch(() => {});
+  };
+
+  // Historique persisté : chargé à la première ouverture du panneau
+  const historyLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen || historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+    ApiService.getMAIHistory()
+      .then((res) => {
+        if (res.messages && res.messages.length > 0) {
+          setMessages(
+            res.messages.map((m) => ({
+              id: m.id,
+              sender: (m.role === 'assistant' ? 'assistant' : 'user') as MessageItem['sender'],
+              content: m.content,
+              timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
   }, [isOpen]);
 
   // Post pré-attaché depuis l'extérieur (bouton « Mentionner dans mAI »)
@@ -292,7 +326,7 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
             <ModelDropdown
               models={availableModels}
               selectedModelId={selectedModel}
-              onSelectModel={setSelectedModel}
+              onSelectModel={handleSelectModel}
             />
 
             <button

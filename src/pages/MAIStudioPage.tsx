@@ -19,6 +19,7 @@ import {
   Share2,
   ShieldCheck,
   ShieldAlert,
+  SquarePen,
   XCircle
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -91,6 +92,34 @@ export const MAIStudioPage: React.FC = () => {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Chargement de l'historique persisté de la conversation mAI
+  useEffect(() => {
+    ApiService.getMAIHistory()
+      .then((res) => {
+        if (res.messages && res.messages.length > 0) {
+          setMessages(
+            res.messages.map((m) => ({
+              id: m.id,
+              sender: m.role === 'assistant' ? ('mai' as const) : ('user' as const),
+              content: m.content,
+              time: new Date(m.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Démarrer une nouvelle conversation mAI (vide l'historique actif)
+  const handleNewConversation = async () => {
+    try {
+      await ApiService.newMAIConversation();
+      setMessages([]);
+      setPendingTool(null);
+      inputRef.current?.focus();
+    } catch {}
+  };
 
   // Charger le réglage d'auto-approbation des outils mAI
   useEffect(() => {
@@ -262,6 +291,14 @@ export const MAIStudioPage: React.FC = () => {
             selectedModelId={selectedModel}
             onSelectModel={setSelectedModel}
           />
+
+          <button
+            onClick={handleNewConversation}
+            title="Nouvelle discussion mAI"
+            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+          >
+            <SquarePen className="w-4 h-4" />
+          </button>
 
           <button
             onClick={toggleAutoApprove}

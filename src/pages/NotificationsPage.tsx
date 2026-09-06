@@ -16,6 +16,7 @@ import {
   Sparkles,
   UserPlus,
   Quote as QuoteIcon,
+  FileText,
   Check,
   Loader2,
   AlertCircle
@@ -35,6 +36,25 @@ export const NotificationsPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [permission, setPermission] = useState<PermissionState>('default');
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
+  // Filtrage client de secours : comptes masqués/bloqués (le serveur filtre
+  // déjà, ce set protège contre un backend pas encore à jour)
+  const [hiddenUsernames, setHiddenUsernames] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    Promise.all([
+      ApiService.getMutedUsers().catch(() => ({ muted: [] })),
+      ApiService.getBlockedUsers().catch(() => ({ blocked: [] })),
+    ]).then(([mutedRes, blockedRes]) => {
+      const names = new Set<string>();
+      for (const m of mutedRes?.muted || []) {
+        if ((m as any).muted_username) names.add(String((m as any).muted_username).toLowerCase());
+      }
+      for (const b of blockedRes?.blocked || []) {
+        if (b.blocked_username) names.add(String(b.blocked_username).toLowerCase());
+      }
+      setHiddenUsernames(names);
+    });
+  }, []);
 
   const fetchNotifications = async () => {
     try {
@@ -52,8 +72,10 @@ export const NotificationsPage: React.FC = () => {
     const state = NotificationService.getPermissionState();
     setPermission(state === 'unsupported' ? 'unsupported' : (state as PermissionState));
 
-    // Rafraîchissement automatique toutes les 8s ou au focus/événement
-    const interval = setInterval(fetchNotifications, 8000);
+    // Temps réel via SSE : chaque notification est poussée par le serveur et
+    // rediffusée en 'vibe:notification_received' (realtimeService).
+    // L'intervalle ne sert que de filet de sécurité léger.
+    const interval = setInterval(fetchNotifications, 60000);
     const handleNotif = () => fetchNotifications();
     window.addEventListener('vibe:notification_received', handleNotif);
     window.addEventListener('vibe:feed_refresh', handleNotif);
@@ -110,14 +132,20 @@ export const NotificationsPage: React.FC = () => {
         return <UserPlus className="w-4 h-4 text-violet-400" />;
       case 'ai_digest':
         return <Sparkles className="w-4 h-4 text-amber-400" />;
+      case 'post':
+        return <FileText className="w-4 h-4 text-sky-400" />;
       default:
         return <Bell className="w-4 h-4 text-zinc-400" />;
     }
   };
 
   const filteredNotifications = notifications.filter((n) => {
+    // Secours client : aucun contenu d'un compte masqué ou bloqué
+    if (n.actor_username && hiddenUsernames.has(String(n.actor_username).toLowerCase())) return false;
+    // Mentions = uniquement les citations et réponses directes (+ mentions @)
+    if (filter === 'mentions') return n.type === 'quote' || n.type === 'reply' || n.type === 'mention';
     if (filter === 'likes') return n.type === 'like' || n.type === 'reaction';
-    if (filter === 'mentions') return n.type === 'reply' || n.type === 'mention';
+    // Comptes vérifiés : filtre anti-spam ne montrant que les comptes certifiés
     if (filter === 'verified') return Boolean((n as any).actor_verified);
     return true;
   });
@@ -207,12 +235,12 @@ export const NotificationsPage: React.FC = () => {
         </div>
       )}
 
-      {/* Filter Tabs */}
+      {/* Filter Tabs : Toutes / Mentions / J'aime / Comptes vérifiés */}
       <div className="flex border-b border-zinc-800 bg-zinc-950 mt-4">
         {[
           { id: 'all', label: 'Toutes' },
-          { id: 'likes', label: `J'aime (${likesCount})` },
           { id: 'mentions', label: 'Mentions' },
+          { id: 'likes', label: `J'aime (${likesCount})` },
           { id: 'verified', label: 'Vérifiés' },
         ].map((t) => (
           <button
@@ -309,6 +337,8 @@ export const NotificationsPage: React.FC = () => {
                   ? "Aucune mention J'aime pour le moment"
                   : filter === 'mentions'
                   ? 'Aucune mention pour le moment'
+                  : filter === 'verified'
+                  ? 'Aucune notification de comptes vérifiés'
                   : 'Aucune notification pour le moment'}
               </p>
               <p className="text-[11px] text-zinc-600">Vos likes, repartages et mentions apparaîtront ici dès leur réception.</p>

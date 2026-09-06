@@ -12,8 +12,9 @@ import {
   Compass,
   Bell,
   Mail,
-  User as UserIcon,
   Sparkles,
+  Library,
+  User as UserIcon,
   Settings,
   PenSquare,
   LogOut
@@ -25,7 +26,6 @@ import { ProfileAvatar } from '../common/ProfileAvatar';
 
 interface SidebarProps {
   onOpenComposer: () => void;
-  onToggleMAIDrawer: () => void;
   unreadNotifications?: number;
   unreadMessages?: number;
 }
@@ -35,6 +35,7 @@ const NAV_ITEMS = [
   { path: '/explore', label: 'Explorer', icon: Compass },
   { path: '/notifications', label: 'Notifications', icon: Bell, badgeKey: 'notifications' as const },
   { path: '/messages', label: 'Messages', icon: Mail, badgeKey: 'messages' as const },
+  { path: '/books', label: 'Livres', icon: Library },
   { path: '/mai', label: 'mAI', icon: Sparkles },
   { path: '/settings', label: 'Paramètres', icon: Settings },
 ];
@@ -44,13 +45,13 @@ const pageLoaders: Record<string, () => Promise<unknown>> = {
   '/explore': () => import('../../pages/ExplorePage'),
   '/notifications': () => import('../../pages/NotificationsPage'),
   '/messages': () => import('../../pages/MessagesPage'),
+  '/books': () => import('../../pages/BooksPage'),
   '/mai': () => import('../../pages/MAIStudioPage'),
   '/settings': () => import('../../pages/SettingsPage'),
 };
 
 export const Sidebar: React.FC<SidebarProps> = ({
   onOpenComposer,
-  onToggleMAIDrawer,
   unreadNotifications = 0,
   unreadMessages = 0,
 }) => {
@@ -145,7 +146,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </Link>
         </nav>
 
-        {/* Action Button: Publier & Assistant mAI */}
+        {/* Action Button: Publier */}
         <div className="pt-2 space-y-2 flex flex-col items-center xl:items-stretch">
           <button
             onClick={onOpenComposer}
@@ -155,15 +156,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <PenSquare className="w-5 h-5 shrink-0" />
             <span className="hidden xl:inline">Poster une vibe</span>
-          </button>
-
-          <button
-            onClick={onToggleMAIDrawer}
-            className="w-12 h-12 xl:w-full xl:h-auto xl:py-2.5 xl:px-4 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 font-medium text-xs hover:bg-zinc-800 hover:text-white transition-all flex items-center justify-center gap-2"
-            title="Assistant mAI"
-          >
-            <Sparkles className="w-4 h-4 text-white shrink-0" />
-            <span className="hidden xl:inline">Assistant mAI</span>
           </button>
         </div>
       </div>

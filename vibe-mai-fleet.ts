@@ -170,11 +170,34 @@ export class MAIAgentFleet {
   }
 
   /**
-   * Appel générique OpenRouter pour les outils textuels (traduction, reformulation...).
+   * Modèle mAI par défaut de l'utilisateur (réglage user_settings.mai_default_model,
+   * choisi dans les paramètres ou directement dans mAI). Cache mémoire 60 s.
    */
-  public static async callOpenRouter(userId: number, system: string, user: string, model = "google/gemini-2.5-flash:free"): Promise<string | null> {
+  static userModelCache = new Map<string, { model: string; expiresAt: number }>();
+
+  public static async getUserDefaultModel(userId: number | string): Promise<string> {
+    const key = String(userId);
+    const cached = this.userModelCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.model;
+    let model = "poolside/laguna-xs-2.1:free";
+    try {
+      const sql = getDb();
+      const rows = await sql`SELECT mai_default_model FROM user_settings WHERE user_id = ${Number(key)} LIMIT 1`;
+      const saved = String(rows[0]?.mai_default_model || "").trim();
+      if (saved) model = saved;
+    } catch {}
+    this.userModelCache.set(key, { model, expiresAt: Date.now() + 60_000 });
+    return model;
+  }
+
+  /**
+   * Appel générique OpenRouter pour les outils textuels (traduction, reformulation...).
+   * Sans `model`, utilise le modèle par défaut de l'utilisateur.
+   */
+  public static async callOpenRouter(userId: number, system: string, user: string, model?: string): Promise<string | null> {
     const apiKey = await this.getOpenRouterKey(userId);
     if (!apiKey) return null;
+    const resolvedModel = model || (await this.getUserDefaultModel(userId));
     try {
       const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -185,7 +208,7 @@ export class MAIAgentFleet {
           "X-Title": "mAI Social Assistant",
         },
         body: JSON.stringify({
-          model,
+          model: resolvedModel,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },

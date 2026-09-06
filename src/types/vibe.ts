@@ -31,6 +31,21 @@ export interface Profile {
   verificationTier?: VerificationTier;
   showcaseLayout?: 'stream' | 'grid';
   topicModel?: string[];
+  /** Statuts sociaux renvoyés par GET /profiles/:username pour le visiteur. */
+  isFollowing?: boolean;
+  blocked_by_me?: boolean;
+  blocked_me?: boolean;
+  muted_by_me?: boolean;
+}
+
+/** Compte masqué (mute) via GET /users/muted. */
+export interface MutedUser {
+  id: string;
+  muted_user_id: string;
+  muted_username: string;
+  muted_display_name?: string;
+  muted_avatar_url?: string;
+  created_at: string;
 }
 
 export interface MediaAsset {
@@ -68,12 +83,15 @@ export interface Post {
   verification_tier?: VerificationTier;
   content: string;
   format: 'micro_text' | 'article' | 'media' | 'mai_generation';
-  visibility: 'public' | 'followers' | 'private';
+  /** Audience : public, abonnés uniquement, cercle privé, ou privé (soi seul). */
+  visibility: 'public' | 'followers' | 'circle' | 'private';
   likes_count: number;
   reposts_count: number;
   replies_count: number;
   bookmarks_count: number;
   views_count?: number;
+  /** Post épinglé tout en haut du profil de son auteur (max 3). */
+  is_pinned?: boolean;
   toxicity_score?: number;
   sentiment_score?: number;
   created_via?: 'web' | 'mai_agent' | 'api';
@@ -101,6 +119,10 @@ export interface Post {
   };
   media_url?: string;
   media_assets?: MediaAsset[];
+  /** Planification : 'scheduled' tant que la date de publication n'est pas atteinte. */
+  status?: 'published' | 'scheduled';
+  scheduled_at?: string | null;
+  updated_at?: string;
 }
 
 export interface Comment {
@@ -110,11 +132,14 @@ export interface Comment {
   username: string;
   display_name?: string;
   avatar_url?: string;
+  is_verified?: boolean;
   content: string;
   parent_comment_id?: string;
   depth: number;
   likes_count: number;
   created_at: string;
+  /** Médias joints au commentaire (max 3 images / 1 vidéo). */
+  media_assets?: MediaAsset[];
 }
 
 export interface DirectMessage {
@@ -150,11 +175,23 @@ export interface NotificationItem {
   actor_id?: string;
   actor_username?: string;
   actor_avatar_url?: string;
-  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction' | 'quote';
+  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction' | 'quote' | 'post';
   post_id?: string;
   message: string;
   is_read: boolean;
   created_at: string;
+}
+
+/** Livre de « Vibe préférées » — collection de posts en favoris (max 5 par compte). */
+export interface VibeBook {
+  id: string;
+  title: string;
+  /** Nom de l'icône lucide-react choisie parmi le picker. */
+  icon: string;
+  created_at?: string;
+  items_count?: number;
+  /** true si le post passé en query est déjà dans ce Livre. */
+  contains_post?: boolean;
 }
 
 export interface MAIQuotas {
@@ -194,6 +231,10 @@ export interface UserSettings {
   mai_auto_approve_tools?: boolean;
   /** Les nouvelles publications sont-elles marquées « créées avec l'IA » par défaut ? */
   posts_ai_generated_by_default?: boolean;
+  /** Modèle mAI par défaut pour toutes les requêtes mAI (assistant, outils composer, traduction). */
+  mai_default_model?: string;
+  /** Voix de lecture mAI (mini-lecteur audio flottant, cf. GET /v1/speech/voices). */
+  mai_tts_voice?: string;
   accent_color?: string;
   font_size?: 'small' | 'medium' | 'large';
 }

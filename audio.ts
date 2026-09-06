@@ -790,9 +790,9 @@ export function registerAudioRoutes(app: Hono) {
       }
 
       // Format binaire standard pour OpenAI SDK & requêtes natives
+      // (CORS géré par le middleware global dans main.ts)
       return new Response(bytes, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
           "Content-Type": mimeType,
           "x-audio-id": String(savedId),
           "x-speech-limit": String(weeklyLimit),

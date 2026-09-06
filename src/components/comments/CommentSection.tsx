@@ -1,35 +1,69 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — COMMENT SECTION (src/components/comments/CommentSection.tsx)
- * Interactive thread replies, comment likes & mAI discussion synthesis
+ * Réponses riches (éditeur WYSIWYG), médias avec légendes (3 images / 1 vidéo),
+ * likes de commentaires & synthèse mAI des échanges.
  * ============================================================================
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { Sparkles, Heart, Mic, MicOff, Loader2, AlertCircle } from 'lucide-react';
-import { Comment } from '../../types/vibe';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  Sparkles,
+  Heart,
+  Mic,
+  MicOff,
+  Loader2,
+  AlertCircle,
+  Image as ImageIcon,
+  X,
+} from 'lucide-react';
+import { Comment, MediaAsset } from '../../types/vibe';
 import { ApiService } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
-import { FormattedText } from '../common/FormattedText';
+import { RichContent, htmlToPlainText } from '../common/RichContent';
+import { RichTextEditor, RichTextEditorHandle } from '../common/RichTextEditor';
 
 const nextToastId = () => Date.now();
+
+const MAX_COMMENT_IMAGES = 3;
+const MAX_COMMENT_VIDEOS = 1;
+const MAX_COMMENT_TOTAL = MAX_COMMENT_IMAGES + MAX_COMMENT_VIDEOS;
+const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50 Mo
+
+interface UploadedMedia {
+  url: string;
+  media_type: 'image' | 'video';
+  mime_type?: string;
+  size?: number;
+  alt_text?: string;
+}
 
 interface CommentSectionProps {
   postId: string;
 }
 
+const isVideoAsset = (m: { url: string; media_type?: string }) =>
+  String(m.media_type || '').startsWith('video') || /\.(mp4|webm|mov)(\?|$)/i.test(m.url);
+
 export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   const { user } = useAuth();
   const [comments, setComments] = useState<Comment[]>([]);
   const [aiDigest, setAiDigest] = useState<string | null>(null);
-  const [newComment, setNewComment] = useState('');
   const [replyingTo, setReplyingTo] = useState<Comment | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+
+  // Composer de réponse : contenu riche + médias
+  const [contentText, setContentText] = useState('');
+  const [mediaList, setMediaList] = useState<UploadedMedia[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<RichTextEditorHandle>(null);
 
   const {
     isListening,
@@ -39,7 +73,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     resetTranscript,
   } = useSpeechRecognition({
     onResult: (text) => {
-      setNewComment((prev) => (prev ? `${prev} ${text}` : text));
+      editorRef.current?.insertText(text);
     },
   });
 
@@ -64,9 +98,67 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     fetchComments();
   }, [fetchComments]);
 
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const imagesCount = mediaList.filter((m) => m.media_type === 'image').length;
+    const videosCount = mediaList.filter((m) => m.media_type === 'video').length;
+    let newImages = 0;
+    let newVideos = 0;
+    for (const f of files) {
+      if (f.type.startsWith('image/')) newImages++;
+      else if (f.type.startsWith('video/')) newVideos++;
+    }
+
+    if (imagesCount + newImages > MAX_COMMENT_IMAGES) {
+      setComposerError(`Limite de ${MAX_COMMENT_IMAGES} images par réponse (actuel : ${imagesCount}).`);
+      return;
+    }
+    if (videosCount + newVideos > MAX_COMMENT_VIDEOS) {
+      setComposerError(`Limite de ${MAX_COMMENT_VIDEOS} vidéo par réponse.`);
+      return;
+    }
+    if (mediaList.length + files.length > MAX_COMMENT_TOTAL) {
+      setComposerError(`Maximum ${MAX_COMMENT_TOTAL} médias par réponse.`);
+      return;
+    }
+    const totalBytes =
+      mediaList.reduce((acc, m) => acc + (m.size || 0), 0) + files.reduce((acc, f) => acc + f.size, 0);
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      setComposerError('La taille totale des médias ne peut pas dépasser 50 Mo.');
+      return;
+    }
+
+    setComposerError(null);
+    setIsUploading(true);
+    try {
+      for (const file of files) {
+        if (file.size > MAX_TOTAL_BYTES) {
+          throw new Error(`Le fichier ${file.name} dépasse 50 Mo.`);
+        }
+        const res = await ApiService.uploadFile(file);
+        if (res.url) {
+          const type: 'image' | 'video' = file.type.startsWith('video/') ? 'video' : 'image';
+          setMediaList((prev) => [
+            ...prev,
+            { url: res.url, media_type: type, mime_type: file.type, size: file.size, alt_text: '' },
+          ]);
+        }
+      }
+    } catch (err: any) {
+      setComposerError(err.message || 'Erreur lors du téléversement du média.');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newComment.trim() || isSubmitting) return;
+    const html = editorRef.current?.getHTML() || '';
+    const plainText = htmlToPlainText(html).trim();
+    if ((!plainText && mediaList.length === 0) || isSubmitting) return;
 
     if (isListening) {
       stopListening();
@@ -74,13 +166,21 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
 
     setIsSubmitting(true);
+    setComposerError(null);
     try {
-      await ApiService.addComment(postId, newComment.trim(), replyingTo?.id);
-      setNewComment('');
+      const mediaAssets = mediaList.map((m) => ({
+        url: m.url,
+        media_type: m.mime_type || (m.media_type === 'video' ? 'video/mp4' : 'image/jpeg'),
+        alt_text: m.alt_text?.trim() || undefined,
+      }));
+      await ApiService.addComment(postId, html, replyingTo?.id, mediaAssets.length > 0 ? mediaAssets : undefined);
+      editorRef.current?.clear();
+      setContentText('');
+      setMediaList([]);
       setReplyingTo(null);
       fetchComments();
     } catch (err: any) {
-      alert(err.message || 'Erreur lors de l’envoi de la réponse.');
+      setComposerError(err.message || 'Erreur lors de l’envoi de la réponse.');
     } finally {
       setIsSubmitting(false);
     }
@@ -142,6 +242,43 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
   };
 
+  const renderCommentMedia = (assets: MediaAsset[]) => {
+    const images = assets.filter((m) => !isVideoAsset(m));
+    const videos = assets.filter(isVideoAsset);
+    return (
+      <div className="mt-1.5 space-y-1.5">
+        {images.length > 0 && (
+          <div className={`grid gap-1 rounded-xl overflow-hidden ${images.length === 1 ? 'grid-cols-1 max-h-64' : 'grid-cols-2'}`}>
+            {images.map((img, i) => (
+              <img
+                key={i}
+                src={img.url}
+                alt={img.alt_text || 'Média du commentaire'}
+                loading="lazy"
+                decoding="async"
+                onClick={(e) => e.stopPropagation()}
+                className={`w-full rounded-lg border border-zinc-800 object-cover ${images.length === 1 ? 'max-h-64' : 'h-full'}`}
+              />
+            ))}
+          </div>
+        )}
+        {images.filter((img) => img.alt_text?.trim()).map((img, i) => (
+          <p key={`cimg-${i}`} className="text-[11px] text-zinc-500 leading-snug break-words">{img.alt_text}</p>
+        ))}
+        {videos.map((vid, i) => (
+          <div key={`cvid-${i}`} className="rounded-xl overflow-hidden border border-zinc-800 bg-black max-h-64">
+            <video src={vid.url} controls preload="metadata" className="w-full max-h-64 object-cover" />
+            {vid.alt_text?.trim() && (
+              <p className="px-2.5 py-1.5 text-[11px] text-zinc-500 leading-snug break-words border-t border-zinc-900">
+                {vid.alt_text}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const renderComment = (cm: Comment) => {
     const liked = likedIds.has(String(cm.id));
     return (
@@ -170,9 +307,12 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
             Répondre
           </button>
         </div>
-        <div className="text-xs text-zinc-200 pl-8 whitespace-pre-wrap break-words">
-          <FormattedText text={cm.content} />
+        <div className="text-xs text-zinc-200 pl-8">
+          <RichContent content={cm.content} />
         </div>
+        {cm.media_assets && cm.media_assets.length > 0 && (
+          <div className="pl-8">{renderCommentMedia(cm.media_assets)}</div>
+        )}
         <div className="flex items-center gap-4 pl-8 pt-0.5">
           <button
             onClick={() => handleLikeComment(cm)}
@@ -218,6 +358,13 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
           </div>
         )}
 
+        {composerError && (
+          <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-[11px] text-zinc-300 flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 text-white shrink-0" />
+            <span>{composerError}</span>
+          </div>
+        )}
+
         <div className="flex gap-3">
           <ProfileAvatar
             src={user?.avatar_url}
@@ -226,29 +373,89 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
             size="sm"
             className="border border-zinc-800 shrink-0"
           />
-          <div className="flex-1 space-y-2">
-            <input
-              type="text"
-              value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
-              placeholder={isListening ? 'Parlez, dictée vocale en cours...' : 'Poster votre réponse...'}
-              className="w-full bg-transparent text-sm text-white placeholder-zinc-500 focus:outline-none"
+          <div className="flex-1 space-y-2 min-w-0">
+            <RichTextEditor
+              ref={editorRef}
+              compact
+              onChange={(_html, text) => setContentText(text)}
+              placeholder={isListening ? 'Parlez, dictée vocale en cours…' : 'Poster votre réponse…'}
+              disabled={isSubmitting}
             />
+
+            {/* Aperçus médias + légendes */}
+            {mediaList.length > 0 && (
+              <div className="space-y-1.5">
+                <div className={`grid gap-1.5 rounded-xl overflow-hidden ${mediaList.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                  {mediaList.map((m, idx) => (
+                    <div key={idx} className="relative rounded-lg overflow-hidden border border-zinc-800 bg-black aspect-video">
+                      {m.media_type === 'video' ? (
+                        <video src={m.url} controls className="w-full h-full object-cover" />
+                      ) : (
+                        <img src={m.url} alt={m.alt_text || 'Média'} className="w-full h-full object-cover" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setMediaList((prev) => prev.filter((_, i) => i !== idx))}
+                        className="absolute top-1 right-1 p-1 rounded-full bg-black/80 text-white hover:bg-black"
+                        title="Retirer le média"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {mediaList.map((m, idx) => (
+                  <input
+                    key={`ccap-${idx}`}
+                    type="text"
+                    value={m.alt_text || ''}
+                    onChange={(e) =>
+                      setMediaList((prev) =>
+                        prev.map((mm, i) => (i === idx ? { ...mm, alt_text: e.target.value } : mm))
+                      )
+                    }
+                    placeholder={`Légende ${m.media_type === 'video' ? 'de la vidéo' : 'de l’image'} ${idx + 1}…`}
+                    maxLength={280}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-black border border-zinc-800 text-[11px] text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+                  />
+                ))}
+              </div>
+            )}
+
             <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
-              {isSupported && (
+              <div className="flex items-center gap-1">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFilesSelected}
+                  multiple
+                  accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"
+                  className="hidden"
+                />
                 <button
                   type="button"
-                  onClick={isListening ? stopListening : startListening}
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    isListening ? 'bg-white text-black pulse-recording' : 'text-zinc-400 hover:text-white'
-                  }`}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading || mediaList.length >= MAX_COMMENT_TOTAL}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                  title={`Ajouter des médias (max ${MAX_COMMENT_IMAGES} images, ${MAX_COMMENT_VIDEOS} vidéo)`}
                 >
-                  {isListening ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                  {isUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImageIcon className="w-3.5 h-3.5" />}
                 </button>
-              )}
+                {isSupported && (
+                  <button
+                    type="button"
+                    onClick={isListening ? stopListening : startListening}
+                    className={`p-1.5 rounded-lg transition-colors ${
+                      isListening ? 'bg-white text-black pulse-recording' : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {isListening ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                  </button>
+                )}
+              </div>
               <button
                 type="submit"
-                disabled={!newComment.trim() || isSubmitting}
+                disabled={isSubmitting || isUploading || (!contentText.trim() && mediaList.length === 0)}
                 className="py-1.5 px-4 rounded-full bg-white text-black font-semibold text-xs hover:bg-zinc-200 transition-colors disabled:opacity-40 flex items-center gap-1.5"
               >
                 {isSubmitting && <Loader2 className="w-3 h-3 animate-spin" />}

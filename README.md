@@ -53,7 +53,8 @@ Par défaut, tout outil **modifiant le compte ou le contenu public** (`create_po
 ```
 ├── main.ts               # Point d'entrée backend (Hono) — déploiement Deno/Val Town
 ├── vibe.ts               # Orchestrateur des modules Vibe (alias /api/vibe, /vibe, /v1)
-├── vibe-posts.ts         # Feed, posts, likes, reposts, signets, commentaires
+├── vibe-posts.ts         # Posts (CRUD), likes, reposts, signets, vues, épinglage, commentaires
+├── vibe-feed.ts          # Flux de recommandation (Pour Vous, Abonnements, Tendances), hashtags, recherche
 ├── vibe-users.ts         # Profils, /v1/me, follows
 ├── vibe-dms.ts           # Messages privés & notifications
 ├── vibe-settings.ts      # Paramètres, usage, export GDPR

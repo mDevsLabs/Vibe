@@ -586,7 +586,6 @@ export function registerModelRoutes(app: Hono) {
 
       return new Response(openRouterRes.body, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
           "Content-Type":
             openRouterRes.headers.get("Content-Type") || "application/json",
         },
@@ -726,7 +725,6 @@ export function registerModelRoutes(app: Hono) {
 
       return new Response(openRouterRes.body, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
           "Content-Type":
             openRouterRes.headers.get("Content-Type") || "application/json",
         },
@@ -869,7 +867,6 @@ export function registerModelRoutes(app: Hono) {
 
       return new Response(openRouterRes.body, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
           "Content-Type":
             openRouterRes.headers.get("Content-Type") || "application/json",
         },

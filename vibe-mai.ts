@@ -84,6 +84,70 @@ function formatToolReply(toolName: string, result: any, username: string): strin
 }
 
 export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn) {
+  // ── Persistance des conversations mAI (tables migration 002, créées
+  //    idempotemment au démarrage : le migrateur n'exécute pas les SQL) ──
+  let maiTablesReady = false;
+  const ensureMAIConversations = async () => {
+    if (maiTablesReady) return;
+    try {
+      const sql = getDb();
+      await sql`
+        CREATE TABLE IF NOT EXISTS mai_conversations (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title VARCHAR(255) DEFAULT 'Nouvelle discussion mAI',
+          model_id VARCHAR(100) DEFAULT 'mai-1.5-apex',
+          system_prompt TEXT,
+          is_pinned BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS mai_messages (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          conversation_id UUID NOT NULL REFERENCES mai_conversations(id) ON DELETE CASCADE,
+          sender_role VARCHAR(20) NOT NULL,
+          content TEXT,
+          tool_calls JSONB,
+          tool_call_id VARCHAR(100),
+          tokens_input INTEGER DEFAULT 0,
+          tokens_output INTEGER DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
+      maiTablesReady = true;
+    } catch (err) {
+      console.warn("[vibe-mai] ensureMAIConversations skipped:", (err as any)?.message);
+    }
+  };
+  ensureMAIConversations();
+
+  /** Conversation active de l'utilisateur : la plus récente, créée au besoin. */
+  async function getOrCreateConversation(sql: any, userId: number) {
+    const existing = await sql`
+      SELECT id FROM mai_conversations WHERE user_id = ${userId} ORDER BY updated_at DESC LIMIT 1
+    `.catch(() => []);
+    if (existing.length > 0) return existing[0].id as string;
+    const created = await sql`
+      INSERT INTO mai_conversations (user_id, title) VALUES (${userId}, 'Discussion mAI') RETURNING id
+    `.catch(() => []);
+    return created[0]?.id as string | undefined;
+  }
+
+  /** Insère un message mAI et met à jour l'horodatage de la conversation. */
+  async function saveMAIMessage(sql: any, conversationId: string, role: "user" | "assistant", content: string) {
+    try {
+      await sql`
+        INSERT INTO mai_messages (conversation_id, sender_role, content)
+        VALUES (${conversationId}::uuid, ${role}, ${content})
+      `;
+      await sql`UPDATE mai_conversations SET updated_at = NOW() WHERE id = ${conversationId}::uuid`;
+    } catch (err) {
+      console.warn("[vibe-mai] saveMAIMessage:", (err as any)?.message);
+    }
+  }
+
   // Détection d'outils par commandes / ou mentions @
   function detectTool(cleanMsg: string): { toolToRun: string; toolArgs: any } | null {
     const lower = cleanMsg.toLowerCase();
@@ -257,12 +321,44 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
-      const { message, execute_tool, model = "poolside/laguna-xs-2.1:free", context } = await c.req.json();
+      const { message, execute_tool, model, context } = await c.req.json();
       if (!message || !message.trim()) return c.json({ error: "Message requis." }, 400);
+
+      // Modèle demandé par le client (sélecteur mAI), sinon réglage utilisateur
+      const effectiveModel = model || (await MAIAgentFleet.getUserDefaultModel(userId));
 
       const sql = getDb();
       const userRows = await sql`SELECT username, tier FROM users WHERE id = ${userId} LIMIT 1`;
       const username = userRows[0]?.username || "Ami";
+
+      // ── Conversation persistée : contexte complet pour chaque message ──
+      await ensureMAIConversations();
+      const conversationId = await getOrCreateConversation(sql, userId);
+      if (conversationId) {
+        await saveMAIMessage(sql, conversationId, "user", String(message).trim());
+      }
+      // Historique récent (20 derniers échanges, sans le message courant)
+      let historyMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+      if (conversationId) {
+        try {
+          const historyRows = await sql`
+            SELECT sender_role, content FROM mai_messages
+            WHERE conversation_id = ${conversationId}::uuid
+            ORDER BY created_at DESC
+            LIMIT 21
+          `;
+          historyMessages = historyRows
+            .filter((r: any) => r.content && String(r.content).trim())
+            .slice(1) // le message courant vient d'être inséré
+            .reverse()
+            .map((r: any) => ({
+              role: r.sender_role === "assistant" ? "assistant" : "user",
+              content: String(r.content).slice(0, 4000),
+            }));
+        } catch (historyErr) {
+          console.warn("[vibe-mai] Historique non chargé:", historyErr);
+        }
+      }
 
       // Post mentionné : contenu + stats + premiers commentaires + médias (fichiers)
       let postContextBlock = "";
@@ -297,7 +393,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
             requiresApproval: true,
             pendingTool: { name: toolToRun, args: toolArgs },
             toolExecuted: null,
-            modelUsed: model,
+            modelUsed: effectiveModel,
           });
         }
       }
@@ -315,7 +411,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         DO UPDATE SET tokens_used = weekly_usage.tokens_used + 250
       `.catch(() => {});
 
-      let reply = `Bonjour @${username} ! Je suis mAI (modèle ${model}). Comment puis-je vous aider ?`;
+      let reply = `Bonjour @${username} ! Je suis mAI (modèle ${effectiveModel}). Comment puis-je vous aider ?`;
 
       if (!toolToRun) {
         const keyRows = await sql`
@@ -333,7 +429,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         };
 
         const hasImages = postImageParts.length > 0;
-        let primaryModel = resolveModel(model);
+        let primaryModel = resolveModel(effectiveModel);
         // Images jointes → forcer un modèle vision si le modèle choisi ne l'est pas
         if (hasImages && !VISION_CAPABLE_MODELS.has(primaryModel)) {
           primaryModel = "openai/gpt-4o";
@@ -352,6 +448,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
           : userText;
         const systemContent =
           "Tu es mAI, l'intelligence artificielle intégrée au réseau social Vibe. Tu es concis, créatif, pertinent et tu réponds en français avec des émojis." +
+          " Tu connais l'historique de la conversation en cours : apporte ta réponse en continuité naturelle avec les échanges précédents, sans redemander des informations déjà données." +
           (hasImages ? " Des images sont jointes à la publication mentionnée : analyse-les directement." : "") +
           (postContextBlock ? " Une publication Vibe est jointe à la fin du message : base ta réponse sur son contenu, ses statistiques et ses commentaires." : "");
 
@@ -373,6 +470,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
                       role: "system",
                       content: systemContent,
                     },
+                    ...historyMessages,
                     { role: "user", content: userContent },
                   ],
                 }),
@@ -397,10 +495,16 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         reply = `⚠️ L'action n'a pas pu être exécutée : ${toolResult.error}`;
       }
 
+      // Persistance de la réponse mAI
+      if (conversationId) {
+        await saveMAIMessage(sql, conversationId, "assistant", reply);
+      }
+
       return c.json({
         reply,
         toolExecuted: toolToRun ? { name: toolToRun, result: toolResult } : null,
-        modelUsed: model,
+        modelUsed: effectiveModel,
+        conversation_id: conversationId || null,
       });
     } catch (err: any) {
       console.error("[Vibe API] mAI Chat Error:", err);
@@ -409,6 +513,67 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
   };
 
   registerMulti("post", ["/api/vibe/mai/chat", "/vibe/mai/chat", "/v1/mai/chat"], handleMAIChat);
+
+  // 1ter. HISTORIQUE DE LA CONVERSATION mAI (persistance serveur)
+  const handleMAIHistory = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+
+      const sql = getDb();
+      await ensureMAIConversations();
+      const conversationId = await getOrCreateConversation(sql, userId);
+      if (!conversationId) return c.json({ conversation_id: null, messages: [] });
+
+      const rows = await sql`
+        SELECT id, sender_role, content, created_at FROM mai_messages
+        WHERE conversation_id = ${conversationId}::uuid AND content IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 50
+      `.catch(() => []);
+
+      const messages = rows
+        .filter((r: any) => String(r.content || "").trim())
+        .reverse()
+        .map((r: any) => ({
+          id: String(r.id),
+          role: r.sender_role === "assistant" ? "assistant" : "user",
+          content: String(r.content),
+          created_at: r.created_at,
+        }));
+
+      return c.json({ conversation_id: conversationId, messages });
+    } catch (err: any) {
+      console.error("[Vibe API] mAI History Error:", err);
+      return c.json({ conversation_id: null, messages: [] });
+    }
+  };
+
+  registerMulti("get", ["/api/vibe/mai/history", "/vibe/mai/history", "/v1/mai/history"], handleMAIHistory);
+
+  // 1quater. NOUVELLE CONVERSATION mAI
+  const handleMAINewConversation = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+
+      const sql = getDb();
+      await ensureMAIConversations();
+      const created = await sql`
+        INSERT INTO mai_conversations (user_id, title) VALUES (${userId}, 'Discussion mAI') RETURNING id
+      `;
+      return c.json({ success: true, conversation_id: created[0]?.id || null });
+    } catch (err: any) {
+      console.error("[Vibe API] mAI New Conversation Error:", err);
+      return c.json({ error: "Erreur création conversation." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/mai/history/new", "/vibe/mai/history/new", "/v1/mai/history/new"], handleMAINewConversation);
 
   // 1bis. EXÉCUTION D'OUTIL APPROUVÉ PAR L'UTILISATEUR
   // Appelé par le front uniquement après confirmation explicite (bouton
@@ -420,16 +585,17 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
-      const { name, args = {}, model = "poolside/laguna-xs-2.1:free" } = await c.req.json();
+      const { name, args = {}, model } = await c.req.json();
       if (!name) return c.json({ error: "Nom d'outil requis." }, 400);
 
+      const effectiveModel = model || (await MAIAgentFleet.getUserDefaultModel(userId));
       const result = await MAIAgentFleet.executeTool(String(name), args, userId);
       const reply = result.success ? formatToolReply(String(name), result.result, "") : `⚠️ L'action n'a pas pu être exécutée : ${result.error}`;
 
       return c.json({
         reply,
         toolExecuted: { name, result },
-        modelUsed: model,
+        modelUsed: effectiveModel,
       });
     } catch (err: any) {
       console.error("[Vibe API] mAI Execute Tool Error:", err);
@@ -459,6 +625,10 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
   // 3. mAI MODULATE
   const handleMAIModulate = async (c: any) => {
     try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      await verifyToken(token);
+
       const { text, tone = "executive" } = await c.req.json();
       const modulated = await MAIAgentFleet.modulateText({ text, tone });
       return c.json({ success: true, modulated });

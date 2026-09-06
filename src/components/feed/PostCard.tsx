@@ -5,12 +5,13 @@
  * ============================================================================
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Heart,
   Repeat,
   MessageSquare,
   Bookmark,
+  BookMarked,
   MoreHorizontal,
   Trash2,
   Sparkles,
@@ -18,15 +19,34 @@ import {
   ThumbsUp,
   ThumbsDown,
   Quote,
-  Check
+  Check,
+  Pencil,
+  CalendarClock,
+  Volume2,
+  Languages,
+  Users,
+  Lock,
+  Loader2,
+  BarChart2,
+  Share2,
+  Pin,
+  PinOff,
+  EyeOff,
+  Ban
 } from 'lucide-react';
 import { Post } from '../../types/vibe';
 import { ApiService } from '../../services/api';
+import { RealtimeService } from '../../services/realtimeService';
+import { useAudioPlayer } from '../../context/AudioPlayerContext';
 import { useAuth } from '../../context/AuthContext';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
-import { FormattedText } from '../common/FormattedText';
+import { RichContent, htmlToPlainText } from '../common/RichContent';
+import { usePostViewTracking } from '../../hooks/usePostViewTracking';
+import { formatCompactCount } from '../../algorithms';
+import { PostShareModal } from './PostShareModal';
+import { BookPickerModal } from './BookPickerModal';
 
 interface PostCardProps {
   post: Post;
@@ -59,18 +79,58 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   onOpenProfile,
 }) => {
   const { user } = useAuth();
+  const { playQueue } = useAudioPlayer();
   const [likesCount, setLikesCount] = useState(post.likes_count || 0);
   const [isLiked, setIsLiked] = useState(post.has_liked || false);
   const [repostsCount, setRepostsCount] = useState(post.reposts_count || 0);
   const [isReposted, setIsReposted] = useState(post.has_reposted || false);
   const [isBookmarked, setIsBookmarked] = useState(post.has_bookmarked || false);
+  const [repliesCount, setRepliesCount] = useState(post.replies_count || 0);
   const [showMenu, setShowMenu] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [likeBurst, setLikeBurst] = useState(false);
   // Retour d'algorithme : « Cela m'intéresse » / « Cela ne m'intéresse pas »
   const [myFeedback, setMyFeedback] = useState<'more' | 'less' | null>(post.my_feedback || null);
+  // Traduction « Traduire avec mAI » (affichée sous le texte d'origine)
+  const [translation, setTranslation] = useState<{ text: string; language: string } | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
+  // Épinglage sur le profil + modale de partage
+  const [isPinned, setIsPinned] = useState(post.is_pinned || false);
+  const [showShare, setShowShare] = useState(false);
+  // Livre : « Vibe préférée » enregistrée dans un Livre (favoris durables)
+  const [showBookPicker, setShowBookPicker] = useState(false);
+  const [isInABook, setIsInABook] = useState(Boolean((post as any).in_books > 0));
+
+  // Temps réel (SSE) : compteurs like/repost/réponses poussés par le serveur
+  useEffect(() => {
+    return RealtimeService.on((type, payload) => {
+      if (type !== 'post_stats' || !payload || String(payload.post_id) !== String(post.id)) return;
+      if (payload.likes_count !== undefined) setLikesCount(Number(payload.likes_count) || 0);
+      if (payload.reposts_count !== undefined) setRepostsCount(Number(payload.reposts_count) || 0);
+      if (payload.replies_count !== undefined) setRepliesCount(Number(payload.replies_count) || 0);
+    });
+  }, [post.id]);
+
+  // Resynchronise les compteurs quand le parent recharge le post
+  useEffect(() => {
+    setLikesCount(post.likes_count || 0);
+    setRepostsCount(post.reposts_count || 0);
+    setRepliesCount(post.replies_count || 0);
+  }, [post.id, post.likes_count, post.reposts_count, post.replies_count]);
+
+  useEffect(() => {
+    setIsPinned(post.is_pinned || false);
+  }, [post.id, post.is_pinned]);
 
   const isAuthor = user && (user.id === post.author_id || user.username === post.username);
+
+  // Compteur d'impressions : IntersectionObserver + dwell 1 s, une vue par
+  // session et par post (fire-and-forget, cf. src/algorithms/viewTracking.ts)
+  const { ref: viewRef, viewsCount } = usePostViewTracking(
+    post.id,
+    post.views_count,
+    { enabled: post.status !== 'scheduled' }
+  );
 
   /**
    * Affine l'algorithme : enregistre/retire un retour d'intérêt qui
@@ -102,9 +162,48 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     window.dispatchEvent(new CustomEvent('vibe:open_composer', { detail: { quotedPost: post } }));
   };
 
+  const handleEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    window.dispatchEvent(new CustomEvent('vibe:open_composer', { detail: { editPost: post } }));
+  };
+
   const handleAskMAI = (e: React.MouseEvent) => {
     e.stopPropagation();
     window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId: post.id } }));
+  };
+
+  /** Traduction avec mAI : détection de langue + traduction instantanée (cache serveur). */
+  const handleTranslate = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isTranslating || translation) return;
+    setIsTranslating(true);
+    try {
+      const res = await ApiService.translatePost(post.id);
+      if (res?.translation) {
+        setTranslation({ text: res.translation, language: res.detected_language || '' });
+      } else {
+        NotificationService.showInAppToast('Traduction indisponible', "mAI n'a pas pu traduire cette publication.", 'error');
+      }
+    } catch (err: any) {
+      NotificationService.showInAppToast('Traduction impossible', err?.message || "mAI n'a pas pu traduire cette publication.", 'error');
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  /** Écoute la publication avec la voix mAI (mini-lecteur flottant). */
+  const handleListen = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    const snippet = (post.content || '').trim().slice(0, 48);
+    playQueue([
+      {
+        id: post.id,
+        title: `@${post.username}${snippet ? ` — ${snippet}${(post.content || '').length > 48 ? '…' : ''}` : ''}`,
+        text: post.content || '',
+      },
+    ]);
   };
 
   const handleLike = async (e: React.MouseEvent) => {
@@ -169,22 +268,93 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     }
   };
 
+  /** Épingle/désépingle la publication tout en haut du profil (max 3). */
+  const handleTogglePin = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    const next = !isPinned;
+    try {
+      const res = await ApiService.setPostPinned(post.id, next);
+      setIsPinned(Boolean(res.pinned));
+      NotificationService.showInAppToast(
+        res.pinned ? 'Post épinglé' : 'Post désépinglé',
+        res.pinned
+          ? 'Il restera fixé tout en haut de votre profil.'
+          : 'Il reprend sa place chronologique.',
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:post_updated'));
+    } catch (err: any) {
+      if (err?.code === 'PIN_LIMIT') {
+        NotificationService.showInAppToast(
+          'Limite atteinte',
+          'Vous ne pouvez épingler que 3 publications maximum.',
+          'error'
+        );
+      } else {
+        NotificationService.showInAppToast('Erreur', err?.message || "L'épinglage a échoué.", 'error');
+      }
+    }
+  };
+
+  /** Mute : les publications/notifications de l'auteur disparaissent, en silence. */
+  const handleMuteAuthor = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    try {
+      await ApiService.muteUser(post.username, true);
+      NotificationService.showInAppToast(
+        'Compte masqué',
+        `Les publications de @${post.username} n'apparaîtront plus dans votre fil.`,
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
+      onPostDeleted?.(post.id);
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le masquage a échoué.', 'error');
+    }
+  };
+
+  /** Block : coupe tout contact de manière visible (DM, follow, notifications). */
+  const handleBlockAuthor = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    if (!window.confirm(`Bloquer @${post.username} ?\n\nCette action coupe tout contact de manière visible : messages, abonnement et notifications. @${post.username} ne pourra plus interagir avec vous.`)) return;
+    try {
+      await ApiService.blockUser(post.author_id);
+      NotificationService.showInAppToast(
+        'Compte bloqué',
+        `@${post.username} ne pourra plus interagir avec vous.`,
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
+      onPostDeleted?.(post.id);
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le blocage a échoué.', 'error');
+    }
+  };
+
   const allMedia: Array<{ url: string; media_type?: string; alt_text?: string }> = post.media_assets && post.media_assets.length > 0
     ? post.media_assets
     : post.media_url
     ? [{ url: post.media_url, media_type: post.media_url.endsWith('.mp4') ? 'video' : 'image', alt_text: 'Média joint' }]
     : [];
 
-  const images = allMedia.filter((m) => m.media_type !== 'video' && !m.url?.endsWith('.mp4'));
-  const videos = allMedia.filter((m) => m.media_type === 'video' || m.url?.endsWith('.mp4'));
+  // Classification fiable : MIME "video/*" ou extension vidéo
+  const isVideoMedia = (m: { url: string; media_type?: string }) =>
+    String(m.media_type || '').startsWith('video') || /\.(mp4|webm|mov)(\?|$)/i.test(m.url);
+
+  const images = allMedia.filter((m) => !isVideoMedia(m));
+  const videos = allMedia.filter(isVideoMedia);
 
   const quotedPost = post.quoted_post;
-  const quotedImage = quotedPost?.media_assets?.find(
-    (m) => (m.media_type || 'image') !== 'video' && !m.url?.endsWith('.mp4')
-  );
+  const quotedImage = quotedPost?.media_assets?.find((m) => !isVideoMedia(m));
+
+  const isScheduled = post.status === 'scheduled';
 
   return (
     <article
+      ref={viewRef}
       onClick={() => onOpenThread && onOpenThread(post)}
       className="p-4 border-b border-zinc-800/90 bg-black hover:bg-zinc-950/70 transition-colors cursor-pointer relative select-none"
     >
@@ -208,6 +378,14 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
         {/* Content Container */}
         <div className="flex-1 min-w-0 space-y-1.5">
+          {/* Étiquette « Post épinglé » (fixé en haut du profil) */}
+          {isPinned && (
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-400" title="Ce post est épinglé sur le profil de son auteur">
+              <Pin className="w-3 h-3" />
+              Post épinglé
+            </div>
+          )}
+
           {/* Post Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
@@ -223,7 +401,32 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               <VerifiedBadge isVerified={post.is_verified || (post as any).isVerified} tier={(post as any).tier} size="sm" />
               <span className="text-zinc-500 text-xs">@{post.username}</span>
               <span className="text-zinc-600 text-xs">·</span>
-              <span className="text-zinc-500 text-xs font-mono">{formatTimeAgo(post.published_at)}</span>
+              {isScheduled ? (
+                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300 font-mono">
+                  <CalendarClock className="w-2.5 h-2.5" />
+                  Planifiée{post.scheduled_at ? ` · ${new Date(post.scheduled_at).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}
+                </span>
+              ) : (
+                <span className="text-zinc-500 text-xs font-mono">{formatTimeAgo(post.published_at)}</span>
+              )}
+
+              {/* Visibilité de la publication (Public par défaut = rien d'affiché) */}
+              {post.visibility === 'followers' && (
+                <span className="inline-flex items-center text-zinc-500" title="Visible par les abonnés uniquement">
+                  <Users className="w-3 h-3" />
+                </span>
+              )}
+              {post.visibility === 'circle' && (
+                <span className="inline-flex items-center text-zinc-500" title="Cercle Privé">
+                  <Users className="w-3 h-3" />
+                  <Lock className="-ml-0.5 w-2 h-2" />
+                </span>
+              )}
+              {post.visibility === 'private' && (
+                <span className="inline-flex items-center text-zinc-500" title="Visible par vous seul">
+                  <Lock className="w-3 h-3" />
+                </span>
+              )}
 
               {post.created_via === 'mai_agent' && (
                 <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300 font-mono">
@@ -268,6 +471,19 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                     </button>
                   )}
 
+                  {/* Partage : DM (par défaut), lien ou QR Code */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMenu(false);
+                      setShowShare(true);
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                  >
+                    <Share2 className="w-3.5 h-3.5 text-white" />
+                    <span>Partager</span>
+                  </button>
+
                   {/* Affinement de l'algorithme (Vibes futures) */}
                   <button
                     onClick={(e) => {
@@ -307,6 +523,47 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                     <span>Demander à mAI</span>
                   </button>
 
+                  {/* Écoute la publication avec la voix mAI */}
+                  {post.content?.trim() && (
+                    <button
+                      onClick={handleListen}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                    >
+                      <Volume2 className="w-3.5 h-3.5 text-white" />
+                      <span>Écouter avec mAI</span>
+                    </button>
+                  )}
+
+                  {isAuthor && (
+                    <button
+                      onClick={handleEdit}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                    >
+                      <Pencil className="w-3.5 h-3.5 text-white" />
+                      <span>Modifier</span>
+                    </button>
+                  )}
+
+                  {/* Épinglage sur le profil (auteur uniquement, max 3) */}
+                  {isAuthor && (
+                    <button
+                      onClick={handleTogglePin}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                    >
+                      {isPinned ? (
+                        <>
+                          <PinOff className="w-3.5 h-3.5 text-white" />
+                          <span>Désépingler du profil</span>
+                        </>
+                      ) : (
+                        <>
+                          <Pin className="w-3.5 h-3.5 text-white" />
+                          <span>Épingler sur votre profil</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
                   {isAuthor && (
                     <button
                       onClick={handleDelete}
@@ -317,15 +574,80 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                       <span>Supprimer</span>
                     </button>
                   )}
+
+                  {/* Modération (posts d'autrui) : masquage silencieux + blocage visible */}
+                  {!isAuthor && user && (
+                    <>
+                      <button
+                        onClick={handleMuteAuthor}
+                        className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                      >
+                        <EyeOff className="w-3.5 h-3.5 text-white" />
+                        <span>Masquer @{post.username}</span>
+                      </button>
+                      <button
+                        onClick={handleBlockAuthor}
+                        className="w-full text-left px-3 py-2 rounded-xl text-xs text-red-400 hover:text-red-300 hover:bg-red-950/40 flex items-center gap-2"
+                      >
+                        <Ban className="w-3.5 h-3.5" />
+                        <span>Bloquer @{post.username}</span>
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>
           </div>
 
-          {/* Post Text (Unlimited) */}
-          <div className="text-zinc-100 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words">
-            <FormattedText text={post.content} onOpenProfile={onOpenProfile} />
+          {/* Post Text (Unlimited, rendu riche sécurisé) */}
+          <div className="text-zinc-100 text-sm sm:text-base leading-relaxed">
+            <RichContent content={post.content} onOpenProfile={onOpenProfile} />
           </div>
+
+          {/* Traduction avec mAI : affichée sous le texte d'origine */}
+          {(translation || isTranslating) && (
+            <div onClick={(e) => e.stopPropagation()} className="pt-1.5">
+              {isTranslating ? (
+                <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>mAI traduit cette publication…</span>
+                </div>
+              ) : (
+                <div className="pl-2.5 border-l-2 border-zinc-700">
+                  <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap break-words">
+                    {translation!.text}
+                  </p>
+                  <div className="mt-1 flex items-center gap-3 text-[11px]">
+                    <span className="text-zinc-600">
+                      {translation!.language
+                        ? `Traduit de l'« ${translation!.language} » par mAI`
+                        : 'Traduit par mAI'}
+                    </span>
+                    <button
+                      onClick={() => setTranslation(null)}
+                      className="text-zinc-500 hover:text-white transition-colors font-bold"
+                    >
+                      Afficher l'original
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Bouton « Traduire avec mAI » (détection de langue automatique) */}
+          {!translation && !isTranslating && post.content?.trim() && (
+            <div onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={handleTranslate}
+                className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600 hover:text-white transition-colors"
+                title="Détecter la langue et traduire avec mAI"
+              >
+                <Languages className="w-3.5 h-3.5" />
+                <span>Traduire avec mAI</span>
+              </button>
+            </div>
+          )}
 
           {/* Publication citée (quote-post) : post original intégré, cliquable */}
           {quotedPost && (
@@ -357,9 +679,9 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                   </>
                 )}
               </div>
-              <p className="text-sm text-zinc-300 mt-1.5 line-clamp-4 whitespace-pre-wrap break-words">
-                {quotedPost.content}
-              </p>
+              <div className="text-sm text-zinc-300 mt-1.5 line-clamp-4 break-words">
+                <RichContent content={quotedPost.content} />
+              </div>
               {quotedImage && (
                 <img
                   src={quotedImage.url}
@@ -372,7 +694,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             </div>
           )}
 
-          {/* Multi-Image Grid Gallery (Up to 5 images) */}
+          {/* Multi-Image Grid Gallery (Up to 5 images) avec légendes */}
           {images.length > 0 && (
             <div className="pt-2">
               <div
@@ -405,10 +727,22 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                   </div>
                 ))}
               </div>
+              {/* Légendes des images */}
+              {images.some((img) => img.alt_text?.trim()) && (
+                <div className="mt-1.5 space-y-0.5">
+                  {images
+                    .filter((img) => img.alt_text?.trim())
+                    .map((img, i) => (
+                      <p key={`cap-${i}`} className="text-xs text-zinc-500 leading-snug break-words">
+                        {img.alt_text}
+                      </p>
+                    ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Video Players (Up to 2 videos) */}
+          {/* Video Players (Up to 2 videos) avec légendes */}
           {videos.length > 0 && (
             <div className="pt-2 space-y-2">
               {videos.map((vid, idx) => (
@@ -420,6 +754,11 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                     className="w-full max-h-96 object-cover"
                     onClick={(e) => e.stopPropagation()}
                   />
+                  {vid.alt_text?.trim() && (
+                    <p className="px-3 py-2 text-xs text-zinc-500 leading-snug break-words border-t border-zinc-900">
+                      {vid.alt_text}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -438,7 +777,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
                 <MessageSquare className="w-4 h-4" />
               </div>
-              <span>{post.replies_count || 0}</span>
+              <span>{repliesCount}</span>
             </button>
 
             {/* Repost */}
@@ -465,6 +804,17 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               </div>
             </button>
 
+            {/* Impressions / Vues (non cliquable, à la X) */}
+            <span
+              className="flex items-center gap-1.5"
+              title={`${Number(viewsCount) || 0} vues`}
+            >
+              <div className="p-1.5 rounded-full">
+                <BarChart2 className="w-4 h-4" />
+              </div>
+              <span>{formatCompactCount(viewsCount)}</span>
+            </span>
+
             {/* Like */}
             <button
               onClick={handleLike}
@@ -478,6 +828,22 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               <span>{likesCount}</span>
             </button>
 
+            {/* Livre : enregistrer la Vibe dans un Livre (Vibe préférées) */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowBookPicker(true);
+              }}
+              className={`flex items-center gap-1.5 transition-colors group ${
+                isInABook ? 'text-sky-300 font-bold' : 'hover:text-white'
+              }`}
+              title={isInABook ? 'Enregistrée dans un Livre — gérer' : 'Enregistrer dans un Livre (Vibe préférées)'}
+            >
+              <div className={`p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors ${isInABook ? 'bg-sky-500/10' : ''}`}>
+                <BookMarked className={`w-4 h-4 ${isInABook ? 'fill-sky-400/30 text-sky-300' : ''}`} />
+              </div>
+            </button>
+
             {/* Bookmark */}
             <button
               onClick={handleBookmark}
@@ -489,9 +855,37 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                 <Bookmark className={`w-4 h-4 ${isBookmarked ? 'fill-white text-white' : ''}`} />
               </div>
             </button>
+
+            {/* Partager (ouvre la modale DM / lien / QR Code) */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowShare(true);
+              }}
+              className="flex items-center gap-1.5 hover:text-white transition-colors group"
+              title="Partager"
+            >
+              <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
+                <Share2 className="w-4 h-4" />
+              </div>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Modale de partage : Message privé (défaut), Lien, QR Code */}
+      {showShare && (
+        <PostShareModal post={post} onClose={() => setShowShare(false)} />
+      )}
+
+      {/* Modale « Enregistrer dans un Livre » (Vibe préférées) */}
+      {showBookPicker && user && (
+        <BookPickerModal
+          postId={post.id}
+          onClose={() => setShowBookPicker(false)}
+          onSavedBooksChange={(ids) => setIsInABook(ids.length > 0)}
+        />
+      )}
     </article>
   );
 };

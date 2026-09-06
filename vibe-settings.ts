@@ -20,6 +20,8 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS font_size TEXT`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_default_model TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_tts_voice TEXT`;
       personalizationColumnsReady = true;
     } catch (err) {
       console.warn("[vibe-settings] ensurePersonalizationColumns skipped:", (err as any)?.message);
@@ -99,7 +101,7 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           blur_sensitive_content, age_restriction_enabled, allow_dms, dms_enabled,
           feed_default_mode, hide_reposts, blocked_keywords, two_factor_auth, allow_mentions,
           theme_preference, accent_color, font_size, mai_auto_approve_tools,
-          posts_ai_generated_by_default
+          posts_ai_generated_by_default, mai_default_model, mai_tts_voice
         )
         VALUES (
           ${userId},
@@ -123,7 +125,9 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.accent_color || null},
           ${body.font_size || null},
           ${body.mai_auto_approve_tools ?? false},
-          ${body.posts_ai_generated_by_default ?? false}
+          ${body.posts_ai_generated_by_default ?? false},
+          ${body.mai_default_model || null},
+          ${body.mai_tts_voice || null}
         )
         ON CONFLICT (user_id)
         DO UPDATE SET
@@ -148,6 +152,8 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           font_size = CASE WHEN ${body.font_size !== undefined} THEN EXCLUDED.font_size ELSE user_settings.font_size END,
           mai_auto_approve_tools = CASE WHEN ${body.mai_auto_approve_tools !== undefined} THEN EXCLUDED.mai_auto_approve_tools ELSE user_settings.mai_auto_approve_tools END,
           posts_ai_generated_by_default = CASE WHEN ${body.posts_ai_generated_by_default !== undefined} THEN EXCLUDED.posts_ai_generated_by_default ELSE user_settings.posts_ai_generated_by_default END,
+          mai_default_model = CASE WHEN ${body.mai_default_model !== undefined} THEN EXCLUDED.mai_default_model ELSE user_settings.mai_default_model END,
+          mai_tts_voice = CASE WHEN ${body.mai_tts_voice !== undefined} THEN EXCLUDED.mai_tts_voice ELSE user_settings.mai_tts_voice END,
           updated_at = NOW()
       `;
 
