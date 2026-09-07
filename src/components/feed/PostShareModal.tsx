@@ -176,38 +176,38 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-3xl shadow-2xl overflow-hidden"
+        className="w-full max-w-md bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* En-tête */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
-          <h2 className="text-base font-bold text-white flex items-center gap-2">
-            <Share2 className="w-4 h-4" />
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
+          <h2 className="text-base font-bold text-black dark:text-white flex items-center gap-2">
+            <Share2 className="w-4 h-4 text-black dark:text-white" />
             Partager cette vibe
           </h2>
           <button
             onClick={onClose}
-            className="text-zinc-500 hover:text-white p-1.5 rounded-full hover:bg-zinc-900 transition-colors"
+            className="text-zinc-500 hover:text-black dark:hover:text-white p-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
             aria-label="Fermer"
           >
-            <X className="w-4 h-4" />
+            <X className="w-4 h-4 text-black dark:text-white" />
           </button>
         </div>
 
         {/* Onglets */}
-        <div className="flex border-b border-zinc-800">
+        <div className="flex border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-black/60">
           {tabs.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setTab(key)}
               className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-semibold transition-colors relative ${
-                tab === key ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
+                tab === key ? 'text-black dark:text-white' : 'text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-300'
               }`}
             >
-              <Icon className="w-3.5 h-3.5" />
+              <Icon className="w-3.5 h-3.5 text-black dark:text-white" />
               {label}
               {tab === key && (
-                <span className="absolute bottom-0 left-1/4 right-1/4 h-0.5 bg-white rounded-full" />
+                <span className="absolute bottom-0 left-1/4 right-1/4 h-0.5 bg-black dark:bg-white rounded-full" />
               )}
             </button>
           ))}
@@ -220,9 +220,9 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
               {sentTo ? (
                 <div className="flex flex-col items-center gap-3 py-8 text-center">
                   <div className="w-12 h-12 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
-                    <Check className="w-6 h-6 text-emerald-400" />
+                    <Check className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
                   </div>
-                  <p className="text-sm text-white font-bold">Partagé avec @{sentTo} !</p>
+                  <p className="text-sm text-black dark:text-white font-bold">Partagé avec @{sentTo} !</p>
                   <div className="flex gap-2">
                     <button
                       onClick={() => {
@@ -230,13 +230,13 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                         setSelectedUser(null);
                         setRecipientQuery('');
                       }}
-                      className="px-4 py-2 rounded-full bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors"
+                      className="px-4 py-2 rounded-full bg-white border border-zinc-300 dark:border-transparent text-black text-xs font-bold hover:bg-zinc-100 transition-colors shadow-sm"
                     >
                       Partager à quelqu'un d'autre
                     </button>
                     <button
                       onClick={onClose}
-                      className="px-4 py-2 rounded-full border border-zinc-700 text-zinc-300 text-xs font-bold hover:bg-zinc-900 transition-colors"
+                      className="px-4 py-2 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-transparent text-black dark:text-zinc-300 text-xs font-bold hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
                     >
                       Terminer
                     </button>
@@ -244,7 +244,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                 </div>
               ) : selectedUser ? (
                 <>
-                  <div className="flex items-center gap-3 p-3 rounded-2xl border border-zinc-800 bg-zinc-900/60">
+                  <div className="flex items-center gap-3 p-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60">
                     <ProfileAvatar
                       src={selectedUser.avatar_url}
                       alt={selectedUser.username}
@@ -253,57 +253,57 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                     />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-bold text-white truncate">
+                        <span className="text-sm font-bold text-black dark:text-white truncate">
                           {selectedUser.display_name || selectedUser.username}
                         </span>
                         <VerifiedBadge isVerified={selectedUser.is_verified} size="xs" />
                       </div>
-                      <span className="text-xs text-zinc-500">@{selectedUser.username}</span>
+                      <span className="text-xs text-zinc-600 dark:text-zinc-400">@{selectedUser.username}</span>
                     </div>
                     <button
                       onClick={() => setSelectedUser(null)}
-                      className="text-zinc-500 hover:text-white text-xs font-bold p-1.5 rounded-full hover:bg-zinc-800 transition-colors"
+                      className="text-zinc-500 hover:text-black dark:hover:text-white text-xs font-bold p-1.5 rounded-full hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors"
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-3.5 h-3.5 text-black dark:text-white" />
                     </button>
                   </div>
                   <textarea
                     value={dmMessage}
                     onChange={(e) => setDmMessage(e.target.value)}
                     rows={4}
-                    className="w-full bg-transparent border border-zinc-800 rounded-2xl p-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600 resize-none"
+                    className="w-full bg-zinc-50 dark:bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-2xl p-3 text-sm text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 resize-none"
                     placeholder="Message à envoyer…"
                   />
                   <button
                     onClick={handleSendDM}
                     disabled={isSending || !dmMessage.trim()}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-full bg-white text-black text-sm font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-full bg-white border border-zinc-300 dark:border-transparent text-black text-sm font-bold hover:bg-zinc-100 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isSending ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin text-black" />
                     ) : (
-                      <Send className="w-4 h-4" />
+                      <Send className="w-4 h-4 text-black" />
                     )}
-                    Envoyer en message privé
+                    <span className="text-black">Envoyer en message privé</span>
                   </button>
                 </>
               ) : (
                 <>
                   <div className="relative">
-                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-black dark:text-zinc-400" />
                     <input
                       type="text"
                       value={recipientQuery}
                       onChange={(e) => setRecipientQuery(e.target.value)}
                       placeholder="Rechercher un compte à qui envoyer…"
                       autoFocus
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-full pl-10 pr-4 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+                      className="w-full bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-full pl-10 pr-4 py-2.5 text-sm text-black dark:text-white placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600"
                     />
                   </div>
-                  <div className="max-h-56 overflow-y-auto divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+                  <div className="max-h-56 overflow-y-auto divide-y divide-zinc-200 dark:divide-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800">
                     {isSearching && (
                       <div className="flex items-center gap-2 p-3 text-xs text-zinc-500">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-black dark:text-white" />
                         Recherche…
                       </div>
                     )}
@@ -311,8 +311,8 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                       <div className="p-3 text-xs text-zinc-500">Aucun compte trouvé.</div>
                     )}
                     {!recipientQuery.trim() && (
-                      <div className="flex items-center gap-2 p-3 text-xs text-zinc-500">
-                        <UserPlus className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-2 p-3 text-xs text-zinc-600 dark:text-zinc-400">
+                        <UserPlus className="w-3.5 h-3.5 text-black dark:text-zinc-400" />
                         Tapez un nom d'utilisateur pour partager en DM.
                       </div>
                     )}
@@ -323,7 +323,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                           setSelectedUser(u);
                           setDmMessage(defaultShareMessage);
                         }}
-                        className="w-full flex items-center gap-3 p-3 text-left hover:bg-zinc-900 transition-colors"
+                        className="w-full flex items-center gap-3 p-3 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
                       >
                         <ProfileAvatar
                           src={u.avatar_url}
@@ -333,14 +333,14 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
                         />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-1.5">
-                            <span className="text-sm font-bold text-white truncate">
+                            <span className="text-sm font-bold text-black dark:text-white truncate">
                               {u.display_name || u.username}
                             </span>
                             <VerifiedBadge isVerified={u.is_verified} size="xs" />
                           </div>
-                          <span className="text-xs text-zinc-500">@{u.username}</span>
+                          <span className="text-xs text-zinc-600 dark:text-zinc-400">@{u.username}</span>
                         </div>
-                        <Send className="w-4 h-4 text-zinc-500" />
+                        <Send className="w-4 h-4 text-black dark:text-zinc-400" />
                       </button>
                     ))}
                   </div>
@@ -352,28 +352,28 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
           {/* ── LIEN ── */}
           {tab === 'link' && (
             <div className="space-y-4">
-              <div className="p-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 text-xs text-zinc-300 break-all font-mono">
+              <div className="p-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 text-xs text-black dark:text-zinc-300 break-all font-mono">
                 {postUrl}
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={handleCopyLink}
-                  className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-full bg-white text-black text-sm font-bold hover:bg-zinc-200 transition-colors"
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-full bg-white border border-zinc-300 dark:border-transparent text-black text-sm font-bold hover:bg-zinc-100 transition-colors shadow-sm"
                 >
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  {copied ? 'Lien copié !' : 'Copier le lien'}
+                  {copied ? <Check className="w-4 h-4 text-black" /> : <Copy className="w-4 h-4 text-black" />}
+                  <span className="text-black">{copied ? 'Lien copié !' : 'Copier le lien'}</span>
                 </button>
                 {'share' in navigator && (
                   <button
                     onClick={handleNativeShare}
-                    className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full border border-zinc-700 text-zinc-300 text-sm font-bold hover:bg-zinc-900 transition-colors"
+                    className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-transparent text-black dark:text-zinc-300 text-sm font-bold hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors shadow-sm"
                     title="Partage natif"
                   >
-                    <Share2 className="w-4 h-4" />
+                    <Share2 className="w-4 h-4 text-black dark:text-zinc-300" />
                   </button>
                 )}
               </div>
-              <p className="text-xs text-zinc-500 text-center">
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 text-center">
                 Toute personne disposant du lien peut voir cette publication.
               </p>
             </div>
@@ -383,26 +383,26 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
           {tab === 'qr' && (
             <div className="space-y-4">
               <div className="flex flex-col items-center gap-3">
-                <div className="p-3 bg-white rounded-2xl shadow-lg">
+                <div className="p-3 bg-white border border-zinc-200 rounded-2xl shadow-md">
                   {qrDataUrl ? (
                     <img src={qrDataUrl} alt="QR Code du post" className="w-48 h-48" />
                   ) : (
                     <div className="w-48 h-48 flex items-center justify-center">
-                      <Loader2 className="w-6 h-6 animate-spin text-zinc-400" />
+                      <Loader2 className="w-6 h-6 animate-spin text-black dark:text-zinc-400" />
                     </div>
                   )}
                 </div>
-                <p className="text-xs text-zinc-500 text-center">
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 text-center">
                   Scannez pour ouvrir la publication
                 </p>
               </div>
               <button
                 onClick={handleDownloadQr}
                 disabled={!qrDataUrl}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-full bg-white text-black text-sm font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-full bg-white border border-zinc-300 dark:border-transparent text-black text-sm font-bold hover:bg-zinc-100 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Download className="w-4 h-4" />
-                Télécharger le QR Code
+                <Download className="w-4 h-4 text-black" />
+                <span className="text-black">Télécharger le QR Code</span>
               </button>
             </div>
           )}

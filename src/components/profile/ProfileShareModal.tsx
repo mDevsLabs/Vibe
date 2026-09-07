@@ -170,19 +170,19 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl animate-scaleUp"
+        className="w-full max-w-sm bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl overflow-hidden shadow-2xl animate-scaleUp"
         onClick={(e) => e.stopPropagation()}
       >
         {/* En-tête */}
-        <div className="p-4 border-b border-zinc-800 flex items-center justify-between bg-black/60">
-          <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">
+        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between bg-zinc-50 dark:bg-black/60">
+          <span className="text-xs font-bold text-black dark:text-white uppercase font-mono tracking-wider">
             Partager le profil
           </span>
           <button
             onClick={onClose}
-            className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+            className="p-1 rounded-full text-black dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-200 dark:hover:bg-zinc-900 transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5 text-black dark:text-white" />
           </button>
         </div>
 
@@ -198,14 +198,14 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
             )}
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-sm font-bold text-white truncate">{displayName}</span>
+                <span className="text-sm font-bold text-black dark:text-white truncate">{displayName}</span>
                 <VerifiedBadge isVerified={isVerified} tier={tier ?? undefined} size="sm" />
               </div>
-              <span className="text-xs text-zinc-500 font-mono">@{cleanUsername}</span>
+              <span className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">@{cleanUsername}</span>
             </div>
           </div>
 
-          <div className="relative p-3 bg-white rounded-2xl">
+          <div className="relative p-3 bg-white border border-zinc-200 rounded-2xl shadow-sm">
             <canvas
               ref={canvasRef}
               className="block w-60 h-60"
@@ -218,13 +218,13 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
             )}
           </div>
 
-          <div className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-center">
-            <span className="text-[11px] text-zinc-400 font-mono break-all">{profileUrl}</span>
+          <div className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-black border border-zinc-300 dark:border-zinc-800 text-center">
+            <span className="text-[11px] text-black dark:text-zinc-400 font-mono break-all">{profileUrl}</span>
           </div>
 
           {error && (
-            <div className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-[11px] text-zinc-300 flex items-center gap-2">
-              <AlertCircle className="w-3.5 h-3.5 text-white shrink-0" />
+            <div className="w-full p-2.5 rounded-xl bg-zinc-100 border border-zinc-300 text-[11px] text-black flex items-center gap-2">
+              <AlertCircle className="w-3.5 h-3.5 text-black shrink-0" />
               <span>{error}</span>
             </div>
           )}
@@ -233,18 +233,18 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
           <div className="w-full space-y-2">
             <button
               onClick={handleCopyLink}
-              className="w-full py-3 rounded-2xl bg-white text-black font-bold text-sm hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-2xl bg-white border border-zinc-300 text-black font-bold text-sm hover:bg-zinc-100 transition-colors flex items-center justify-center gap-2 shadow-sm"
             >
-              {isCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              {isCopied ? 'Lien copié !' : 'Copier le lien'}
+              {isCopied ? <Check className="w-4 h-4 text-black" /> : <Copy className="w-4 h-4 text-black" />}
+              <span className="text-black">{isCopied ? 'Lien copié !' : 'Copier le lien'}</span>
             </button>
             <button
               onClick={handleDownloadQR}
               disabled={isGenerating}
-              className="w-full py-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-white font-semibold text-sm hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
+              className="w-full py-3 rounded-2xl bg-zinc-100 border border-zinc-300 text-black font-semibold text-sm hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
             >
-              <Download className="w-4 h-4" />
-              Télécharger le QR Code
+              <Download className="w-4 h-4 text-black" />
+              <span className="text-black">Télécharger le QR Code</span>
             </button>
           </div>
         </div>

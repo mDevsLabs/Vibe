@@ -549,15 +549,21 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   };
 
   return (
-    <div className={`p-4 border-b border-zinc-800 bg-black ${isModal ? 'border-none p-4' : ''} relative`}>
+    <div
+      className={`p-4 bg-black relative ${
+        isModal
+          ? 'border-none p-4 sm:p-6 flex-1 flex flex-col min-h-full'
+          : 'border-b border-zinc-800'
+      }`}
+    >
       {error && (
-        <div className="mb-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 flex items-center gap-2">
+        <div className="mb-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 flex items-center gap-2 shrink-0">
           <AlertCircle className="w-4 h-4 text-white shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className={`flex gap-3 sm:gap-4 ${isModal ? 'flex-1 min-h-0' : ''}`}>
         <ProfileAvatar
           src={avatarSrc}
           alt="Avatar"
@@ -567,7 +573,9 @@ export const PostComposer: React.FC<PostComposerProps> = ({
         />
 
         <div
-          className="flex-1 space-y-3 relative"
+          className={`flex-1 relative ${
+            isModal ? 'flex flex-col min-h-0 space-y-3' : 'space-y-3'
+          }`}
           onKeyDown={handleComposerKeyDown}
           onClick={() => {
             setShowVisibility(false);
@@ -579,7 +587,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           {recoverableDraft && !contentText.trim() && mediaList.length === 0 && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="flex items-center gap-2 flex-wrap p-2.5 rounded-2xl bg-zinc-950 border border-zinc-800 text-[11px]"
+              className="flex items-center gap-2 flex-wrap p-2.5 rounded-2xl bg-zinc-950 border border-zinc-800 text-[11px] shrink-0"
             >
               <FileText className="w-3.5 h-3.5 text-violet-300 shrink-0" />
               <span className="text-zinc-400 flex-1 min-w-0">
@@ -609,6 +617,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
           <RichTextEditor
             ref={editorRef}
+            fillHeight={isModal}
             initialHTML={isEditing ? editingPost?.content || '' : initialContent || ''}
             onChange={(_html, text) => {
               dirtyRef.current = true;
@@ -619,38 +628,31 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           />
 
           {/* Continuation mAI (ghost text) : « Tab » pour l'ajouter au post */}
-          {(ghostSuggestion || (aiCompletionEnabled && contentText.trimEnd().length >= 8)) && (
+          {ghostSuggestion && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="flex items-center gap-2 flex-wrap text-[11px]"
+              className="flex items-center gap-2 flex-wrap text-[11px] shrink-0"
             >
-              {ghostSuggestion ? (
-                <button
-                  type="button"
-                  onClick={acceptGhostSuggestion}
-                  className="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-zinc-950 border border-zinc-800 text-left hover:border-zinc-600 transition-colors"
-                  title="Cliquer ou appuyer sur Tab pour insérer la suite proposée par mAI"
-                >
-                  <Wand2 className="w-3 h-3 text-violet-300 shrink-0" />
-                  <span className="text-zinc-400 truncate">
-                    Suite suggérée : <em className="text-zinc-300 not-italic">{ghostSuggestion}</em>
-                  </span>
-                  <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[9px] font-mono text-zinc-300 shrink-0">
-                    Tab ⇥
-                  </kbd>
-                </button>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-950/60 border border-zinc-900 text-zinc-600">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  mAI réfléchit à la suite…
+              <button
+                type="button"
+                onClick={acceptGhostSuggestion}
+                className="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-zinc-950 border border-zinc-800 text-left hover:border-zinc-600 transition-colors"
+                title="Cliquer ou appuyer sur Tab pour insérer la suite proposée par mAI"
+              >
+                <Wand2 className="w-3 h-3 text-violet-300 shrink-0" />
+                <span className="text-zinc-400 truncate">
+                  Suite suggérée : <em className="text-zinc-300 not-italic">{ghostSuggestion}</em>
                 </span>
-              )}
+                <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[9px] font-mono text-zinc-300 shrink-0">
+                  Tab ⇥
+                </kbd>
+              </button>
             </div>
           )}
 
           {/* Erreur outil mAI + retour arrière */}
           {(aiError || aiSnapshot) && (
-            <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-3 text-[11px]">
+            <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-3 text-[11px] shrink-0">
               {aiError && <span className="text-amber-400">{aiError}</span>}
               {aiSnapshot && (
                 <button
@@ -667,7 +669,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
           {/* Publication citée (quote-post) */}
           {quotedPost && (
-            <div className="relative rounded-2xl border border-zinc-800 bg-zinc-950 p-3 flex items-start gap-2.5">
+            <div className="relative rounded-2xl border border-zinc-800 bg-zinc-950 p-3 flex items-start gap-2.5 shrink-0">
               <ProfileAvatar
                 src={quotedPost.avatar_url}
                 alt={quotedPost.username}
@@ -697,7 +699,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
           {/* Upload indicator */}
           {isUploading && (
-            <div className="p-3 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-center gap-2 text-xs text-zinc-300">
+            <div className="p-3 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-center gap-2 text-xs text-zinc-300 shrink-0">
               <Loader2 className="w-4 h-4 animate-spin text-white" />
               <span>Téléversement des médias ({imagesCount}/5 images, {videosCount}/2 vidéos)...</span>
             </div>
@@ -705,7 +707,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
           {/* Multi-Media Previews (Up to 5 images / 2 videos) + légendes */}
           {mediaList.length > 0 && (
-            <div className="space-y-2">
+            <div className="space-y-2 shrink-0">
               <div className={`grid gap-2 rounded-2xl overflow-hidden ${mediaList.length === 1 ? 'grid-cols-1' : mediaList.length === 2 ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
                 {mediaList.map((m, idx) => (
                   <div key={idx} className="relative group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 aspect-video flex items-center justify-center">
@@ -748,7 +750,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
           {/* Panneau de planification */}
           {showSchedule && (
-            <div className="p-3 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
+            <div className="p-3.5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2 shrink-0">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
                   <CalendarClock className="w-3.5 h-3.5" />
@@ -767,7 +769,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                   value={scheduledAt}
                   min={new Date(Date.now() + 5 * 60_000).toISOString().slice(0, 16)}
                   onChange={(e) => setScheduledAt(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white [color-scheme:dark] focus:outline-none focus:border-zinc-500"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
                 />
               ) : (
                 <div className="flex items-center gap-2 text-xs text-zinc-400">
@@ -781,7 +783,11 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           )}
 
           {/* Action Tools Bar */}
-          <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+          <div
+            className={`flex items-center justify-between border-t border-zinc-900 shrink-0 ${
+              isModal ? 'pt-3.5 mt-auto pb-safe sm:pb-0' : 'pt-2'
+            }`}
+          >
             <div className="flex items-center gap-1 sm:gap-2">
               <input
                 type="file"

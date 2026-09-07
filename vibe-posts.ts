@@ -55,6 +55,7 @@ export async function publishDuePosts(): Promise<void> {
   if (now - lastPublishCheck < 30_000) return;
   lastPublishCheck = now;
   try {
+    await ensurePostColumns();
     const sql = getDb();
     const due = await sql`
       UPDATE posts
@@ -134,19 +135,21 @@ export async function fetchPostMedia(posts: any[]) {
   }
 }
 
-// Colonnes 0.8.0 ajoutées paresseusement (idempotent — cf. migration 008)
 let postColumnsReady = false;
 export const ensurePostColumns = async () => {
   if (postColumnsReady) return;
   try {
     const sql = getDb();
-    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN DEFAULT FALSE`;
-    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id UUID REFERENCES posts(id) ON DELETE SET NULL`;
+    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN DEFAULT FALSE`.catch(() => {});
+    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id UUID REFERENCES posts(id) ON DELETE SET NULL`.catch(() => {});
     // Planification de publication (réservée Plus/Pro/Max)
-    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'published'`;
-    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'published'`.catch(() => {});
+    await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ`.catch(() => {});
+    await sql`UPDATE posts SET status = 'published' WHERE status IS NULL`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_posts_scheduled_due ON posts(status, scheduled_at) WHERE status = 'scheduled'`.catch(() => {});
     // Médias joints aux commentaires
-    await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`;
+    await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`.catch(() => {});
     postColumnsReady = true;
   } catch (err) {
     console.warn("[vibe-posts] ensurePostColumns skipped:", (err as any)?.message);
@@ -157,6 +160,9 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
   // Protection contre le double enregistrement (idempotence)
   if ((app as any).__vibe_posts_registered) return;
   (app as any).__vibe_posts_registered = true;
+
+  // Garantir les colonnes en tâche de fond dès le chargement du serveur
+  ensurePostColumns().catch(() => {});
 
   // Enregistrer également les routes de flux et recherche si non déjà fait
   registerVibeFeedRoutes(app, registerMulti);

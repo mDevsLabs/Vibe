@@ -21,7 +21,72 @@ const ALLOWED_TAGS = [
   'blockquote', 'code', 'pre',
   'a',
 ];
-const ALLOWED_ATTR = ['href', 'target', 'rel'];
+const ALLOWED_ATTR = ['href', 'target', 'rel', 'class'];
+
+/**
+ * Convertit le markdown textuel standard (gras, italique, barré, code, listes, titres, citations)
+ * en balises HTML autorisées avant assainissement par DOMPurify.
+ */
+function parseMarkdownToHtml(raw: string): string {
+  if (!raw) return '';
+
+  // 1. Sauvegarder les blocs de code multi-lignes ```lang ... ```
+  const codeBlocks: string[] = [];
+  let text = raw.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
+    const idx = codeBlocks.length;
+    const escaped = code
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    codeBlocks.push(`<pre><code class="language-${lang || 'plaintext'}">${escaped}</code></pre>`);
+    return `<!--VIBE_CODE_BLOCK_${idx}-->`;
+  });
+
+  // 2. Sauvegarder le code en ligne `code`
+  const inlineCodes: string[] = [];
+  text = text.replace(/`([^`\n]+)`/g, (_m, code) => {
+    const idx = inlineCodes.length;
+    const escaped = code
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    inlineCodes.push(`<code>${escaped}</code>`);
+    return `<!--VIBE_INLINE_CODE_${idx}-->`;
+  });
+
+  // 3. Liens markdown [Label](url)
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="rich-link">$1</a>');
+
+  // 4. Titres markdown : ###, ##, #
+  text = text.replace(/^###[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
+  text = text.replace(/^##[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
+  text = text.replace(/^#[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
+
+  // 5. Citations : > texte
+  text = text.replace(/^>[ \t]+([^\n]+)$/gm, '<blockquote>$1</blockquote>');
+
+  // 6. Gras et italique combinés ***texte*** ou ___texte___
+  text = text.replace(/(\*\*\*|___)(.+?)\1/g, '<strong><em>$2</em></strong>');
+
+  // 7. Gras **texte** ou __texte__
+  text = text.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>');
+
+  // 8. Italique *texte* ou _texte_
+  text = text.replace(/(?<![\w*])\*([^*\n]+?)\*(?![\w*])/g, '<em>$1</em>');
+  text = text.replace(/(?<![\w_])_([^_\n]+?)_(?![\w_])/g, '<em>$1</em>');
+
+  // 9. Barré ~~texte~~
+  text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+  // 10. Puces de listes standard (- item ou * item)
+  text = text.replace(/^[-*][ \t]+([^\n]+)$/gm, '• $1');
+
+  // 11. Restaurer le code en ligne et les blocs de code
+  text = text.replace(/<!--VIBE_INLINE_CODE_(\d+)-->/g, (_m, idx) => inlineCodes[Number(idx)] || '');
+  text = text.replace(/<!--VIBE_CODE_BLOCK_(\d+)-->/g, (_m, idx) => codeBlocks[Number(idx)] || '');
+
+  return text;
+}
 
 /**
  * Transforme les @mentions / #hashtags / URLs présents dans les nœuds texte
@@ -81,9 +146,10 @@ function linkifyTextNodes(root: HTMLElement) {
 function buildSafeHtml(content: string): string {
   if (!content) return '';
   try {
+    const parsed = parseMarkdownToHtml(content);
     // Sanitization stricte : seul un sous-ensemble de balises passe. Le texte
     // brut historique (sans balise) est échappé par DOMPurify, sans perte des \n.
-    let clean = DOMPurify.sanitize(content, {
+    let clean = DOMPurify.sanitize(parsed, {
       ALLOWED_TAGS,
       ALLOWED_ATTR,
       ALLOW_DATA_ATTR: false,

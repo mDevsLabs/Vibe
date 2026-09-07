@@ -25,11 +25,23 @@ import {
   Users,
   Volume2,
   Cpu,
-  X
+  Languages,
+  X,
+  MessageSquare,
+  CheckCheck
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { useTheme, ACCENT_COLORS } from '../context/ThemeContext';
-import { ApiService } from '../services/api';
+import {
+  useTheme,
+  ACCENT_COLORS,
+  MESSAGE_BUBBLE_THEMES,
+  CHAT_BACKGROUND_THEMES,
+  MESSAGE_BUBBLE_SHAPES,
+  MessageBubbleTheme,
+  ChatBackgroundTheme,
+  MessageBubbleShape
+} from '../context/ThemeContext';
+import { ApiService, TRANSLATION_LANGUAGES, browserToDeepLCode } from '../services/api';
 import { NotificationService } from '../services/notificationService';
 
 /** Encart indiquant l'état réel de la permission notifications de l'appareil */
@@ -65,7 +77,20 @@ const DevicePermissionHint: React.FC = () => {
 
 export const SettingsPage: React.FC = () => {
   const { user } = useAuth();
-  const { theme, setTheme, accentColor, setAccentColor, fontSize, setFontSize } = useTheme();
+  const {
+    theme,
+    setTheme,
+    accentColor,
+    setAccentColor,
+    fontSize,
+    setFontSize,
+    messageBubbleTheme,
+    setMessageBubbleTheme,
+    chatBackgroundTheme,
+    setChatBackgroundTheme,
+    messageBubbleShape,
+    setMessageBubbleShape,
+  } = useTheme();
 
   // Feed customization
   const [feedDefaultMode, setFeedDefaultMode] = useState<'for_you' | 'stream' | 'trending'>('for_you');
@@ -87,6 +112,8 @@ export const SettingsPage: React.FC = () => {
   // mAI : modèle par défaut (toutes les requêtes mAI) + voix de lecture
   const [maiDefaultModel, setMaiDefaultModel] = useState('poolside/laguna-xs-2.1:free');
   const [maiTtsVoice, setMaiTtsVoice] = useState('flux-alexis-en');
+  // Langue cible de traduction ('' = langue du navigateur, résolue à l'appel)
+  const [uiLanguage, setUiLanguage] = useState('');
   const [models, setModels] = useState<Array<{ id: string; name: string; provider?: string }>>([]);
   const [voices, setVoices] = useState<Array<{ id: string; name: string }>>([]);
   // Cercle Privé (membres autorisés à voir les posts « Cercle Privé »)
@@ -102,9 +129,6 @@ export const SettingsPage: React.FC = () => {
         const res = await ApiService.getSettings();
         if (res.settings) {
           const s = res.settings;
-          if (s.theme_preference && ['light', 'dark', 'system'].includes(s.theme_preference)) {
-            setTheme(s.theme_preference as any);
-          }
           setFeedDefaultMode(s.feed_default_mode || 'for_you');
           setHideReposts(s.hide_reposts ?? false);
           setBlockedKeywords(Array.isArray(s.blocked_keywords) ? s.blocked_keywords.join(', ') : (s.blocked_keywords || ''));
@@ -125,17 +149,29 @@ export const SettingsPage: React.FC = () => {
             setMaiDefaultModel(String(s.mai_default_model));
           }
           setMaiTtsVoice(s.mai_tts_voice || 'flux-alexis-en');
+          setUiLanguage(String(s.ui_language || ''));
+          // Miroir local : PostCard/CommentSection lisent la langue sans re-appel API
+          ApiService.setUiLanguageMirror(String(s.ui_language || ''));
           if (s.accent_color && s.accent_color in ACCENT_COLORS) {
             setAccentColor(s.accent_color as any);
           }
           if (s.font_size && ['small', 'medium', 'large'].includes(s.font_size)) {
             setFontSize(s.font_size as any);
           }
+          if (s.message_bubble_theme && s.message_bubble_theme in MESSAGE_BUBBLE_THEMES) {
+            setMessageBubbleTheme(s.message_bubble_theme as any);
+          }
+          if (s.chat_background_theme && s.chat_background_theme in CHAT_BACKGROUND_THEMES) {
+            setChatBackgroundTheme(s.chat_background_theme as any);
+          }
+          if (s.message_bubble_shape && s.message_bubble_shape in MESSAGE_BUBBLE_SHAPES) {
+            setMessageBubbleShape(s.message_bubble_shape as any);
+          }
         }
       } catch {}
     };
     loadSettings();
-  }, [setTheme, setAccentColor, setFontSize]);
+  }, [setTheme, setAccentColor, setFontSize, setMessageBubbleTheme, setChatBackgroundTheme, setMessageBubbleShape]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -166,7 +202,14 @@ export const SettingsPage: React.FC = () => {
         posts_ai_generated_by_default: postsAIGeneratedByDefault,
         mai_default_model: maiDefaultModel,
         mai_tts_voice: maiTtsVoice,
+        ui_language: uiLanguage,
+        message_bubble_theme: messageBubbleTheme,
+        chat_background_theme: chatBackgroundTheme,
+        message_bubble_shape: messageBubbleShape,
       });
+
+      // Miroir local immédiat (traduction des posts sans recharger les réglages)
+      ApiService.setUiLanguageMirror(uiLanguage);
 
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
@@ -269,136 +312,103 @@ export const SettingsPage: React.FC = () => {
         </h1>
       </header>
 
-      <div className="p-4 sm:p-6 space-y-6 max-w-2xl">
+      <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-5xl mx-auto w-full">
         {savedSuccess && (
-          <div className="p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-2 animate-fadeIn">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-2 animate-fadeIn shadow-lg">
             <Check className="w-4 h-4 text-white" />
             <span>Vos paramètres ont été enregistrés avec succès.</span>
           </div>
         )}
 
         <form onSubmit={handleSaveSettings} className="space-y-6">
-          {/* Section 0: Apparence & Thème d'affichage */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-white font-bold text-sm">
-                <Sun className="w-4 h-4 text-amber-400" />
-                <span>Apparence & Thème</span>
-              </div>
-              <span className="text-[11px] font-mono text-zinc-500 uppercase">Par défaut : Clair</span>
-            </div>
+          {/* Row 1: Apparence globale & Langue (Grid 2 cols sur desktop, 1 col sur mobile) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Section 0: Apparence & Thème d'affichage */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4 flex flex-col justify-between">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-white font-bold text-sm">
+                    <Sun className="w-4 h-4 text-white" />
+                    <span>Apparence & Thème</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded-full uppercase">Par défaut : Clair</span>
+                </div>
 
-            <p className="text-xs text-zinc-400">
-              Choisissez l’affichage qui vous convient le mieux. Le thème clair est défini par défaut, ou optez pour le thème de votre système ou le mode sombre.
-            </p>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  Choisissez l’affichage qui vous convient le mieux. Le thème clair est défini par défaut, ou optez pour le thème système ou sombre.
+                </p>
 
-            <div className="grid grid-cols-3 gap-2.5 sm:gap-3">
-              {[
-                {
-                  id: 'light',
-                  label: 'Clair',
-                  badge: 'Par défaut',
-                  icon: Sun,
-                  iconColor: 'text-amber-400',
-                  previewBg: 'bg-white border-zinc-200 text-zinc-900',
-                },
-                {
-                  id: 'system',
-                  label: 'Système',
-                  badge: 'Auto OS',
-                  icon: Laptop,
-                  iconColor: 'text-sky-400',
-                  previewBg: 'bg-gradient-to-r from-white to-zinc-900 border-zinc-500 text-zinc-800',
-                },
-                {
-                  id: 'dark',
-                  label: 'Sombre',
-                  badge: 'Nuit',
-                  icon: Moon,
-                  iconColor: 'text-indigo-400',
-                  previewBg: 'bg-zinc-950 border-zinc-800 text-white',
-                },
-              ].map((item) => {
-                const isSelected = theme === item.id;
-                const IconComponent = item.icon;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setTheme(item.id as any)}
-                    className={`relative p-3 sm:p-4 rounded-2xl border text-left transition-all flex flex-col justify-between gap-3 ${
-                      isSelected
-                        ? 'bg-zinc-900 border-white text-white shadow-lg ring-1 ring-white/30'
-                        : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between w-full">
-                      <div className="p-2 rounded-xl bg-zinc-800/80">
-                        <IconComponent className={`w-4 h-4 sm:w-5 sm:h-5 ${item.iconColor}`} />
-                      </div>
-                      {isSelected ? (
-                        <div className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shadow">
-                          <Check className="w-3 h-3 stroke-[3]" />
-                        </div>
-                      ) : (
-                        <div className="w-4 h-4 rounded-full border border-zinc-700" />
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
-                        {item.label}
-                      </div>
-                      <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
-                        {item.badge}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Section 0b: Personnalisation (accent + taille de texte) */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Palette className="w-4 h-4 text-fuchsia-400" />
-              <span>Personnalisation de l'interface</span>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div className="space-y-2">
-                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                  <Palette className="w-3 h-3" /> Couleur d'accent
-                </label>
-                <p className="text-zinc-500 text-[11px]">Teinte appliquée aux boutons d'action et éléments interactifs clés.</p>
-                <div className="flex flex-wrap gap-2.5">
-                  {(Object.keys(ACCENT_COLORS) as Array<keyof typeof ACCENT_COLORS>).map((key) => {
-                    const c = ACCENT_COLORS[key];
-                    const isSelected = accentColor === key;
+                <div className="grid grid-cols-3 gap-2.5">
+                  {[
+                    {
+                      id: 'light',
+                      label: 'Clair',
+                      badge: 'Par défaut',
+                      icon: Sun,
+                      iconColor: 'text-zinc-200',
+                      previewBg: 'bg-white border-zinc-200 text-zinc-900',
+                    },
+                    {
+                      id: 'system',
+                      label: 'Système',
+                      badge: 'Auto OS',
+                      icon: Laptop,
+                      iconColor: 'text-zinc-200',
+                      previewBg: 'bg-gradient-to-r from-white to-zinc-900 border-zinc-500 text-zinc-800',
+                    },
+                    {
+                      id: 'dark',
+                      label: 'Sombre',
+                      badge: 'Nuit',
+                      icon: Moon,
+                      iconColor: 'text-zinc-200',
+                      previewBg: 'bg-zinc-950 border-zinc-800 text-white',
+                    },
+                  ].map((item) => {
+                    const isSelected = theme === item.id;
+                    const IconComponent = item.icon;
                     return (
                       <button
-                        key={key}
+                        key={item.id}
                         type="button"
-                        onClick={() => setAccentColor(key as any)}
-                        title={c.label}
-                        className={`relative w-9 h-9 rounded-full border-2 transition-all hover:scale-110 ${
-                          isSelected ? 'border-white shadow-lg' : 'border-zinc-700'
+                        onClick={() => setTheme(item.id as any)}
+                        className={`relative p-3 rounded-2xl border text-left transition-all flex flex-col justify-between gap-3 min-h-[96px] ${
+                          isSelected
+                            ? 'bg-zinc-900 border-white text-white shadow-lg ring-1 ring-white/30'
+                            : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-white'
                         }`}
-                        style={{ backgroundColor: c.hex }}
                       >
-                        {isSelected && (
-                          <Check className="w-4 h-4 text-black stroke-[3] absolute inset-0 m-auto" />
-                        )}
+                        <div className="flex items-center justify-between w-full">
+                          <div className="p-1.5 rounded-xl bg-zinc-800/80">
+                            <IconComponent className={`w-4 h-4 ${item.iconColor}`} />
+                          </div>
+                          {isSelected ? (
+                            <div className="w-4 h-4 rounded-full bg-white text-black flex items-center justify-center shadow">
+                              <Check className="w-2.5 h-2.5 stroke-[3]" />
+                            </div>
+                          ) : (
+                            <div className="w-3.5 h-3.5 rounded-full border border-zinc-700" />
+                          )}
+                        </div>
+
+                        <div>
+                          <div className="font-bold text-xs text-white">
+                            {item.label}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 font-mono">
+                            {item.badge}
+                          </div>
+                        </div>
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              <div className="space-y-2 pt-2 border-t border-zinc-900">
+              {/* Taille du texte */}
+              <div className="space-y-2 pt-3 border-t border-zinc-900">
                 <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                  <Type className="w-3 h-3" /> Taille du texte
+                  <Type className="w-3 h-3 text-zinc-400" /> Taille du texte
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   {([
@@ -423,413 +433,688 @@ export const SettingsPage: React.FC = () => {
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Section 1: Personnalisation des Fils */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Sliders className="w-4 h-4 text-white" />
-              <span>Personnalisation des Fils d’actualité</span>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div className="space-y-1.5">
-                <label className="text-zinc-400 font-mono uppercase text-[11px]">Fil d'actualité par défaut</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: 'for_you', label: 'Pour Vous (IA)' },
-                    { id: 'stream', label: 'Abonnements' },
-                    { id: 'trending', label: 'Tendances' },
-                  ].map((mode) => (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      onClick={() => setFeedDefaultMode(mode.id as any)}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold transition-all ${
-                        feedDefaultMode === mode.id
-                          ? 'bg-white text-black border-white'
-                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
-                    >
-                      {mode.label}
-                    </button>
-                  ))}
+            {/* Section 0b & 0c: Accent & Langue de traduction */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4 flex flex-col justify-between">
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-white font-bold text-sm">
+                  <Palette className="w-4 h-4 text-white" />
+                  <span>Personnalisation & Langue</span>
                 </div>
-              </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
-                <div>
-                  <span className="font-semibold text-white">Masquer les repartages (reposts)</span>
-                  <p className="text-zinc-500 text-[11px]">N'affiche que les publications originales dans votre flux</p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={hideReposts}
-                  onChange={(e) => setHideReposts(e.target.checked)}
-                  className="w-4 h-4 accent-white cursor-pointer"
-                />
-              </div>
-
-              <div className="space-y-1.5 pt-2 border-t border-zinc-900">
-                <label className="text-zinc-400 font-mono uppercase text-[11px]">Mots-clés & #Hashtags masqués</label>
-                <input
-                  type="text"
-                  value={blockedKeywords}
-                  onChange={(e) => setBlockedKeywords(e.target.value)}
-                  placeholder="spoilers, politique, crypto (séparés par des virgules)"
-                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Section 2: Sécurité & Confidentialité */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Shield className="w-4 h-4 text-white" />
-              <span>Sécurité & Confidentialité</span>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              {/* 2FA — Actif et obligatoire, non modifiable */}
-              <div className="flex items-center gap-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700">
-                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center flex-shrink-0">
-                  <Shield className="w-4 h-4 text-white" />
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-white text-xs">Double authentification (2FA)</span>
-                    <span className="text-[10px] bg-white text-black px-2 py-0.5 rounded-full font-bold">ACTIF</span>
+                {/* Couleur d'accent */}
+                <div className="space-y-2">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
+                    <span>Couleur d'accent</span>
+                    <span className="text-zinc-500 font-normal lowercase">{ACCENT_COLORS[accentColor]?.label || accentColor}</span>
+                  </label>
+                  <p className="text-zinc-500 text-[11px]">Boutons d'action et éléments interactifs clés.</p>
+                  <div className="flex flex-wrap gap-2.5 pt-1">
+                    {(Object.keys(ACCENT_COLORS) as Array<keyof typeof ACCENT_COLORS>).map((key) => {
+                      const c = ACCENT_COLORS[key];
+                      const isSelected = accentColor === key;
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setAccentColor(key as any)}
+                          title={c.label}
+                          className={`relative w-8 h-8 rounded-full border-2 transition-all hover:scale-110 ${
+                            isSelected ? 'border-white shadow-lg ring-1 ring-white/50' : 'border-zinc-700'
+                          }`}
+                          style={{ backgroundColor: c.hex }}
+                        >
+                          {isSelected && (
+                            <Check className="w-4 h-4 text-black stroke-[3] absolute inset-0 m-auto" />
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <p className="text-zinc-500 text-[11px] mt-0.5">
-                    La 2FA est activée sur votre compte et protège vos connexions. Elle est obligatoire sur Vibe.
-                  </p>
                 </div>
               </div>
 
-              <div className="space-y-1.5 pt-2 border-t border-zinc-900">
-                <label className="text-zinc-400 font-mono uppercase text-[11px]">Qui peut vous envoyer des messages privés (DM)</label>
+              {/* Langue de traduction */}
+              <div className="space-y-2 pt-3 border-t border-zinc-900">
+                <div className="flex items-center justify-between">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                    <Languages className="w-3 h-3 text-zinc-400" /> Langue de traduction
+                  </label>
+                  <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                    Auto : {browserToDeepLCode(typeof navigator !== 'undefined' ? navigator.language : '')}
+                  </span>
+                </div>
+                <p className="text-zinc-500 text-[11px]">
+                  Langue cible du bouton « Traduire » sur les publications et réponses.
+                </p>
                 <select
-                  value={allowDms}
-                  onChange={(e) => setAllowDms(e.target.value as any)}
-                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                  value={uiLanguage}
+                  onChange={(e) => setUiLanguage(e.target.value)}
+                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
                 >
-                  <option value="everyone">Tout le monde</option>
-                  <option value="following">Mes abonnements uniquement</option>
-                  <option value="nobody">Personne (DMs désactivés)</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5 pt-2 border-t border-zinc-900">
-                <label className="text-zinc-400 font-mono uppercase text-[11px]">Qui peut vous mentionner (@pseudo)</label>
-                <select
-                  value={allowMentions}
-                  onChange={(e) => setAllowMentions(e.target.value as any)}
-                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
-                >
-                  <option value="everyone">Tout le monde</option>
-                  <option value="following">Mes abonnements uniquement</option>
-                  <option value="nobody">Personne</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 3: Modération & Contenu */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <EyeOff className="w-4 h-4 text-white" />
-              <span>Modération du contenu</span>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div className="space-y-1.5">
-                <label className="text-zinc-400 font-mono uppercase text-[11px]">Filtre IA de toxicité</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['low', 'medium', 'strict'] as const).map((lvl) => (
-                    <button
-                      key={lvl}
-                      type="button"
-                      onClick={() => setContentFilter(lvl)}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold capitalize transition-all ${
-                        contentFilter === lvl
-                          ? 'bg-white text-black border-white'
-                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
-                    >
-                      {lvl === 'low' ? 'Léger' : lvl === 'medium' ? 'Modéré' : 'Strict'}
-                    </button>
+                  <option value="">Langue du navigateur (automatique)</option>
+                  {TRANSLATION_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.label}
+                    </option>
                   ))}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
-                <div>
-                  <span className="font-semibold text-white">Flouter les médias sensibles</span>
-                  <p className="text-zinc-500 text-[11px]">Affiche un filtre d'avertissement sur les images sensibles</p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={blurSensitive}
-                  onChange={(e) => setBlurSensitive(e.target.checked)}
-                  className="w-4 h-4 accent-white cursor-pointer"
-                />
+                </select>
               </div>
             </div>
           </div>
 
-          {/* Section 3b: Comptes bloqués & masqués */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Ban className="w-4 h-4 text-red-400" />
-              <span>Comptes bloqués &amp; masqués</span>
+          {/* Row 2: Personnalisation des discussions & messages (Pleine largeur avec aperçu en direct) */}
+          <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-white font-bold text-sm sm:text-base">
+                <MessageSquare className="w-5 h-5 text-white" />
+                <span>Personnalisation des discussions & messages</span>
+              </div>
+              <span className="text-[10px] sm:text-[11px] font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-full">
+                Aperçu en direct
+              </span>
             </div>
 
-            {isLoadingAccounts ? (
-              <div className="flex items-center gap-2 text-xs text-zinc-500 py-2">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Chargement des listes…
-              </div>
-            ) : (
-              <div className="space-y-4 text-xs">
-                {/* Comptes bloqués */}
-                <div className="space-y-2">
-                  <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                    <Ban className="w-3 h-3" />
-                    Bloqués ({blockedAccounts.length}) — contact coupé
-                  </p>
-                  {blockedAccounts.length === 0 ? (
-                    <p className="text-zinc-600 text-[11px]">Aucun compte bloqué.</p>
-                  ) : (
-                    <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
-                      {blockedAccounts.map((b) => (
-                        <div key={b.id} className="flex items-center gap-3 p-3">
-                          <div className="flex-1 min-w-0">
-                            <span className="font-semibold text-white block truncate">
-                              {b.blocked_display_name || b.blocked_username}
-                            </span>
-                            <span className="text-zinc-500">@{b.blocked_username}</span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleUnblockAccount(b.blocked_user_id, b.blocked_username)}
-                            className="px-3 py-1.5 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 transition-colors shrink-0"
-                          >
-                            Débloquer
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Comptes masqués */}
-                <div className="space-y-2">
-                  <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                    <EyeOff className="w-3 h-3" />
-                    Masqués ({mutedAccounts.length}) — silencieux
-                  </p>
-                  {mutedAccounts.length === 0 ? (
-                    <p className="text-zinc-600 text-[11px]">Aucun compte masqué.</p>
-                  ) : (
-                    <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
-                      {mutedAccounts.map((m) => (
-                        <div key={m.id} className="flex items-center gap-3 p-3">
-                          <div className="flex-1 min-w-0">
-                            <span className="font-semibold text-white block truncate">
-                              {m.muted_display_name || m.muted_username}
-                            </span>
-                            <span className="text-zinc-500">@{m.muted_username}</span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleUnmuteAccount(m.muted_username)}
-                            className="px-3 py-1.5 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 transition-colors shrink-0"
-                          >
-                            Réactiver
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Section 3c: Cercle Privé */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Users className="w-4 h-4 text-emerald-400" />
-              <span>Cercle Privé</span>
-            </div>
-
-            <p className="text-xs text-zinc-400">
-              Les membres de votre cercle sont les seuls à pouvoir voir les publications publiées avec l'audience
-              <strong className="text-white"> « Cercle Privé » </strong>. Ajoutez des membres depuis leur profil via le
-              bouton « Ajouter au cercle ».
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Personnalisez l'apparence de vos conversations privées : couleur et dégradés des bulles envoyées, fond d'écran du chat et forme des bulles.
             </p>
 
-            {circleMembers.length === 0 ? (
-              <p className="text-zinc-600 text-[11px]">Votre cercle est vide pour l'instant.</p>
-            ) : (
-              <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
-                {circleMembers.map((m) => (
-                  <div key={m.id} className="flex items-center gap-3 p-3">
-                    <div className="flex-1 min-w-0">
-                      <span className="font-semibold text-white block truncate">
-                        {m.display_name || m.username}
-                      </span>
-                      <span className="text-zinc-500">@{m.username}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveFromCircle(m.username)}
-                      className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors shrink-0"
-                      title={`Retirer @${m.username} du cercle`}
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Contrôles (7 cols) */}
+              <div className="lg:col-span-7 space-y-5">
+                {/* 1. Couleur / Dégradé des bulles envoyées */}
+                <div className="space-y-2.5">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
+                    <span>Bulles de message envoyées</span>
+                    <span className="text-zinc-500 font-normal lowercase">
+                      {MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.label || messageBubbleTheme}
+                    </span>
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {(Object.keys(MESSAGE_BUBBLE_THEMES) as MessageBubbleTheme[]).map((themeKey) => {
+                      const t = MESSAGE_BUBBLE_THEMES[themeKey];
+                      const isSelected = messageBubbleTheme === themeKey;
+                      const isLightText = t.textColor === 'light';
+                      return (
+                        <button
+                          key={themeKey}
+                          type="button"
+                          onClick={() => setMessageBubbleTheme(themeKey)}
+                          className={`p-2.5 rounded-2xl border text-left transition-all flex flex-col gap-2 ${
+                            isSelected
+                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 shadow-md'
+                              : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div
+                              className="w-6 h-6 rounded-full border border-white/20 shadow-inner flex items-center justify-center"
+                              style={{ background: t.gradient }}
+                            >
+                              {isSelected && (
+                                <Check className={`w-3.5 h-3.5 ${isLightText ? 'text-white' : 'text-black'} stroke-[3]`} />
+                              )}
+                            </div>
+                            {isSelected && (
+                              <span className="text-[10px] font-bold text-white uppercase tracking-wider">Actif</span>
+                            )}
+                          </div>
+                          <span className="text-[11px] font-semibold text-zinc-200 truncate block">
+                            {t.label}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
-                ))}
+                </div>
+
+                {/* 2. Fond d'écran des discussions */}
+                <div className="space-y-2.5 pt-4 border-t border-zinc-900">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
+                    <span>Arrière-plan des discussions</span>
+                    <span className="text-zinc-500 font-normal lowercase">
+                      {CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.label || chatBackgroundTheme}
+                    </span>
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {(Object.keys(CHAT_BACKGROUND_THEMES) as ChatBackgroundTheme[]).map((bgKey) => {
+                      const b = CHAT_BACKGROUND_THEMES[bgKey];
+                      const isSelected = chatBackgroundTheme === bgKey;
+                      return (
+                        <button
+                          key={bgKey}
+                          type="button"
+                          onClick={() => setChatBackgroundTheme(bgKey)}
+                          className={`p-2.5 rounded-2xl border text-left transition-all flex flex-col gap-2 ${
+                            isSelected
+                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 shadow-md'
+                              : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                          }`}
+                        >
+                          <div
+                            className={`w-full h-8 rounded-xl border border-white/10 flex items-center justify-center relative overflow-hidden ${b.previewBg}`}
+                            style={b.style ? { background: b.style } : undefined}
+                          >
+                            {isSelected && (
+                              <div className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shadow">
+                                <Check className="w-3 h-3 stroke-[3]" />
+                              </div>
+                            )}
+                          </div>
+                          <span className="text-[11px] font-semibold text-zinc-200 truncate block">
+                            {b.label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 3. Forme des bulles */}
+                <div className="space-y-2.5 pt-4 border-t border-zinc-900">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
+                    <span>Forme & Arrondi des bulles</span>
+                    <span className="text-zinc-500 font-normal lowercase">
+                      {MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.label || messageBubbleShape}
+                    </span>
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {(Object.keys(MESSAGE_BUBBLE_SHAPES) as MessageBubbleShape[]).map((shapeKey) => {
+                      const s = MESSAGE_BUBBLE_SHAPES[shapeKey];
+                      const isSelected = messageBubbleShape === shapeKey;
+                      return (
+                        <button
+                          key={shapeKey}
+                          type="button"
+                          onClick={() => setMessageBubbleShape(shapeKey)}
+                          className={`p-3 rounded-2xl border text-center transition-all flex flex-col items-center gap-2 ${
+                            isSelected
+                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 text-white'
+                              : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700 hover:text-white'
+                          }`}
+                        >
+                          <div
+                            className={`w-12 h-6 border border-zinc-600 bg-zinc-800 ${s.meRadius} flex items-center justify-center`}
+                          >
+                            <div className="w-4 h-1 bg-zinc-400 rounded-full" />
+                          </div>
+                          <span className="text-[11px] font-semibold">{s.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            )}
+
+              {/* Live Preview (5 cols) */}
+              <div className="lg:col-span-5 rounded-3xl border border-zinc-800 p-4 bg-zinc-900/60 flex flex-col gap-3 sticky top-24">
+                <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
+                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-zinc-400" />
+                    Aperçu de la conversation
+                  </span>
+                  <span className="text-[10px] text-zinc-400 font-mono">Temps réel</span>
+                </div>
+
+                {/* Cadre de simulation de discussion */}
+                <div
+                  className={`rounded-2xl border border-zinc-800 p-4 space-y-3 min-h-[220px] flex flex-col justify-end transition-all shadow-inner overflow-hidden ${
+                    CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.previewBg || 'bg-black'
+                  }`}
+                  style={
+                    CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.style
+                      ? { background: CHAT_BACKGROUND_THEMES[chatBackgroundTheme].style }
+                      : undefined
+                  }
+                >
+                  {/* Message reçu */}
+                  <div className="flex items-end gap-2 max-w-[85%]">
+                    <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+                      V
+                    </div>
+                    <div className={`p-3 bg-zinc-900/90 border border-zinc-800 text-zinc-100 text-xs shadow-sm ${MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.partnerRadius || 'rounded-2xl'}`}>
+                      <p className="leading-relaxed">Salut ! Tu as vu le nouveau design des messages Vibe ? ✨</p>
+                      <span className="text-[9px] text-zinc-500 font-mono mt-1 block">14:30</span>
+                    </div>
+                  </div>
+
+                  {/* Message envoyé */}
+                  <div className="flex items-end justify-end gap-2 self-end max-w-[85%]">
+                    <div
+                      className={`p-3 text-xs shadow-md transition-all ${
+                        MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.textColor === 'dark' ? 'vibe-msg-text-dark' : 'vibe-msg-text-light'
+                      } ${MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.meRadius || 'rounded-2xl'}`}
+                      style={{
+                        background: MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.gradient,
+                        border: MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.border,
+                      }}
+                    >
+                      <p className="leading-relaxed font-medium">Oui, c'est super fluide et personnalisable ! 🚀</p>
+                      <div className="flex items-center justify-end gap-1 mt-1 opacity-75">
+                        <span className="text-[9px] font-mono">14:31</span>
+                        <CheckCheck className="w-3 h-3" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[10px] text-zinc-400 text-center">
+                  Ces réglages s'appliquent immédiatement à toutes vos discussions privées.
+                </p>
+              </div>
+            </div>
           </div>
 
-          {/* Section 4: Notifications */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
-            <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Bell className="w-4 h-4 text-white" />
-              <span>Notifications</span>
+          {/* Row 3: Fils d'actualité & Modération (Grid 2 cols sur desktop, 1 col sur mobile) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Section 1: Personnalisation des Fils */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <Sliders className="w-4 h-4 text-white" />
+                <span>Personnalisation des Fils d’actualité</span>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                <div className="space-y-1.5">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px]">Fil d'actualité par défaut</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'for_you', label: 'Pour Vous (IA)' },
+                      { id: 'stream', label: 'Abonnements' },
+                      { id: 'trending', label: 'Tendances' },
+                    ].map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => setFeedDefaultMode(mode.id as any)}
+                        className={`py-2 px-3 rounded-xl border text-xs font-semibold transition-all ${
+                          feedDefaultMode === mode.id
+                            ? 'bg-white text-black border-white'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+                  <div>
+                    <span className="font-semibold text-white">Masquer les repartages (reposts)</span>
+                    <p className="text-zinc-500 text-[11px]">N'affiche que les publications originales dans votre flux</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={hideReposts}
+                    onChange={(e) => setHideReposts(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5 pt-2 border-t border-zinc-900">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px]">Mots-clés & #Hashtags masqués</label>
+                  <input
+                    type="text"
+                    value={blockedKeywords}
+                    onChange={(e) => setBlockedKeywords(e.target.value)}
+                    placeholder="spoilers, politique, crypto (séparés par des virgules)"
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                  />
+                </div>
+              </div>
             </div>
 
-            <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-semibold text-white">Notifications par e-mail</span>
-                  <p className="text-zinc-500 text-[11px]">Réception de résumés d'activités et messages importants</p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={emailNotifs}
-                  onChange={(e) => setEmailNotifs(e.target.checked)}
-                  className="w-4 h-4 accent-white cursor-pointer"
-                />
+            {/* Section 3: Modération & Contenu */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <EyeOff className="w-4 h-4 text-white" />
+                <span>Modération du contenu</span>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
-                <div>
-                  <span className="font-semibold text-white">Notifications push sur l'appareil</span>
-                  <p className="text-zinc-500 text-[11px]">Alertes en direct pour les likes, partages et messages</p>
+              <div className="space-y-4 text-xs">
+                <div className="space-y-1.5">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px]">Filtre IA de toxicité</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['low', 'medium', 'strict'] as const).map((lvl) => (
+                      <button
+                        key={lvl}
+                        type="button"
+                        onClick={() => setContentFilter(lvl)}
+                        className={`py-2 px-3 rounded-xl border text-xs font-semibold capitalize transition-all ${
+                          contentFilter === lvl
+                            ? 'bg-white text-black border-white'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {lvl === 'low' ? 'Léger' : lvl === 'medium' ? 'Modéré' : 'Strict'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={pushNotifs}
-                  onChange={(e) => setPushNotifs(e.target.checked)}
-                  className="w-4 h-4 accent-white cursor-pointer"
-                />
-              </div>
 
-              <DevicePermissionHint />
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+                  <div>
+                    <span className="font-semibold text-white">Flouter les médias sensibles</span>
+                    <p className="text-zinc-500 text-[11px]">Affiche un filtre d'avertissement sur les images sensibles</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={blurSensitive}
+                    onChange={(e) => setBlurSensitive(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Section 5: Agent Autonome & mAI */}
-          <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+          {/* Row 4: Sécurité & Notifications (Grid 2 cols sur desktop, 1 col sur mobile) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Section 2: Sécurité & Confidentialité */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <Shield className="w-4 h-4 text-white" />
+                <span>Sécurité & Confidentialité</span>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                {/* 2FA — Actif et obligatoire */}
+                <div className="flex items-center gap-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-800">
+                  <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center flex-shrink-0">
+                    <Shield className="w-4 h-4 text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-white text-xs">Double authentification (2FA)</span>
+                      <span className="text-[10px] bg-white text-black px-2 py-0.5 rounded-full font-bold">ACTIF</span>
+                    </div>
+                    <p className="text-zinc-500 text-[11px] mt-0.5">
+                      La 2FA est activée sur votre compte et obligatoire sur Vibe.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 pt-2 border-t border-zinc-900">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px]">Qui peut vous envoyer des messages privés (DM)</label>
+                  <select
+                    value={allowDms}
+                    onChange={(e) => setAllowDms(e.target.value as any)}
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                  >
+                    <option value="everyone">Tout le monde</option>
+                    <option value="following">Mes abonnements uniquement</option>
+                    <option value="nobody">Personne (DMs désactivés)</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5 pt-2 border-t border-zinc-900">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px]">Qui peut vous mentionner (@pseudo)</label>
+                  <select
+                    value={allowMentions}
+                    onChange={(e) => setAllowMentions(e.target.value as any)}
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                  >
+                    <option value="everyone">Tout le monde</option>
+                    <option value="following">Mes abonnements uniquement</option>
+                    <option value="nobody">Personne</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 4: Notifications */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <Bell className="w-4 h-4 text-white" />
+                <span>Notifications</span>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-semibold text-white">Notifications par e-mail</span>
+                    <p className="text-zinc-500 text-[11px]">Réception de résumés d'activités et messages importants</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={emailNotifs}
+                    onChange={(e) => setEmailNotifs(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+                  <div>
+                    <span className="font-semibold text-white">Notifications push sur l'appareil</span>
+                    <p className="text-zinc-500 text-[11px]">Alertes en direct pour les likes, partages et messages</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={pushNotifs}
+                    onChange={(e) => setPushNotifs(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer"
+                  />
+                </div>
+
+                <DevicePermissionHint />
+              </div>
+            </div>
+          </div>
+
+          {/* Row 5: Comptes bloqués/masqués & Cercle Privé (Grid 2 cols sur desktop, 1 col sur mobile) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Section 3b: Comptes bloqués & masqués */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <Ban className="w-4 h-4 text-white" />
+                <span>Comptes bloqués &amp; masqués</span>
+              </div>
+
+              {isLoadingAccounts ? (
+                <div className="flex items-center gap-2 text-xs text-zinc-500 py-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Chargement des listes…
+                </div>
+              ) : (
+                <div className="space-y-4 text-xs">
+                  {/* Comptes bloqués */}
+                  <div className="space-y-2">
+                    <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                      <Ban className="w-3 h-3 text-zinc-400" />
+                      Bloqués ({blockedAccounts.length}) — contact coupé
+                    </p>
+                    {blockedAccounts.length === 0 ? (
+                      <p className="text-zinc-600 text-[11px]">Aucun compte bloqué.</p>
+                    ) : (
+                      <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800 max-h-40 overflow-y-auto">
+                        {blockedAccounts.map((b) => (
+                          <div key={b.id} className="flex items-center gap-3 p-2.5">
+                            <div className="flex-1 min-w-0">
+                              <span className="font-semibold text-white block truncate">
+                                {b.blocked_display_name || b.blocked_username}
+                              </span>
+                              <span className="text-zinc-500">@{b.blocked_username}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleUnblockAccount(b.blocked_user_id, b.blocked_username)}
+                              className="px-3 py-1 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 hover:text-white transition-colors shrink-0 text-xs"
+                            >
+                              Débloquer
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Comptes masqués */}
+                  <div className="space-y-2 pt-2 border-t border-zinc-900">
+                    <p className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                      <EyeOff className="w-3 h-3 text-zinc-400" />
+                      Masqués ({mutedAccounts.length}) — silencieux
+                    </p>
+                    {mutedAccounts.length === 0 ? (
+                      <p className="text-zinc-600 text-[11px]">Aucun compte masqué.</p>
+                    ) : (
+                      <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800 max-h-40 overflow-y-auto">
+                        {mutedAccounts.map((m) => (
+                          <div key={m.id} className="flex items-center gap-3 p-2.5">
+                            <div className="flex-1 min-w-0">
+                              <span className="font-semibold text-white block truncate">
+                                {m.muted_display_name || m.muted_username}
+                              </span>
+                              <span className="text-zinc-500">@{m.muted_username}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleUnmuteAccount(m.muted_username)}
+                              className="px-3 py-1 rounded-full border border-zinc-700 text-zinc-300 font-semibold hover:bg-zinc-900 hover:text-white transition-colors shrink-0 text-xs"
+                            >
+                              Réactiver
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Section 3c: Cercle Privé */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <Users className="w-4 h-4 text-white" />
+                <span>Cercle Privé</span>
+              </div>
+
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Les membres de votre cercle sont les seuls à pouvoir voir les publications publiées avec l'audience
+                <strong className="text-white"> « Cercle Privé »</strong>.
+              </p>
+
+              {circleMembers.length === 0 ? (
+                <p className="text-zinc-600 text-[11px]">Votre cercle est vide pour l'instant.</p>
+              ) : (
+                <div className="divide-y divide-zinc-900 rounded-2xl border border-zinc-800 max-h-56 overflow-y-auto">
+                  {circleMembers.map((m) => (
+                    <div key={m.id} className="flex items-center gap-3 p-2.5">
+                      <div className="flex-1 min-w-0">
+                        <span className="font-semibold text-white block truncate">
+                          {m.display_name || m.username}
+                        </span>
+                        <span className="text-zinc-500">@{m.username}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveFromCircle(m.username)}
+                        className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors shrink-0"
+                        title={`Retirer @${m.username} du cercle`}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Row 6: Intelligence Artificielle mAI (Pleine largeur) */}
+          <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
             <div className="flex items-center gap-2 text-white font-bold text-sm">
-              <Sparkles className="w-4 h-4 text-purple-400" />
+              <Sparkles className="w-4 h-4 text-white" />
               <span>Intelligence Artificielle mAI</span>
             </div>
 
-            <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-semibold text-white">Approbation automatique des outils mAI</span>
-                  <p className="text-zinc-500 text-[11px]">
-                    Autoriser l'agent mAI à exécuter ses requêtes et outils d'assistance sans confirmation manuelle
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={maiAutoApproveTools}
-                  onChange={(e) => setMaiAutoApproveTools(e.target.checked)}
-                  className="w-4 h-4 accent-purple-500 cursor-pointer"
-                />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-semibold text-white">Publications créées par l'IA par défaut</span>
-                  <p className="text-zinc-500 text-[11px]">
-                    Vos nouvelles publications seront automatiquement marquées « Créé avec l'IA » (modifiable à chaque post)
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={postsAIGeneratedByDefault}
-                  onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
-                  className="w-4 h-4 accent-purple-500 cursor-pointer"
-                />
-              </div>
-
-              {/* Modèle mAI par défaut (toutes les requêtes mAI) — liste via API */}
-              <div className="space-y-1.5 pt-2 border-t border-zinc-900">
-                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                  <Cpu className="w-3 h-3" />
-                  Modèle mAI par défaut
-                </label>
-                <p className="text-zinc-500 text-[11px]">
-                  Utilisé pour l'assistant mAI, les outils du composer (corriger, allonger, réduire, ton, suggestions Tab)
-                  et la traduction. Modifiable aussi directement dans le panneau mAI.
-                </p>
-                {models.length > 0 ? (
-                  <select
-                    value={maiDefaultModel}
-                    onChange={(e) => setMaiDefaultModel(e.target.value)}
-                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
-                  >
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}{m.provider ? ` — ${m.provider}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="flex items-center gap-2 text-zinc-500 py-1">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Chargement des modèles via l'API…</span>
+            <div className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                  <div>
+                    <span className="font-semibold text-white">Approbation auto des outils mAI</span>
+                    <p className="text-zinc-500 text-[11px]">
+                      Exécuter ses requêtes sans confirmation manuelle
+                    </p>
                   </div>
-                )}
-                <p className="text-zinc-600 text-[10px] font-mono">{maiDefaultModel}</p>
+                  <input
+                    type="checkbox"
+                    checked={maiAutoApproveTools}
+                    onChange={(e) => setMaiAutoApproveTools(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                  <div>
+                    <span className="font-semibold text-white">Posts marqués IA par défaut</span>
+                    <p className="text-zinc-500 text-[11px]">
+                      Badge « Créé avec l'IA » activé automatiquement
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={postsAIGeneratedByDefault}
+                    onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
               </div>
 
-              {/* Voix de lecture mAI (mini-lecteur audio) */}
-              <div className="space-y-1.5">
-                <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
-                  <Volume2 className="w-3 h-3" />
-                  Voix de lecture mAI
-                </label>
-                <p className="text-zinc-500 text-[11px]">
-                  Voix utilisée par le mini-lecteur audio flottant pour lire vos posts et fils de discussion.
-                </p>
-                {voices.length > 0 ? (
-                  <select
-                    value={maiTtsVoice}
-                    onChange={(e) => setMaiTtsVoice(e.target.value)}
-                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
-                  >
-                    {voices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name || v.id}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="flex items-center gap-2 text-zinc-500 py-1">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Chargement des voix…</span>
-                  </div>
-                )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-zinc-900">
+                {/* Modèle mAI par défaut */}
+                <div className="space-y-1.5">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                    <Cpu className="w-3 h-3 text-zinc-400" />
+                    Modèle mAI par défaut
+                  </label>
+                  {models.length > 0 ? (
+                    <select
+                      value={maiDefaultModel}
+                      onChange={(e) => setMaiDefaultModel(e.target.value)}
+                      className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                    >
+                      {models.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}{m.provider ? ` — ${m.provider}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="flex items-center gap-2 text-zinc-500 py-1">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Chargement des modèles…</span>
+                    </div>
+                  )}
+                  <p className="text-zinc-600 text-[10px] font-mono truncate">{maiDefaultModel}</p>
+                </div>
+
+                {/* Voix de lecture mAI */}
+                <div className="space-y-1.5">
+                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
+                    <Volume2 className="w-3 h-3 text-zinc-400" />
+                    Voix de lecture mAI
+                  </label>
+                  {voices.length > 0 ? (
+                    <select
+                      value={maiTtsVoice}
+                      onChange={(e) => setMaiTtsVoice(e.target.value)}
+                      className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                    >
+                      {voices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name || v.id}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="flex items-center gap-2 text-zinc-500 py-1">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Chargement des voix…</span>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -846,8 +1131,8 @@ export const SettingsPage: React.FC = () => {
           </div>
         </form>
 
-        {/* Section 5: Données & Compte */}
-        <div className="p-5 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+        {/* Section Données & Compte */}
+        <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
           <div className="flex items-center gap-2 text-white font-bold text-sm">
             <Download className="w-4 h-4 text-white" />
             <span>Données personnelles & Export</span>

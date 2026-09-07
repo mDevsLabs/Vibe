@@ -186,19 +186,12 @@ export const BooksPage: React.FC = () => {
         ) : (
           <div className="divide-y divide-zinc-800">
             {posts.map((p) => (
-              <div key={p.id} className="relative">
-                <PostCard
-                  post={p}
-                  onPostDeleted={(id) => handleRemoveFromBook(id)}
-                />
-                <button
-                  onClick={() => handleRemoveFromBook(p.id)}
-                  className="absolute top-3 right-3 z-10 p-1.5 rounded-full bg-black/60 text-zinc-500 hover:text-red-400 border border-zinc-800"
-                  title="Retirer du Livre"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              <PostCard
+                key={p.id}
+                post={p}
+                onPostDeleted={(id) => handleRemoveFromBook(id)}
+                onRemoveFromBook={(id) => handleRemoveFromBook(id)}
+              />
             ))}
           </div>
         )}

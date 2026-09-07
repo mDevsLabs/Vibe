@@ -107,6 +107,32 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       });
     } catch (err: any) {
       if (token !== playTokenRef.current) return;
+
+      // Fallback Web Speech API (speechSynthesis) transparent si le serveur n'est pas joignable
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(text.slice(0, 2000));
+          utterance.lang = 'fr-FR';
+          if (speed) utterance.rate = speed;
+          setIsLoading(false);
+          setCurrent({ ...nextSegment, url: 'web-speech' });
+          setIsPlaying(true);
+          utterance.onend = () => {
+            setIsPlaying(false);
+            void playNext();
+          };
+          utterance.onerror = () => {
+            setIsPlaying(false);
+            void playNext();
+          };
+          window.speechSynthesis.speak(utterance);
+          return;
+        } catch {
+          // Erreur Web Speech, on continue vers le toast
+        }
+      }
+
       setIsLoading(false);
       NotificationService.showInAppToast(
         'Lecture mAI indisponible',
@@ -116,7 +142,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       // Passe au segment suivant en cas d'échec de génération
       void playNext();
     }
-  }, [pushUpcoming]);
+  }, [pushUpcoming, speed]);
 
   const playQueue = useCallback((segments: AudioSegmentRequest[]) => {
     queueRef.current = segments.filter((s) => s && s.text && s.text.trim());
@@ -130,6 +156,16 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [current, isLoading, playNext, pushUpcoming]);
 
   const toggle = useCallback(() => {
+    if (current?.url === 'web-speech' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      if (isPlaying) {
+        window.speechSynthesis.pause();
+        setIsPlaying(false);
+      } else {
+        window.speechSynthesis.resume();
+        setIsPlaying(true);
+      }
+      return;
+    }
     const audio = audioRef.current;
     if (!audio || !current) return;
     if (audio.paused) {
@@ -137,14 +173,20 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     } else {
       audio.pause();
     }
-  }, [current]);
+  }, [current, isPlaying]);
 
   const next = useCallback(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     playTokenRef.current += 1;
     void playNext();
   }, [playNext]);
 
   const prev = useCallback(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     const audio = audioRef.current;
     // Redémarre le segment courant s'il est avancé, sinon segment précédent
     if (audio && audio.currentTime > 3) {
@@ -169,6 +211,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [speed]);
 
   const close = useCallback(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     playTokenRef.current += 1;
     queueRef.current = [];
     pushUpcoming([]);

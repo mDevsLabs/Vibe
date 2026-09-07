@@ -35,7 +35,7 @@ function stripCodeFences(raw: string): string {
 }
 
 /** Nettoie la sortie LLM : supprime guillemets englobants et méta-commentaires. */
-function cleanLlmText(raw: string): string {
+export function cleanLlmText(raw: string): string {
   let text = stripCodeFences(String(raw || ""));
   text = text.replace(/^User Safety:[^\n]*\n*/gi, "");
   // Guillemets englobants uniquement (pas les guillemets internes)
@@ -46,7 +46,7 @@ function cleanLlmText(raw: string): string {
 }
 
 /** Extrait le premier objet JSON d'une réponse LLM (tolérant aux fences). */
-function extractJsonObject(raw: string): Record<string, any> | null {
+export function extractJsonObject(raw: string): Record<string, any> | null {
   const text = stripCodeFences(raw);
   const start = text.indexOf("{");
   if (start === -1) return null;
@@ -62,7 +62,7 @@ function extractJsonObject(raw: string): Record<string, any> | null {
 }
 
 /** Débite le quota hebdomadaire mAI (estimation ~1 token / 3 caractères). */
-async function debitWeeklyTokens(sql: any, userId: number, chars: number) {
+export async function debitWeeklyTokens(sql: any, userId: number, chars: number) {
   const { weekStartStr } = getWeekData();
   const tokens = Math.max(60, Math.ceil(chars / 3));
   try {
@@ -208,12 +208,13 @@ export function registerVibeAIRoutes(app: Hono) {
       const content = String(postRows[0].content || "").trim();
       if (!content) return c.json({ error: "Publication vide." }, 400);
 
+      const altTarget = targetLang.slice(0, 2) === "FR" ? "EN-US" : "FR";
       const system =
         "Tu es le moteur de traduction du réseau social Vibe. On te donne une publication. " +
         "1) Détecte sa langue d'origine. " +
-        `2) Traduis-la fidèlement en ${langLabel(targetLang)} : sens EXACT, ton préservé, ton naturel de réseau social. ` +
+        `2) Traduis-la fidèlement en ${langLabel(targetLang)} (ou en ${langLabel(altTarget)} si elle est déjà rédigée en ${langLabel(targetLang)}) : sens EXACT, ton préservé, ton naturel de réseau social. ` +
         "Conserve les hashtags, mentions @, émojis et liens tels quels (ne les traduis pas). " +
-        'Réponds UNIQUEMENT par un objet JSON strict : {"detected_language": "<nom de la langue d\'origine en français>", "translation": "<traduction>"} — sans guillemets markdown ni commentaire.';
+        'Réponds UNIQUEMENT par un objet JSON strict : {"detected_language": "<nom de la langue d\'origine en français>", "target_language": "<nom de la langue cible>", "translation": "<traduction>"} — sans guillemets markdown ni commentaire.';
 
       const raw = await MAIAgentFleet.callOpenRouter(userId, system, content);
       if (!raw) return c.json({ error: "mAI est indisponible pour le moment (modèle ou clé IA)." }, 502);
@@ -223,9 +224,13 @@ export function registerVibeAIRoutes(app: Hono) {
       const parsed = extractJsonObject(raw);
       let detected = "";
       let translation = "";
+      let effectiveTarget = targetLang;
       if (parsed && typeof parsed.translation === "string" && parsed.translation.trim()) {
         detected = String(parsed.detected_language || "").trim();
         translation = cleanLlmText(parsed.translation);
+        if (parsed.target_language && String(parsed.target_language).toLowerCase().includes("anglais")) {
+          effectiveTarget = "EN-US";
+        }
       } else {
         // Repli : la réponse entière est la traduction
         translation = cleanLlmText(raw);
@@ -236,12 +241,12 @@ export function registerVibeAIRoutes(app: Hono) {
       try {
         await sql`
           INSERT INTO post_translations (post_id, target_lang, detected_language, translation)
-          VALUES (${postId}::uuid, ${targetLang}, ${detected}, ${translation})
-          ON CONFLICT (post_id, target_lang) DO NOTHING
+          VALUES (${postId}::uuid, ${effectiveTarget}, ${detected}, ${translation})
+          ON CONFLICT (post_id, target_lang) DO UPDATE SET translation = EXCLUDED.translation, detected_language = EXCLUDED.detected_language
         `;
       } catch {}
 
-      return c.json({ success: true, translation, detected_language: detected, cached: false });
+      return c.json({ success: true, translation, detected_language: detected, target_lang: effectiveTarget, cached: false });
     } catch (err: any) {
       console.error("[vibe-ai] Translate error:", err);
       return c.json({ error: err?.message || "Erreur traduction mAI." }, 500);

@@ -28,9 +28,8 @@ export const VibeLogo: React.FC<VibeLogoProps> = ({
         />
       </div>
       {showText && (
-        <span className="font-extrabold text-xl tracking-tight text-white flex items-center gap-1">
-          <span>Vibe</span>
-          <span className="text-[10px] font-mono font-normal px-1.5 py-0.5 rounded-full bg-zinc-800 text-zinc-400">mAI</span>
+        <span className="font-extrabold text-xl tracking-tight text-white">
+          Vibe
         </span>
       )}
     </div>

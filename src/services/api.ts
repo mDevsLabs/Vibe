@@ -31,6 +31,72 @@ export const API_BASE =
     : 'https://mai.val.run');
 
 // ─────────────────────────────────────────────
+// TRADUCTION (DeepL) — langues cibles & résolution de la langue utilisateur
+// ─────────────────────────────────────────────
+/** Résultat de POST /v1/translate (DeepL, repli mAI côté serveur). */
+export interface TranslateResult {
+  success: boolean;
+  detected_language: string;
+  translation: string;
+  target_lang?: string;
+  /** Moteur réellement utilisé : 'deepl' ou 'mai' (repli). */
+  provider?: 'deepl' | 'mai';
+  /** true si le contenu source est déjà dans la langue cible. */
+  same_language?: boolean;
+  cached?: boolean;
+}
+
+/** Langues cibles supportées par DeepL (libellés français). */
+export const TRANSLATION_LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: 'AR', label: 'Arabe' },
+  { code: 'BG', label: 'Bulgare' },
+  { code: 'CS', label: 'Tchèque' },
+  { code: 'DA', label: 'Danois' },
+  { code: 'DE', label: 'Allemand' },
+  { code: 'EL', label: 'Grec' },
+  { code: 'EN-US', label: 'Anglais (États-Unis)' },
+  { code: 'EN-GB', label: 'Anglais (Royaume-Uni)' },
+  { code: 'ES', label: 'Espagnol' },
+  { code: 'ET', label: 'Estonien' },
+  { code: 'FI', label: 'Finnois' },
+  { code: 'FR', label: 'Français' },
+  { code: 'HE', label: 'Hébreu' },
+  { code: 'HU', label: 'Hongrois' },
+  { code: 'ID', label: 'Indonésien' },
+  { code: 'IT', label: 'Italien' },
+  { code: 'JA', label: 'Japonais' },
+  { code: 'KO', label: 'Coréen' },
+  { code: 'LT', label: 'Lituanien' },
+  { code: 'LV', label: 'Letton' },
+  { code: 'NB', label: 'Norvégien' },
+  { code: 'NL', label: 'Néerlandais' },
+  { code: 'PL', label: 'Polonais' },
+  { code: 'PT-BR', label: 'Portugais (Brésil)' },
+  { code: 'PT-PT', label: 'Portugais (Portugal)' },
+  { code: 'RO', label: 'Roumain' },
+  { code: 'RU', label: 'Russe' },
+  { code: 'SK', label: 'Slovaque' },
+  { code: 'SL', label: 'Slovène' },
+  { code: 'SV', label: 'Suédois' },
+  { code: 'TR', label: 'Turc' },
+  { code: 'UK', label: 'Ukrainien' },
+  { code: 'VI', label: 'Vietnamien' },
+  { code: 'ZH', label: 'Chinois' },
+];
+
+/** Convertit une langue de navigateur (« fr-FR ») en code DeepL (« FR »). */
+export function browserToDeepLCode(tag: string): string {
+  const lower = String(tag || '').trim().toLowerCase();
+  if (!lower) return 'EN-US';
+  const region = (lower.split('-')[1] || '').toUpperCase();
+  const base = lower.slice(0, 2);
+  if (base === 'en') return region === 'GB' ? 'EN-GB' : 'EN-US';
+  if (base === 'pt') return region === 'BR' ? 'PT-BR' : 'PT-PT';
+  const generic = TRANSLATION_LANGUAGES.find((l) => l.code.toLowerCase() === base);
+  return generic ? generic.code : 'EN-US';
+}
+
+// ─────────────────────────────────────────────
 // CACHE GET (TTL court) + dédoublonnage des requêtes en vol.
 // Réduit fortement les latences perçues (feed, profils, DMs…).
 // Tout POST/PUT/DELETE invalide le cache pour rester cohérent.
@@ -102,6 +168,18 @@ export class ApiService {
   public static removeToken() {
     AppStorage.removeItem('vibe_jwt_token');
     AppStorage.removeItem('vibe_user_data');
+  }
+
+  /** Langue cible de traduction : réglage utilisateur (miroir local), sinon langue du navigateur. */
+  public static resolveTargetLanguage(): string {
+    const stored = String(AppStorage.getItem('vibe_ui_language') || '').trim().toUpperCase();
+    if (stored && TRANSLATION_LANGUAGES.some((l) => l.code === stored)) return stored;
+    return browserToDeepLCode(typeof navigator !== 'undefined' ? navigator.language : '');
+  }
+
+  /** Miroir local de la langue de traduction (évite un appel settings à chaque traduction). */
+  public static setUiLanguageMirror(lang: string) {
+    AppStorage.setItem('vibe_ui_language', lang);
   }
 
   private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -725,6 +803,14 @@ export class ApiService {
     return this.request(`/v1/dms/messages/${messageId}`, { method: 'DELETE' });
   }
 
+  public static async editMessage(messageId: string, content: string): Promise<{ success: boolean; message: DirectMessage }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ content }),
+    });
+  }
+
   /** Heartbeat « en train d'écrire » d'un DM (throttlé côté appelant). */
   public static async sendTyping(partnerId: string | number, typing: boolean = true): Promise<void> {
     const payload = JSON.stringify({ partner_id: partnerId, typing });
@@ -789,16 +875,23 @@ export class ApiService {
     }
   }
 
-  /** Traduction « Traduire avec mAI » : détection de langue + traduction (cache serveur). */
-  public static async translatePost(
-    postId: string,
-    targetLang: string = 'fr'
-  ): Promise<{ success: boolean; detected_language: string; translation: string; cached?: boolean }> {
+  /** Traduction d'une publication (DeepL, repli mAI côté serveur, cache inclus). */
+  public static async translatePost(postId: string, targetLang: string): Promise<TranslateResult> {
     const payload = JSON.stringify({ post_id: postId, target_lang: targetLang });
     try {
-      return await this.request('/v1/ai/translate', { method: 'POST', body: payload });
+      return await this.request('/v1/translate', { method: 'POST', body: payload });
     } catch {
-      return await this.request('/api/vibe/ai/translate', { method: 'POST', body: payload });
+      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
+    }
+  }
+
+  /** Traduction d'un commentaire/réponse (DeepL, repli mAI côté serveur). */
+  public static async translateComment(commentId: string, targetLang: string): Promise<TranslateResult> {
+    const payload = JSON.stringify({ comment_id: commentId, target_lang: targetLang });
+    try {
+      return await this.request('/v1/translate', { method: 'POST', body: payload });
+    } catch {
+      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
     }
   }
 
@@ -818,30 +911,29 @@ export class ApiService {
   public static async textToSpeech(text: string, voice?: string): Promise<{ url: string }> {
     const payload = JSON.stringify({
       input: text,
+      model: 'deepgram/flux-tts:free',
       voice: voice || undefined,
       return_json: true,
     });
-    const doFetch = async (endpoint: string): Promise<{ url: string }> => {
-      const token = this.getToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      };
-      const res = await fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers, body: payload });
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `Erreur synthèse vocale (${res.status})`);
+
+    const endpoints = ['/v1/speech', '/speech', '/v1/audio/speech', '/api/vibe/speech'];
+    let lastError: any = null;
+
+    for (const ep of endpoints) {
+      try {
+        const json = await this.request<any>(ep, {
+          method: 'POST',
+          body: payload,
+        });
+        const audioUrl = json?.audio_url || json?.audioContent;
+        if (audioUrl) {
+          return { url: audioUrl };
+        }
+      } catch (err: any) {
+        lastError = err;
       }
-      const json = await res.json();
-      const audioUrl = json?.audio_url || json?.audioContent;
-      if (!audioUrl) throw new Error('Réponse audio invalide.');
-      return { url: audioUrl };
-    };
-    try {
-      return await doFetch('/v1/speech');
-    } catch {
-      return await doFetch('/api/vibe/speech');
     }
+    throw lastError || new Error('Réponse audio invalide.');
   }
 
   // ─────────────────────────────────────────────
@@ -1137,6 +1229,59 @@ export class ApiService {
       return await this.request('/v1/notifications/read', { method: 'POST' });
     } catch {
       return await this.request('/api/vibe/notifications/read', { method: 'POST' });
+    }
+  }
+
+  public static async markNotificationRead(id: string, isRead = true): Promise<{ success: boolean }> {
+    const payload = JSON.stringify({ id, is_read: isRead });
+    try {
+      return await this.request(`/v1/notifications/${encodeURIComponent(id)}/read`, {
+        method: 'POST',
+        body: payload,
+      });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/read', {
+          method: 'POST',
+          body: payload,
+        });
+      } catch {
+        return await this.request('/api/vibe/notifications/read', {
+          method: 'POST',
+          body: payload,
+        });
+      }
+    }
+  }
+
+  public static async deleteNotification(id: string): Promise<{ success: boolean }> {
+    const payload = JSON.stringify({ id });
+    try {
+      return await this.request(`/v1/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/delete', {
+          method: 'POST',
+          body: payload,
+        });
+      } catch {
+        return await this.request(`/api/vibe/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      }
+    }
+  }
+
+  public static async clearAllNotifications(): Promise<{ success: boolean }> {
+    try {
+      return await this.request('/v1/notifications', { method: 'DELETE' });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/delete', {
+          method: 'POST',
+          body: JSON.stringify({ all: true }),
+        });
+      } catch {
+        return await this.request('/api/vibe/notifications/clear', { method: 'POST' });
+      }
     }
   }
 

@@ -100,6 +100,10 @@ async function migrate() {
     'user_settings.posts_ai_generated_by_default',
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`
   );
+  await runAlter(
+    'user_settings.ui_language',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS ui_language TEXT`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. usage_logs — Ajouter colonne endpoint (manquante selon schéma)
@@ -139,6 +143,22 @@ async function migrate() {
   await runAlter(
     'posts.quoted_post_id',
     `ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id UUID REFERENCES posts(id) ON DELETE SET NULL`
+  );
+  await runAlter(
+    'posts.status',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'published'`
+  );
+  await runAlter(
+    'posts.scheduled_at',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ`
+  );
+  await runAlter(
+    'posts.update_null_status',
+    `UPDATE posts SET status = 'published' WHERE status IS NULL`
+  );
+  await runAlter(
+    'media_assets.comment_id',
+    `ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`
   );
 
   // ─────────────────────────────────────────────────────────────
@@ -187,6 +207,37 @@ async function migrate() {
       comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       UNIQUE (user_id, comment_id)
+    )`
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // 8d. Traductions DeepL (posts + commentaires, cf. translate.ts)
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n🌍 TABLES TRADUCTIONS:');
+  await runAlter(
+    'TABLE post_translations',
+    `CREATE TABLE IF NOT EXISTS post_translations (
+      post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      target_lang TEXT NOT NULL,
+      detected_language TEXT,
+      translation TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (post_id, target_lang)
+    )`
+  );
+  await runAlter(
+    'post_translations.provider',
+    `ALTER TABLE post_translations ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'mai'`
+  );
+  await runAlter(
+    'TABLE comment_translations',
+    `CREATE TABLE IF NOT EXISTS comment_translations (
+      comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      target_lang TEXT NOT NULL,
+      detected_language TEXT,
+      translation TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (comment_id, target_lang)
     )`
   );
 
@@ -359,6 +410,10 @@ async function migrate() {
     ['user_settings.two_factor_auth', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='two_factor_auth'`],
     ['user_settings.allow_mentions', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='allow_mentions'`],
     ['usage_logs.endpoint', `SELECT 1 FROM information_schema.columns WHERE table_name='usage_logs' AND column_name='endpoint'`],
+    ['posts.status', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='status'`],
+    ['posts.scheduled_at', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='scheduled_at'`],
+    ['user_settings.ui_language', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='ui_language'`],
+    ['comment_translations', `SELECT 1 FROM information_schema.tables WHERE table_name='comment_translations'`],
   ];
 
   for (const [name, q] of checks) {

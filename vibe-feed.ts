@@ -12,6 +12,7 @@ import { HybridRecommender } from "./vibe-recommender.ts";
 import { ensureCircleTable } from "./vibe-circle.ts";
 import {
   attachQuotedPosts,
+  ensurePostColumns,
   fetchPostMedia,
   publishDuePosts,
 } from "./vibe-posts.ts";
@@ -39,9 +40,13 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
   if ((app as any).__vibe_feed_registered) return;
   (app as any).__vibe_feed_registered = true;
 
+  // Initialisation paresseuse des colonnes critiques en tâche de fond
+  ensurePostColumns().catch(() => {});
+
   // 1. TIMELINE FEED
   const handleFeed = async (c: any) => {
     try {
+      await ensurePostColumns().catch(() => {});
       const type = c.req.query("type") || "for_you";
       const token = extractToken(c.req.raw);
       let currentUserId: number | null = null;
@@ -94,7 +99,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
-            WHERE p.visibility = 'public' AND p.status = 'published' AND p.content ILIKE ('%' || ${tag} || '%')
+            WHERE p.visibility = 'public' AND COALESCE(p.status, 'published') = 'published' AND p.content ILIKE ('%' || ${tag} || '%')
             ORDER BY (p.likes_count * 3 + p.reposts_count * 2 + p.replies_count * 2) DESC, p.published_at DESC
             LIMIT ${PAGE_SIZE} OFFSET ${rankOffset}
           `;
@@ -109,7 +114,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
-            WHERE p.visibility = 'public' AND p.status = 'published'
+            WHERE p.visibility = 'public' AND COALESCE(p.status, 'published') = 'published'
             ORDER BY (p.likes_count * 3 + p.reposts_count * 2 + p.replies_count * 2) DESC, p.published_at DESC
             LIMIT ${PAGE_SIZE} OFFSET ${rankOffset}
           `;
@@ -154,7 +159,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
             WHERE (
               p.author_id = ${currentUserId}
               OR p.author_id IN (SELECT following_id FROM follows WHERE follower_id = ${currentUserId})
-            ) AND p.status = 'published'
+            ) AND COALESCE(p.status, 'published') = 'published'
               AND (
                 p.visibility = 'public'
                 OR p.author_id = ${currentUserId}
@@ -232,7 +237,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
         FROM posts p
         JOIN users u ON u.id = p.author_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
-        WHERE p.visibility = 'public' AND p.status = 'published'
+        WHERE p.visibility = 'public' AND COALESCE(p.status, 'published') = 'published'
         ORDER BY p.published_at DESC
         LIMIT 300
       `;
@@ -481,6 +486,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
   // 3. SEARCH POSTS
   const handleSearchPosts = async (c: any) => {
     try {
+      await ensurePostColumns().catch(() => {});
       const q = (c.req.query("q") || c.req.query("query") || "").trim();
       if (!q) {
         return c.json({ posts: [], count: 0 });
@@ -509,7 +515,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
         FROM posts p
         JOIN users u ON u.id = p.author_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
-        WHERE p.visibility = 'public' AND p.status = 'published'
+        WHERE p.visibility = 'public' AND COALESCE(p.status, 'published') = 'published'
           AND (
             p.content ILIKE ('%' || ${cleanQ} || '%')
             OR u.username ILIKE ('%' || ${cleanQ} || '%')

@@ -71,6 +71,8 @@ async function ensureDMTables() {
       )
     `;
     await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS reply_to_id UUID`.catch(() => {});
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE`.catch(() => {});
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`.catch(() => {});
     dmTablesReady = true;
   } catch (err) {
     console.warn("[vibe-dms] ensureDMTables skipped:", (err as any)?.message);
@@ -1011,6 +1013,75 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
   registerMulti("delete", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleDeleteMessage);
 
+  // 4d. EDIT DM MESSAGE (avec limite de 60 minutes)
+  const handleEditMessage = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const messageId = c.req.param("messageId");
+
+      if (!messageId) return c.json({ error: "ID du message requis." }, 400);
+
+      const { content } = await c.req.json();
+      if (!content || !content.trim()) {
+        return c.json({ error: "Le contenu du message ne peut pas être vide." }, 400);
+      }
+
+      const sql = getDb();
+      const rows = await sql`
+        SELECT * FROM direct_messages WHERE id = ${messageId}::uuid LIMIT 1
+      `;
+      if (rows.length === 0) {
+        return c.json({ error: "Message introuvable." }, 404);
+      }
+      const msg = rows[0];
+      if (Number(msg.sender_id) !== userId) {
+        return c.json({ error: "Vous ne pouvez modifier que vos propres messages." }, 403);
+      }
+
+      // Vérifier la limite de 60 minutes
+      const createdAt = new Date(msg.created_at).getTime();
+      const now = Date.now();
+      const diffMinutes = (now - createdAt) / (1000 * 60);
+      if (diffMinutes > 60) {
+        return c.json({ error: "Ce message a été envoyé il y a plus de 60 minutes et ne peut plus être modifié." }, 403);
+      }
+
+      const updated = await sql`
+        UPDATE direct_messages
+        SET content = ${content.trim()},
+            is_edited = TRUE,
+            edited_at = NOW()
+        WHERE id = ${messageId}::uuid
+        RETURNING *
+      `;
+
+      // Mettre à jour l'aperçu dans la conversation
+      try {
+        await sql`
+          UPDATE dm_conversations
+          SET last_message_preview = ${content.trim()}
+          WHERE id = ${msg.conversation_id}::uuid
+        `;
+      } catch {}
+
+      // Informer le destinataire en temps réel via SSE
+      try {
+        await pushRealtimeEvent(Number(msg.recipient_id), "dm_message_edited", updated[0]);
+      } catch {}
+
+      return c.json({ success: true, message: updated[0] });
+    } catch (err: any) {
+      console.error("[vibe-dms] Edit message error:", err);
+      return c.json({ error: "Erreur lors de la modification du message." }, 500);
+    }
+  };
+
+  registerMulti("patch", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleEditMessage);
+  registerMulti("put", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleEditMessage);
+
   // 5. NOTIFICATIONS
   const handleNotifications = async (c: any) => {
     try {
@@ -1053,15 +1124,98 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
+      let body: any = {};
+      try {
+        body = await c.req.json();
+      } catch {}
+
+      const rawId = c.req.param?.("id") || body?.id || body?.notification_id;
+      const notifId = rawId ? String(rawId).trim() : null;
       const sql = getDb();
-      await sql`UPDATE notifications SET is_read = TRUE WHERE recipient_id = ${userId}`;
-      return c.json({ success: true });
+      const isReadVal = body?.is_read !== undefined ? Boolean(body.is_read) : true;
+
+      if (notifId && notifId !== "all" && notifId !== "undefined" && notifId !== "null" && notifId !== "") {
+        await sql`
+          UPDATE notifications
+          SET is_read = ${isReadVal}
+          WHERE id::text = ${notifId} AND recipient_id = ${userId}
+        `;
+      } else {
+        await sql`
+          UPDATE notifications
+          SET is_read = ${isReadVal}
+          WHERE recipient_id = ${userId}
+        `;
+      }
+      return c.json({ success: true, is_read: isReadVal, id: notifId });
     } catch (err: any) {
-      return c.json({ error: "Erreur." }, 500);
+      console.error("[vibe-dms] Error in handleMarkNotificationsRead:", err);
+      return c.json({ error: "Erreur marquage notification.", details: err?.message }, 500);
     }
   };
 
-  registerMulti("post", ["/api/vibe/notifications/read", "/vibe/notifications/read", "/v1/notifications/read"], handleMarkNotificationsRead);
+  registerMulti("post", [
+    "/api/vibe/notifications/read",
+    "/vibe/notifications/read",
+    "/v1/notifications/read",
+    "/v1/notifications/:id/read",
+    "/api/vibe/notifications/:id/read"
+  ], handleMarkNotificationsRead);
+  registerMulti("patch", [
+    "/api/vibe/notifications/read",
+    "/v1/notifications/read",
+    "/v1/notifications/:id/read",
+    "/api/vibe/notifications/:id/read"
+  ], handleMarkNotificationsRead);
+
+  const handleDeleteNotification = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+
+      let body: any = {};
+      try {
+        body = await c.req.json();
+      } catch {}
+
+      const rawId = c.req.param?.("id") || body?.id || body?.notification_id;
+      const notifId = rawId ? String(rawId).trim() : null;
+      const sql = getDb();
+
+      if (notifId && notifId !== "all" && notifId !== "clear" && notifId !== "undefined" && notifId !== "null" && notifId !== "") {
+        await sql`
+          DELETE FROM notifications
+          WHERE id::text = ${notifId} AND recipient_id = ${userId}
+        `;
+      } else {
+        await sql`
+          DELETE FROM notifications
+          WHERE recipient_id = ${userId}
+        `;
+      }
+      return c.json({ success: true, deleted_id: notifId || "all" });
+    } catch (err: any) {
+      console.error("[vibe-dms] Error in handleDeleteNotification:", err);
+      return c.json({ error: "Erreur suppression notification.", details: err?.message }, 500);
+    }
+  };
+
+  registerMulti("delete", [
+    "/api/vibe/notifications/:id",
+    "/v1/notifications/:id",
+    "/api/vibe/notifications",
+    "/v1/notifications"
+  ], handleDeleteNotification);
+  registerMulti("post", [
+    "/api/vibe/notifications/:id/delete",
+    "/v1/notifications/:id/delete",
+    "/api/vibe/notifications/delete",
+    "/v1/notifications/delete",
+    "/api/vibe/notifications/clear",
+    "/v1/notifications/clear"
+  ], handleDeleteNotification);
 
   // Compteur léger pour les badges — évite de charger toutes les notifications
   const handleUnreadCount = async (c: any) => {

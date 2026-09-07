@@ -35,9 +35,6 @@ function formatToolReply(toolName: string, result: any, username: string): strin
   if (toolName === "search_web") {
     return `🌐 **Recherche Web mAI** :\n\n${result.snippet}`;
   }
-  if (toolName === "summarize") {
-    return `${result.summary}`;
-  }
   if (toolName === "fact_check") {
     return `🛡️ **Vérification Factuelle mAI** :\n• Affirmation : « ${result.statement} »\n• Résultat : **${result.verdict}** (Indice de confiance : ${result.confidence})\n\n${result.analysis}`;
   }
@@ -158,10 +155,6 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
     if (lower.startsWith("/search") || lower.startsWith("@search") || lower.startsWith("/recherche") || lower.startsWith("@recherche") || lower.startsWith("@web")) {
       const q = cleanMsg.replace(/^[/@](search|recherche|web)\s*:?\s*/i, "").trim();
       return { toolToRun: "search_web", toolArgs: { query: q || "Intelligence artificielle 2026" } };
-    }
-    if (lower.startsWith("/summarize") || lower.startsWith("@summarize") || lower.startsWith("/resumer") || lower.startsWith("@resumer")) {
-      const t = cleanMsg.replace(/^[/@](summarize|resumer)\s*:?\s*/i, "").trim();
-      return { toolToRun: "summarize", toolArgs: { target: t || "récents" } };
     }
     if (lower.startsWith("/fact_check") || lower.startsWith("@fact_check") || lower.startsWith("/verifier") || lower.startsWith("@verifier")) {
       const s = cleanMsg.replace(/^[/@](fact_check|verifier)\s*:?\s*/i, "").trim();

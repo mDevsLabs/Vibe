@@ -15,10 +15,12 @@ import {
   Loader2,
   AlertCircle,
   Image as ImageIcon,
+  Languages,
   X,
 } from 'lucide-react';
 import { Comment, MediaAsset } from '../../types/vibe';
-import { ApiService } from '../../services/api';
+import { ApiService, TRANSLATION_LANGUAGES } from '../../services/api';
+import { NotificationService } from '../../services/notificationService';
 import { useAuth } from '../../context/AuthContext';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
@@ -56,6 +58,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  // Traduction DeepL par commentaire (repli mAI côté serveur)
+  const [commentTranslations, setCommentTranslations] = useState<Record<string, { text: string; language: string; targetLanguage?: string; provider?: string }>>({});
+  const [translatingId, setTranslatingId] = useState<string | null>(null);
 
   // Composer de réponse : contenu riche + médias
   const [contentText, setContentText] = useState('');
@@ -242,6 +247,44 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
   };
 
+  /** Traduction DeepL d'un commentaire (repli mAI côté serveur, cache inclus). */
+  const handleTranslateComment = async (cm: Comment) => {
+    const id = String(cm.id);
+    if (translatingId || commentTranslations[id]) return;
+    setTranslatingId(id);
+    try {
+      const userLang = ApiService.resolveTargetLanguage();
+      let res = await ApiService.translateComment(id, userLang);
+      // Si le commentaire est déjà dans la langue cible (ex : en français pour cible FR),
+      // on traduit vers l'anglais (ou le français si la cible initiale était l'anglais).
+      if (res?.same_language) {
+        const altLang = userLang.slice(0, 2).toUpperCase() === 'FR' ? 'EN-US' : 'FR';
+        res = await ApiService.translateComment(id, altLang);
+      }
+      if (res?.translation && !res.same_language) {
+        const rawLang = res.detected_language || '';
+        const prettyLang = rawLang
+          ? res.provider === 'deepl'
+            ? TRANSLATION_LANGUAGES.find((l) => l.code === rawLang.toUpperCase())?.label || rawLang
+            : rawLang
+          : '';
+        const targetLabel = res.target_lang
+          ? TRANSLATION_LANGUAGES.find((l) => l.code === res.target_lang?.toUpperCase())?.label || res.target_lang
+          : (userLang.slice(0, 2).toUpperCase() === 'FR' && rawLang.toUpperCase().startsWith('FR') ? 'Anglais' : undefined);
+        setCommentTranslations((prev) => ({
+          ...prev,
+          [id]: { text: res.translation, language: prettyLang, targetLanguage: targetLabel, provider: res.provider },
+        }));
+      } else {
+        NotificationService.showInAppToast('Traduction indisponible', "La traduction n'a pas pu être récupérée.", 'error');
+      }
+    } catch (err: any) {
+      NotificationService.showInAppToast('Traduction impossible', err?.message || "La traduction n'a pas pu être récupérée.", 'error');
+    } finally {
+      setTranslatingId(null);
+    }
+  };
+
   const renderCommentMedia = (assets: MediaAsset[]) => {
     const images = assets.filter((m) => !isVideoAsset(m));
     const videos = assets.filter(isVideoAsset);
@@ -310,6 +353,42 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
         <div className="text-xs text-zinc-200 pl-8">
           <RichContent content={cm.content} />
         </div>
+        {translatingId === String(cm.id) && (
+          <div className="flex items-center gap-2 text-[11px] text-zinc-500 pl-8">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>Traduction en cours…</span>
+          </div>
+        )}
+        {commentTranslations[String(cm.id)] && (
+          <div className="pl-8">
+            <div className="pl-2.5 border-l-2 border-zinc-700">
+              <div className="text-xs text-zinc-300 leading-relaxed break-words">
+                <RichContent content={commentTranslations[String(cm.id)].text} />
+              </div>
+              <div className="mt-1 flex items-center gap-3 text-[11px]">
+                <span className="text-zinc-600">
+                  {commentTranslations[String(cm.id)].targetLanguage
+                    ? `Traduit en ${commentTranslations[String(cm.id)].targetLanguage} via mAI`
+                    : commentTranslations[String(cm.id)].language
+                    ? `Traduit de l'« ${commentTranslations[String(cm.id)].language} » via mAI`
+                    : `Traduit via mAI`}
+                </span>
+                <button
+                  onClick={() =>
+                    setCommentTranslations((prev) => {
+                      const next = { ...prev };
+                      delete next[String(cm.id)];
+                      return next;
+                    })
+                  }
+                  className="text-zinc-500 hover:text-white transition-colors font-bold"
+                >
+                  Afficher l'original
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {cm.media_assets && cm.media_assets.length > 0 && (
           <div className="pl-8">{renderCommentMedia(cm.media_assets)}</div>
         )}
@@ -323,6 +402,16 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
             <Heart className={`w-3.5 h-3.5 ${liked ? 'fill-rose-500' : ''}`} />
             <span>{cm.likes_count || 0}</span>
           </button>
+          {!commentTranslations[String(cm.id)] && translatingId !== String(cm.id) && (
+            <button
+              onClick={() => handleTranslateComment(cm)}
+              className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-white transition-colors"
+              title="Traduire ce commentaire (mAI)"
+            >
+              <Languages className="w-3.5 h-3.5" />
+              <span>Traduire</span>
+            </button>
+          )}
         </div>
       </div>
     );
@@ -337,7 +426,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
             <Sparkles className="w-3.5 h-3.5 text-white" />
             <span>Synthèse mAI des échanges</span>
           </div>
-          <p className="text-xs text-zinc-300 leading-relaxed">{aiDigest}</p>
+          <RichContent content={aiDigest} className="text-xs text-zinc-300 leading-relaxed" />
         </div>
       )}
 

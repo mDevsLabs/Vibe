@@ -1224,8 +1224,10 @@ export async function runSubscriptionCodeManager() {
 export async function initCustomersTable() {
   try {
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`;
+    await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`;
   } catch (err: any) {
-    console.error("ℹ Note lors de la vérification de la colonne is_blocked dans users :", err.message || err);
+    console.error("ℹ Note lors de la vérification des colonnes dans users/profiles :", err.message || err);
   }
 }
 
@@ -1235,14 +1237,23 @@ export async function initAccountAuditTable() {
       CREATE TABLE IF NOT EXISTS user_account_actions (
         id SERIAL PRIMARY KEY,
         user_id VARCHAR(100) NOT NULL,
-        action VARCHAR(20) NOT NULL CHECK (action IN ('block','unblock','delete','restore')),
+        action VARCHAR(50) NOT NULL,
         reason TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `;
     await sql`CREATE INDEX IF NOT EXISTS idx_user_account_actions_user_id ON user_account_actions(user_id)`;
+    await sql`
+      DO $$
+      BEGIN
+        ALTER TABLE user_account_actions DROP CONSTRAINT IF EXISTS user_account_actions_action_check;
+        ALTER TABLE user_account_actions ALTER COLUMN action TYPE VARCHAR(50);
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END $$;
+    `;
   } catch (err: any) {
-    console.error("ℹ Note lors de la création de la table d audit :", err.message || err);
+    console.error("ℹ Note lors de la création de la table d'audit :", err.message || err);
   }
 }
 
@@ -1252,31 +1263,37 @@ function renderCustomersTable(customers: any[]) {
     return;
   }
 
-  console.log("\n" + "═".repeat(110));
+  console.log("\n" + "═".repeat(120));
   console.log(
-    `║ ${"ID/UUID".padEnd(36)} ║ ${"USERNAME".padEnd(20)} ║ ${"EMAIL".padEnd(25)} ║ ${"TIER".padEnd(6)} ║ ${"STATUT".padEnd(10)} ║`
+    `║ ${"ID".padEnd(6)} ║ ${"USERNAME".padEnd(18)} ║ ${"NOM AFFICHÉ".padEnd(20)} ║ ${"TIER".padEnd(6)} ║ ${"VÉRIFIÉ".padEnd(10)} ║ ${"POSTS".padEnd(7)} ║ ${"STATUT".padEnd(10)} ║`
   );
-  console.log("═".repeat(110));
+  console.log("═".repeat(120));
 
   for (const user of customers) {
-    const id = String(user.id || "").padEnd(36);
-    const username = String(user.username || "").padEnd(20);
-    const email = String(user.email || "").padEnd(25);
+    const id = String(user.id || "").padEnd(6);
+    const username = String(user.username || "").padEnd(18).substring(0, 18);
+    const displayName = String(user.display_name || "-").padEnd(20).substring(0, 20);
     const tier = String(user.tier || "Free").padEnd(6);
+    const isVerified = Boolean(user.is_verified);
+    const verifiedBadge = isVerified ? "🔵 Oui" : "⚪ Non";
+    const postsCount = String(user.posts_count ?? 0).padEnd(7);
     const status = (user.is_blocked ? "🔴 Bloqué" : "🟢 Actif").padEnd(10);
 
-    console.log(`║ ${id} ║ ${username} ║ ${email} ║ ${tier} ║ ${status} ║`);
+    console.log(`║ ${id} ║ ${username} ║ ${displayName} ║ ${tier} ║ ${verifiedBadge.padEnd(10)} ║ ${postsCount} ║ ${status} ║`);
   }
-  console.log("═".repeat(110) + "\n");
+  console.log("═".repeat(120) + "\n");
 }
 
 async function handleListCustomers() {
   console.log(`\n${c.bold}--- 📋 LISTE DES COMPTES CLIENTS ---${c.reset}`);
   try {
     const customers = await sql`
-      SELECT id, username, email, tier, is_blocked 
-      FROM users 
-      ORDER BY id ASC;
+      SELECT u.id, u.username, u.email, u.tier, u.is_blocked,
+             (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
+             pr.display_name, pr.posts_count, pr.followers_count
+      FROM users u
+      LEFT JOIN profiles pr ON pr.user_id = u.id
+      ORDER BY u.id ASC;
     `;
     renderCustomersTable(customers);
   } catch (err: any) {
@@ -1284,13 +1301,18 @@ async function handleListCustomers() {
   }
 }
 
-// Liste numérotée des clients et sélection précise par l'administrateur.
+// Liste numérotée des clients et sélection précise par l'administrateur
 async function pickCustomer(rl: readline.Interface, actionLabel: string): Promise<any | null> {
   let filter = "";
   while (true) {
     let customers = await sql`
-      SELECT id, username, email, tier, is_blocked FROM users 
-      ORDER BY username ASC;
+      SELECT u.id, u.username, u.email, u.tier, u.is_blocked,
+             (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
+             pr.display_name, pr.bio, pr.avatar_url, pr.banner_url, pr.website, pr.location,
+             pr.followers_count, pr.following_count, pr.posts_count
+      FROM users u
+      LEFT JOIN profiles pr ON pr.user_id = u.id
+      ORDER BY u.username ASC;
     `;
     const term = filter.trim().toLowerCase();
     if (term) {
@@ -1298,34 +1320,37 @@ async function pickCustomer(rl: readline.Interface, actionLabel: string): Promis
         (u: any) =>
           String(u.username || "").toLowerCase().includes(term) ||
           String(u.email || "").toLowerCase().includes(term) ||
+          String(u.display_name || "").toLowerCase().includes(term) ||
           String(u.id || "").toLowerCase().includes(term)
       );
     }
 
-    console.log(`\n${c.bold}--- 🚫 ${actionLabel} : SÉLECTION DU CLIENT ---${c.reset}`);
+    console.log(`\n${c.bold}--- 👤 ${actionLabel} : SÉLECTION DU CLIENT ---${c.reset}`);
     if (customers.length === 0) {
       console.log(`    ${c.brightYellow}⚠️  Aucun client ne correspond au filtre "${filter}".${c.reset}`);
     } else {
-      console.log("    " + "─".repeat(70));
-      console.log(`    #  | ${c.bold}${"CLIENT".padEnd(42)}${c.reset} | ${c.bold}${"STATUT".padEnd(10)}${c.reset}`);
-      console.log("    " + "─".repeat(70));
+      console.log("    " + "─".repeat(88));
+      console.log(`    #  | ${c.bold}${"CLIENT / EMAIL".padEnd(38)}${c.reset} | ${c.bold}${"TIER".padEnd(8)}${c.reset} | ${c.bold}${"VÉRIFIÉ".padEnd(10)}${c.reset} | ${c.bold}${"STATUT".padEnd(10)}${c.reset}`);
+      console.log("    " + "─".repeat(88));
       customers.forEach((u: any, idx: number) => {
         const label = `${u.username || "?"} <${u.email || "?"}>`;
+        const tierBadge = `[${u.tier || "Free"}]`.padEnd(8);
+        const verifiedBadge = u.is_verified ? `${c.brightCyan}🔵 Oui${c.reset}` : `${c.dim}⚪ Non${c.reset}`;
         const status = u.is_blocked ? `${c.red}🔴 Bloqué${c.reset}` : `${c.green}🟢 Actif${c.reset}`;
-        console.log(`    ${String(idx + 1).padStart(2)}  | ${label.padEnd(46)} | ${status}`);
+        console.log(`    ${String(idx + 1).padStart(2)} | ${label.padEnd(42).substring(0, 42)} | ${tierBadge} | ${verifiedBadge.padEnd(14)} | ${status}`);
       });
-      console.log("    " + "─".repeat(70));
+      console.log("    " + "─".repeat(88));
     }
 
-    const input = (
+    const inputVal = (
       await rl.question(
         `👉 Numéro du client à sélectionner (ou texte pour filtrer, ${c.bold}0${c.reset} pour annuler) : `
       )
     ).trim();
-    if (!input) continue;
+    if (!inputVal) continue;
 
-    if (/^\d+$/.test(input)) {
-      const n = parseInt(input, 10);
+    if (/^\d+$/.test(inputVal)) {
+      const n = parseInt(inputVal, 10);
       if (n === 0) {
         console.log(`${c.dim}↩️  Annulé.${c.reset}`);
         return null;
@@ -1338,7 +1363,296 @@ async function pickCustomer(rl: readline.Interface, actionLabel: string): Promis
       return chosen;
     }
 
-    filter = input;
+    filter = inputVal;
+  }
+}
+
+async function getFullCustomerProfile(userId: number | string) {
+  const rows = await sql`
+    SELECT u.id, u.username, u.email, u.tier, u.is_blocked, u.avatar_url as user_avatar,
+           (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as effective_verified,
+           COALESCE(u.is_verified, FALSE) as is_verified,
+           pr.id as profile_id, pr.display_name, pr.bio, pr.avatar_url as profile_avatar,
+           pr.banner_url, pr.website, pr.website_url, pr.location, pr.status_emoji, pr.status_text,
+           pr.followers_count, pr.following_count, pr.posts_count
+    FROM users u
+    LEFT JOIN profiles pr ON pr.user_id = u.id
+    WHERE u.id = ${Number(userId)}
+    LIMIT 1
+  `;
+  return rows[0] || null;
+}
+
+function renderProfileCard(user: any, actualPostsCount?: number) {
+  const verifiedBadge = user.effective_verified ? `${c.brightCyan}🔵 VÉRIFIÉ (Actif)${c.reset}` : `${c.dim}⚪ Non vérifié${c.reset}`;
+  const statusBadge = user.is_blocked ? `${c.red}🔴 Bloqué${c.reset}` : `${c.green}🟢 Actif${c.reset}`;
+  const tierBadge = `[${user.tier || 'Free'}]`;
+
+  console.log("\n" + "╔".padEnd(68, "═") + "╗");
+  console.log(`║ ${c.bold}PROFIL UTILISATEUR : @${user.username}${c.reset}`.padEnd(76) + "║");
+  console.log("╠".padEnd(68, "═") + "╣");
+  console.log(`║  ${c.dim}ID :${c.reset} ${String(user.id).padEnd(20)} ${c.dim}Statut :${c.reset} ${statusBadge}`);
+  console.log(`║  ${c.dim}Email :${c.reset} ${String(user.email).padEnd(28)} ${c.dim}Tier :${c.reset} ${tierBadge}`);
+  console.log(`║  ${c.dim}Badge Vérifié :${c.reset} ${verifiedBadge}`);
+  console.log("╟".padEnd(68, "─") + "╢");
+  console.log(`║  ${c.dim}Nom affiché :${c.reset} ${user.display_name || '(aucun)'}`);
+  console.log(`║  ${c.dim}Bio :${c.reset} ${user.bio ? user.bio.substring(0, 50) + (user.bio.length > 50 ? '…' : '') : '(vide)'}`);
+  console.log(`║  ${c.dim}Localisation :${c.reset} ${user.location || '(non renseignée)'}`);
+  console.log(`║  ${c.dim}Site web :${c.reset} ${user.website || user.website_url || '(aucun)'}`);
+  console.log(`║  ${c.dim}Avatar :${c.reset} ${user.profile_avatar || user.user_avatar || '(par défaut)'}`);
+  console.log(`║  ${c.dim}Bannière :${c.reset} ${user.banner_url || '(par défaut)'}`);
+  console.log("╟".padEnd(68, "─") + "╢");
+  const postsInfo = actualPostsCount !== undefined && actualPostsCount !== user.posts_count
+    ? `${user.posts_count || 0} (⚠️ réel en base : ${actualPostsCount})`
+    : `${user.posts_count || 0}`;
+  console.log(`║  ${c.dim}Stats :${c.reset} 📝 ${postsInfo} posts  |  👥 ${user.followers_count || 0} abonnés  |  🚶 ${user.following_count || 0} abonnements`);
+  console.log("╚".padEnd(68, "═") + "╝\n");
+}
+
+export async function handleToggleVerifiedBadge(rl: readline.Interface, targetUserArg?: any) {
+  let user = targetUserArg;
+  if (!user) {
+    user = await pickCustomer(rl, "GESTION DE LA COCHE VÉRIFIÉE");
+    if (!user) return;
+  }
+
+  const full = await getFullCustomerProfile(user.id);
+  if (!full) {
+    console.log(`❌ Utilisateur introuvable.`);
+    return;
+  }
+
+  const currentVerified = Boolean(full.is_verified);
+  const effectiveVerified = Boolean(full.effective_verified);
+  const isPaid = ['plus', 'pro', 'max'].includes(String(full.tier || '').toLowerCase());
+
+  console.log(`\n${c.bold}--- 🔵 STATUT DE LA COCHE VÉRIFIÉE : @${full.username} ---${c.reset}`);
+  console.log(`  - Statut DB (is_verified) : ${currentVerified ? `${c.brightCyan}🔵 Actif (TRUE)${c.reset}` : `${c.dim}⚪ Inactif (FALSE)${c.reset}`}`);
+  console.log(`  - Tier / Abonnement       : [${full.tier || 'Free'}]`);
+  console.log(`  - Statut effectif app     : ${effectiveVerified ? `${c.brightGreen}✓ Vérifié visible dans l'app${c.reset}` : `${c.dim}Non vérifié${c.reset}`}`);
+  if (isPaid && !currentVerified) {
+    console.log(`    ${c.yellow}ℹ Note : Ce compte est au tier "${full.tier}", ce qui lui donne automatiquement le badge vérifié dans l'application.${c.reset}`);
+  }
+
+  console.log(`\n${c.bold}Que souhaitez-vous faire ?${c.reset}`);
+  console.log(`  ${c.brightCyan}[1]${c.reset} 🔵 Activer la coche vérifiée (is_verified = TRUE)`);
+  console.log(`  ${c.brightCyan}[2]${c.reset} ⚪ Retirer la coche vérifiée (is_verified = FALSE)`);
+  console.log(`  ${c.brightCyan}[3]${c.reset} 🔄 Inverser le statut actuel`);
+  console.log(`  ${c.white}[0]${c.reset} ↩️  Annuler`);
+
+  const choice = (await rl.question(`\n  ${c.brightYellow}➔ Choix [0-3] : ${c.reset}`)).trim();
+  if (choice === '0') return;
+
+  let targetState = currentVerified;
+  if (choice === '1') targetState = true;
+  else if (choice === '2') targetState = false;
+  else if (choice === '3') targetState = !currentVerified;
+  else {
+    console.log(`❌ Option invalide.`);
+    return;
+  }
+
+  // Appliquer en DB (users + profiles)
+  await sql`UPDATE users SET is_verified = ${targetState} WHERE id = ${Number(full.id)}`;
+  await sql`
+    INSERT INTO profiles (user_id, is_verified, updated_at)
+    VALUES (${Number(full.id)}, ${targetState}, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET is_verified = ${targetState}, updated_at = NOW()
+  `;
+
+  try {
+    await sql`
+      INSERT INTO user_account_actions (user_id, action, reason)
+      VALUES (${String(full.id)}, ${targetState ? 'verify' : 'unverify'}, 'Coche vérifiée mise à jour via console admin')
+    `;
+  } catch {}
+
+  console.log(`\n${c.brightGreen}✔ Coche vérifiée mise à jour avec succès : ${targetState ? '🔵 ACTIVÉE' : '⚪ DÉSACTIVÉE'} pour @${full.username}.${c.reset}`);
+
+  // Si on désactive la vérification mais que le compte est Plus/Pro/Max, proposer de rétrograder le tier
+  if (!targetState && isPaid) {
+    console.log(`\n${c.brightYellow}⚠️  RAPPEL IMPORTANT :${c.reset}`);
+    console.log(`L'utilisateur @${full.username} a le tier "${full.tier}". Les abonnés payants ont le badge vérifié automatiquement dans l'application.`);
+    const downgrade = (await rl.question(`➔ Voulez-vous également passer son tier à "Free" pour supprimer totalement le badge de l'app ? (o/N) : `)).trim().toLowerCase();
+    if (['o', 'oui', 'y'].includes(downgrade)) {
+      await sql`UPDATE users SET tier = 'Free' WHERE id = ${Number(full.id)}`;
+      console.log(`${c.brightGreen}✔ Tier passé à "Free". Le badge n'apparaîtra plus nulle part pour @${full.username}.${c.reset}\n`);
+    }
+  }
+}
+
+export async function handleEditCustomerProfile(rl: readline.Interface, targetUserArg?: any) {
+  let user = targetUserArg;
+  if (!user) {
+    user = await pickCustomer(rl, "MODIFIER UN PROFIL CLIENT");
+    if (!user) return;
+  }
+
+  let running = true;
+  while (running) {
+    const full = await getFullCustomerProfile(user.id);
+    if (!full) {
+      console.log(`❌ Profil introuvable.`);
+      return;
+    }
+
+    const actualPostsRows = await sql`SELECT COUNT(*)::int as count FROM posts WHERE author_id = ${Number(full.id)}`;
+    const actualPosts = actualPostsRows[0]?.count ?? 0;
+
+    renderProfileCard(full, actualPosts);
+
+    console.log(`${c.bold}MODIFICATIONS DISPONIBLES :${c.reset}`);
+    console.log(`  ${c.brightCyan}[1]${c.reset} 🔵 Basculer la coche Vérifiée (Badge : ${full.is_verified ? '🔵 Activé' : '⚪ Désactivé'})`);
+    console.log(`  ${c.brightCyan}[2]${c.reset} 🏷️  Modifier le Tier / Abonnement (Actuel : [${full.tier || 'Free'}])`);
+    console.log(`  ${c.brightCyan}[3]${c.reset} 👤 Modifier le Nom d'utilisateur (Username) ou Email`);
+    console.log(`  ${c.brightCyan}[4]${c.reset} 📛 Modifier le Nom d'affichage (Display Name)`);
+    console.log(`  ${c.brightCyan}[5]${c.reset} 📝 Modifier la Biographie (Bio)`);
+    console.log(`  ${c.brightCyan}[6]${c.reset} 🌐 Modifier le Site Web & Localisation`);
+    console.log(`  ${c.brightCyan}[7]${c.reset} 🖼️  Modifier l'Avatar & Bannière (URLs)`);
+    console.log(`  ${c.brightCyan}[8]${c.reset} 📊 Synchroniser / Recalculer les compteurs (Posts, Abonnés)`);
+    console.log(`  ${c.brightGreen}[9]${c.reset} 📰 ${c.bold}Gérer & modifier les posts de ce compte (${actualPosts} posts)${c.reset}`);
+    console.log(`  ${c.white}[0]${c.reset} ↩️  Retour`);
+
+    const choice = (await rl.question(`\n  ${c.brightYellow}➔ Votre choix [0-9] : ${c.reset}`)).trim();
+
+    switch (choice) {
+      case '1':
+        await handleToggleVerifiedBadge(rl, full);
+        break;
+      case '2': {
+        console.log(`\n${c.bold}Choisir un nouveau Tier :${c.reset}`);
+        console.log(`  [1] Free`);
+        console.log(`  [2] Plus`);
+        console.log(`  [3] Pro`);
+        console.log(`  [4] Max`);
+        const tc = (await rl.question(`  ➔ Choix [1-4] (actuel: ${full.tier || 'Free'}) : `)).trim();
+        const tierMap: Record<string, string> = { '1': 'Free', '2': 'Plus', '3': 'Pro', '4': 'Max' };
+        if (tierMap[tc]) {
+          await sql`UPDATE users SET tier = ${tierMap[tc]} WHERE id = ${Number(full.id)}`;
+          console.log(`  ${c.brightGreen}✔ Tier mis à jour : ${tierMap[tc]}${c.reset}`);
+        } else {
+          console.log(`${c.yellow}⚠️ Choix invalide ou inchangé.${c.reset}`);
+        }
+        break;
+      }
+      case '3': {
+        console.log(`\n${c.bold}Identifiants de compte :${c.reset}`);
+        const newUsername = (await rl.question(`  ➔ Nouveau Username (vide pour conserver "${full.username}") : `)).trim();
+        if (newUsername && newUsername !== full.username) {
+          const exists = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${newUsername}) AND id != ${Number(full.id)} LIMIT 1`;
+          if (exists.length > 0) {
+            console.log(`  ${c.red}❌ Ce nom d'utilisateur est déjà utilisé par un autre compte.${c.reset}`);
+          } else {
+            await sql`UPDATE users SET username = ${newUsername} WHERE id = ${Number(full.id)}`;
+            console.log(`  ${c.brightGreen}✔ Nom d'utilisateur changé en @${newUsername}${c.reset}`);
+            user.username = newUsername;
+          }
+        }
+        const newEmail = (await rl.question(`  ➔ Nouvel Email (vide pour conserver "${full.email}") : `)).trim();
+        if (newEmail && newEmail !== full.email) {
+          const exists = await sql`SELECT id FROM users WHERE LOWER(email) = LOWER(${newEmail}) AND id != ${Number(full.id)} LIMIT 1`;
+          if (exists.length > 0) {
+            console.log(`  ${c.red}❌ Cet e-mail est déjà utilisé par un autre compte.${c.reset}`);
+          } else {
+            await sql`UPDATE users SET email = ${newEmail} WHERE id = ${Number(full.id)}`;
+            console.log(`  ${c.brightGreen}✔ E-mail changé en ${newEmail}${c.reset}`);
+            user.email = newEmail;
+          }
+        }
+        break;
+      }
+      case '4': {
+        const newName = (await rl.question(`  ➔ Nom affiché (actuel: "${full.display_name || ''}") : `)).trim();
+        await sql`
+          INSERT INTO profiles (user_id, display_name, updated_at)
+          VALUES (${Number(full.id)}, ${newName || null}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET display_name = ${newName || null}, updated_at = NOW()
+        `;
+        console.log(`  ${c.brightGreen}✔ Nom d'affichage mis à jour !${c.reset}`);
+        break;
+      }
+      case '5': {
+        console.log(`  Bio actuelle : ${full.bio || '(vide)'}`);
+        const newBio = (await rl.question(`  ➔ Nouvelle biographie (tapez '-' pour vider) : `)).trim();
+        const bioVal = newBio === '-' ? null : (newBio || full.bio);
+        await sql`
+          INSERT INTO profiles (user_id, bio, updated_at)
+          VALUES (${Number(full.id)}, ${bioVal}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET bio = ${bioVal}, updated_at = NOW()
+        `;
+        console.log(`  ${c.brightGreen}✔ Biographie mise à jour !${c.reset}`);
+        break;
+      }
+      case '6': {
+        const newLoc = (await rl.question(`  ➔ Localisation (actuel: "${full.location || ''}") : `)).trim();
+        const newWeb = (await rl.question(`  ➔ Site web (actuel: "${full.website || full.website_url || ''}") : `)).trim();
+        await sql`
+          INSERT INTO profiles (user_id, location, website, website_url, updated_at)
+          VALUES (${Number(full.id)}, ${newLoc || null}, ${newWeb || null}, ${newWeb || null}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET
+            location = COALESCE(${newLoc || null}, profiles.location),
+            website = COALESCE(${newWeb || null}, profiles.website),
+            website_url = COALESCE(${newWeb || null}, profiles.website_url),
+            updated_at = NOW()
+        `;
+        console.log(`  ${c.brightGreen}✔ Localisation et site web mis à jour !${c.reset}`);
+        break;
+      }
+      case '7': {
+        const newAvatar = (await rl.question(`  ➔ URL de l'Avatar (vide pour conserver) : `)).trim();
+        if (newAvatar) {
+          await sql`UPDATE users SET avatar_url = ${newAvatar} WHERE id = ${Number(full.id)}`;
+          await sql`
+            INSERT INTO profiles (user_id, avatar_url, updated_at)
+            VALUES (${Number(full.id)}, ${newAvatar}, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET avatar_url = ${newAvatar}, updated_at = NOW()
+          `;
+          console.log(`  ${c.brightGreen}✔ Avatar mis à jour !${c.reset}`);
+        }
+        const newBanner = (await rl.question(`  ➔ URL de la Bannière (vide pour conserver) : `)).trim();
+        if (newBanner) {
+          await sql`
+            INSERT INTO profiles (user_id, banner_url, updated_at)
+            VALUES (${Number(full.id)}, ${newBanner}, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET banner_url = ${newBanner}, updated_at = NOW()
+          `;
+          console.log(`  ${c.brightGreen}✔ Bannière mise à jour !${c.reset}`);
+        }
+        break;
+      }
+      case '8': {
+        console.log(`  ${c.cyan}⏳ Recalcul des compteurs réels en base...${c.reset}`);
+        const [postsCountRes, followersCountRes, followingCountRes] = await Promise.all([
+          sql`SELECT COUNT(*)::int as n FROM posts WHERE author_id = ${Number(full.id)}`,
+          sql`SELECT COUNT(*)::int as n FROM follows WHERE following_id = ${Number(full.id)}`.catch(() => [{ n: 0 }]),
+          sql`SELECT COUNT(*)::int as n FROM follows WHERE follower_id = ${Number(full.id)}`.catch(() => [{ n: 0 }]),
+        ]);
+        const realPosts = postsCountRes[0]?.n || 0;
+        const realFollowers = followersCountRes[0]?.n || 0;
+        const realFollowing = followingCountRes[0]?.n || 0;
+
+        await sql`
+          INSERT INTO profiles (user_id, posts_count, followers_count, following_count, updated_at)
+          VALUES (${Number(full.id)}, ${realPosts}, ${realFollowers}, ${realFollowing}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET
+            posts_count = ${realPosts},
+            followers_count = ${realFollowers},
+            following_count = ${realFollowing},
+            updated_at = NOW()
+        `;
+        console.log(`  ${c.brightGreen}✔ Compteurs synchronisés : ${realPosts} posts, ${realFollowers} abonnés, ${realFollowing} abonnements.${c.reset}`);
+        break;
+      }
+      case '9': {
+        await handleManagePosts(rl, { id: String(full.id), username: full.username, email: full.email });
+        break;
+      }
+      case '0':
+        running = false;
+        break;
+      default:
+        console.log("⚠️ Option invalide.");
+    }
   }
 }
 
@@ -1454,7 +1768,6 @@ async function handleDeleteCustomer(rl: readline.Interface) {
   }
 
   try {
-    // Notification par e-mail au client avant suppression définitive
     let emailSent = false;
     if (current.email) {
       emailSent = await sendEmail({
@@ -1478,9 +1791,440 @@ async function handleDeleteCustomer(rl: readline.Interface) {
       emailSent
         ? `${c.brightGreen}✉️  E-mail de notification envoyé à ${current.email} avant suppression.${c.reset}`
         : `${c.brightRed}⚠️  E-mail de notification NON envoyé à ${current.email} (adresse absente ou env manquantes).${c.reset}`
-    );
+      );
   } catch (err: any) {
     console.error("❌ Erreur lors de la suppression :", err.message || err);
+  }
+}
+
+// ─────────────────────────────────────────────
+// 6b. GESTIONNAIRE COMPLET DES POSTS / VIBES
+// ─────────────────────────────────────────────
+
+export async function handleEditSinglePost(rl: readline.Interface, postId: string) {
+  while (true) {
+    const postRows = await sql`
+      SELECT p.*, u.username, u.email
+      FROM posts p
+      LEFT JOIN users u ON u.id = p.author_id
+      WHERE p.id = ${postId}::uuid
+      LIMIT 1
+    `;
+    if (postRows.length === 0) {
+      console.log(`\n${c.red}❌ Publication introuvable (elle a peut-être été supprimée).${c.reset}\n`);
+      return;
+    }
+    const post = postRows[0];
+    const mediaRows = await sql`
+      SELECT id, url, media_type, alt_text
+      FROM media_assets
+      WHERE post_id = ${postId}::uuid
+      ORDER BY created_at ASC
+    `;
+
+    const cleanContent = stripVibeHtml(post.content || '');
+    console.log(`\n` + `═`.repeat(75));
+    console.log(`${c.bold}${c.brightCyan}📝 MODIFICATION DU POST [${postId}]${c.reset}`);
+    console.log(`═`.repeat(75));
+    console.log(`  ${c.dim}Auteur :${c.reset} ${c.bold}@${post.username || post.author_id}${c.reset} (${post.email || 'Email inconnu'})`);
+    console.log(`  ${c.dim}Créé le :${c.reset} ${new Date(post.created_at).toLocaleString('fr-FR')}  |  ${c.dim}Mis à jour :${c.reset} ${post.updated_at ? new Date(post.updated_at).toLocaleString('fr-FR') : '-'}`);
+    console.log(`  ${c.dim}Statut :${c.reset} ${post.status === 'scheduled' ? `${c.brightYellow}⏳ Programmé (pour le ${new Date(post.scheduled_at).toLocaleString('fr-FR')})${c.reset}` : `${c.brightGreen}⚡ Publié${c.reset}`}`);
+    console.log(`  ${c.dim}Visibilité :${c.reset} [${post.visibility}]  |  ${c.dim}Format :${c.reset} [${post.format}]`);
+    console.log(`  ${c.dim}Options :${c.reset} ${post.is_pinned ? '📌 Épinglé' : '⚪ Non épinglé'}  |  ${post.ai_generated ? '🤖 Généré avec IA' : '⚪ Humain'}`);
+    console.log(`  ${c.dim}Engagement :${c.reset} ❤️ ${post.likes_count || 0}  |  🔁 ${post.reposts_count || 0}  |  💬 ${post.replies_count || 0}  |  👁️ ${post.views_count || 0}  |  🔖 ${post.bookmarks_count || 0}`);
+    
+    if (mediaRows.length > 0) {
+      console.log(`  ${c.dim}Médias joints (${mediaRows.length}) :${c.reset}`);
+      mediaRows.forEach((m: any, i: number) => {
+        console.log(`    ${c.dim}[${i + 1}]${c.reset} ${m.url} ${c.dim}(${m.media_type})${c.reset}`);
+      });
+    } else {
+      console.log(`  ${c.dim}Médias joints :${c.reset} (aucun)`);
+    }
+
+    console.log(`\n  ${c.bold}CONTENU ACTUEL :${c.reset}`);
+    console.log(`  ┌` + `─`.repeat(70) + `┐`);
+    cleanContent.split('\n').slice(0, 15).forEach((line: string) => {
+      console.log(`  │ ${line.padEnd(68).substring(0, 68)} │`);
+    });
+    if (cleanContent.split('\n').length > 15) {
+      console.log(`  │ ${c.dim}… (${cleanContent.split('\n').length - 15} lignes supplémentaires)${c.reset}`.padEnd(76) + `│`);
+    }
+    console.log(`  └` + `─`.repeat(70) + `┘`);
+
+    console.log(`\n${c.bold}ACTIONS DISPONIBLES SUR CE POST :${c.reset}`);
+    console.log(`  ${c.brightCyan}[1]${c.reset} ✏️  Modifier le contenu du post (texte brut ou HTML)`);
+    console.log(`  ${c.brightCyan}[2]${c.reset} 👁️  Modifier la visibilité (Public / Abonnés / Cercle / Privé)`);
+    console.log(`  ${c.brightCyan}[3]${c.reset} 🚦 Modifier le statut & la date de programmation (Publié / Programmé / Brouillon)`);
+    console.log(`  ${c.brightCyan}[4]${c.reset} 📌 Basculer Épinglé / Non épinglé (Actuel : ${post.is_pinned ? '📌 Épinglé' : '⚪ Non épinglé'})`);
+    console.log(`  ${c.brightCyan}[5]${c.reset} 🤖 Basculer le badge « Créé avec l'IA » (Actuel : ${post.ai_generated ? '🤖 Oui' : '⚪ Non'})`);
+    console.log(`  ${c.brightCyan}[6]${c.reset} 🖼️  Gérer les médias joints (Ajouter, Remplacer, Supprimer)`);
+    console.log(`  ${c.brightCyan}[7]${c.reset} 📈 Modifier les statistiques (Likes, Reposts, Réponses, Vues, Signets)`);
+    console.log(`  ${c.brightRed}[8]${c.reset} 🗑️  Supprimer définitivement cette publication`);
+    console.log(`  ${c.white}[0]${c.reset} ↩️  Retour à la liste des posts`);
+
+    const choice = (await rl.question(`\n  ${c.brightYellow}➔ Choix [0-8] : ${c.reset}`)).trim();
+
+    if (choice === '0') break;
+
+    switch (choice) {
+      case '1': {
+        console.log(`\n${c.bold}Mode de saisie du nouveau contenu :${c.reset}`);
+        console.log(`  [1] Ligne unique rapide`);
+        console.log(`  [2] Multi-lignes (terminer par 'FIN' sur une ligne seule)`);
+        const subMode = (await rl.question(`  ➔ Choix [1-2] (défaut 1) : `)).trim() || '1';
+        let newContent = "";
+        if (subMode === '2') {
+          console.log(`  ${c.dim}Saisissez votre contenu. Tapez 'FIN' pour valider.${c.reset}`);
+          const lines: string[] = [];
+          while (true) {
+            const l = await rl.question(`  │ `);
+            if (l.trim() === 'FIN') break;
+            lines.push(l);
+          }
+          newContent = lines.join('\n').trim();
+        } else {
+          newContent = (await rl.question(`  ➔ Nouveau contenu : `)).trim();
+        }
+        if (!newContent) {
+          console.log(`${c.yellow}⚠️ Contenu vide. Modification annulée.${c.reset}`);
+          break;
+        }
+        const format = newContent.startsWith('<') ? 'article' : post.format || 'micro_text';
+        await sql`
+          UPDATE posts
+          SET content = ${newContent},
+              format = ${format},
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid
+        `;
+        console.log(`  ${c.brightGreen}✔ Contenu du post mis à jour avec succès !${c.reset}`);
+        break;
+      }
+      case '2': {
+        console.log(`\n${c.bold}Choisir la visibilité :${c.reset}`);
+        console.log(`  [1] 🌍 Public (public)`);
+        console.log(`  [2] 👥 Abonnés uniquement (followers)`);
+        console.log(`  [3] 🔒 Cercle Privé (circle)`);
+        console.log(`  [4] ⚪ Privé (private)`);
+        const vChoice = (await rl.question(`  ➔ Choix [1-4] : `)).trim();
+        const visMap: Record<string, string> = { '1': 'public', '2': 'followers', '3': 'circle', '4': 'private' };
+        const newVis = visMap[vChoice];
+        if (!newVis) {
+          console.log(`${c.yellow}⚠️ Choix invalide.${c.reset}`);
+          break;
+        }
+        await sql`
+          UPDATE posts
+          SET visibility = ${newVis},
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid
+        `;
+        console.log(`  ${c.brightGreen}✔ Visibilité changée en "${newVis}".${c.reset}`);
+        break;
+      }
+      case '3': {
+        console.log(`\n${c.bold}Modifier le statut :${c.reset}`);
+        console.log(`  [1] ⚡ Publié immédiatement (published)`);
+        console.log(`  [2] ⏳ Programmé à une date future (scheduled)`);
+        console.log(`  [3] 📝 Brouillon (draft)`);
+        const sChoice = (await rl.question(`  ➔ Choix [1-3] : `)).trim();
+        if (sChoice === '1') {
+          await sql`
+            UPDATE posts
+            SET status = 'published',
+                scheduled_at = NULL,
+                published_at = COALESCE(published_at, NOW()),
+                updated_at = NOW()
+            WHERE id = ${postId}::uuid
+          `;
+          console.log(`  ${c.brightGreen}✔ Statut changé à "published" (immédiat).${c.reset}`);
+        } else if (sChoice === '2') {
+          const dateStr = (await rl.question(`  ➔ Date/heure de publication (ex: 2026-09-15 18:30 ou +2j) : `)).trim();
+          const targetDate = parseDateInput(dateStr, true);
+          if (!targetDate) {
+            console.log(`${c.red}❌ Format de date invalide.${c.reset}`);
+            break;
+          }
+          await sql`
+            UPDATE posts
+            SET status = 'scheduled',
+                scheduled_at = ${targetDate.toISOString()},
+                updated_at = NOW()
+            WHERE id = ${postId}::uuid
+          `;
+          console.log(`  ${c.brightGreen}✔ Publication programmée pour le ${targetDate.toLocaleString('fr-FR')}.${c.reset}`);
+        } else if (sChoice === '3') {
+          await sql`
+            UPDATE posts
+            SET status = 'draft',
+                updated_at = NOW()
+            WHERE id = ${postId}::uuid
+          `;
+          console.log(`  ${c.brightGreen}✔ Statut changé en brouillon (draft).${c.reset}`);
+        }
+        break;
+      }
+      case '4': {
+        const newPinned = !post.is_pinned;
+        await sql`
+          UPDATE posts
+          SET is_pinned = ${newPinned},
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid
+        `;
+        console.log(`  ${c.brightGreen}✔ Statut d'épinglage : ${newPinned ? '📌 Épinglé' : '⚪ Désépinglé'}.${c.reset}`);
+        break;
+      }
+      case '5': {
+        const newAi = !post.ai_generated;
+        await sql`
+          UPDATE posts
+          SET ai_generated = ${newAi},
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid
+        `;
+        console.log(`  ${c.brightGreen}✔ Badge IA : ${newAi ? '🤖 Activé (Généré par IA)' : '⚪ Désactivé (Humain)'}.${c.reset}`);
+        break;
+      }
+      case '6': {
+        console.log(`\n${c.bold}Gestion des médias joints :${c.reset}`);
+        console.log(`  [1] ➕ Ajouter des médias`);
+        console.log(`  [2] 🔄 Remplacer tous les médias`);
+        console.log(`  [3] 🗑️  Supprimer tous les médias`);
+        const mChoice = (await rl.question(`  ➔ Choix [1-3] : `)).trim();
+        if (mChoice === '1') {
+          const urlsInput = (await rl.question(`  ➔ URLs des médias à ajouter (séparées par des virgules) : `)).trim();
+          const urls = urlsInput.split(',').map(u => u.trim()).filter(Boolean);
+          for (const u of urls) {
+            const mType = inferVibeMediaType(u);
+            await sql`
+              INSERT INTO media_assets (owner_id, post_id, url, media_type)
+              VALUES (${post.author_id}, ${postId}::uuid, ${u}, ${mType})
+            `;
+          }
+          console.log(`  ${c.brightGreen}✔ ${urls.length} média(s) ajouté(s).${c.reset}`);
+        } else if (mChoice === '2') {
+          const urlsInput = (await rl.question(`  ➔ Nouvelles URLs de médias (séparées par des virgules) : `)).trim();
+          const urls = urlsInput.split(',').map(u => u.trim()).filter(Boolean);
+          await sql`DELETE FROM media_assets WHERE post_id = ${postId}::uuid`;
+          for (const u of urls) {
+            const mType = inferVibeMediaType(u);
+            await sql`
+              INSERT INTO media_assets (owner_id, post_id, url, media_type)
+              VALUES (${post.author_id}, ${postId}::uuid, ${u}, ${mType})
+            `;
+          }
+          console.log(`  ${c.brightGreen}✔ Médias remplacés (${urls.length} média(s)).${c.reset}`);
+        } else if (mChoice === '3') {
+          const conf = (await rl.question(`  ⚠️ Supprimer tous les médias joints de ce post ? (o/N) : `)).trim().toLowerCase();
+          if (['o', 'oui', 'y'].includes(conf)) {
+            await sql`DELETE FROM media_assets WHERE post_id = ${postId}::uuid`;
+            console.log(`  ${c.brightGreen}✔ Tous les médias ont été supprimés.${c.reset}`);
+          }
+        }
+        break;
+      }
+      case '7': {
+        console.log(`\n${c.bold}Modifier les statistiques (laisser vide pour conserver) :${c.reset}`);
+        const likesInput = (await rl.question(`  ➔ Likes (actuel: ${post.likes_count || 0}) : `)).trim();
+        const repostsInput = (await rl.question(`  ➔ Reposts (actuel: ${post.reposts_count || 0}) : `)).trim();
+        const repliesInput = (await rl.question(`  ➔ Réponses (actuel: ${post.replies_count || 0}) : `)).trim();
+        const viewsInput = (await rl.question(`  ➔ Vues (actuel: ${post.views_count || 0}) : `)).trim();
+        const bookmarksInput = (await rl.question(`  ➔ Signets (actuel: ${post.bookmarks_count || 0}) : `)).trim();
+
+        const newLikes = likesInput !== "" ? Math.max(0, parseInt(likesInput, 10) || 0) : post.likes_count;
+        const newReposts = repostsInput !== "" ? Math.max(0, parseInt(repostsInput, 10) || 0) : post.reposts_count;
+        const newReplies = repliesInput !== "" ? Math.max(0, parseInt(repliesInput, 10) || 0) : post.replies_count;
+        const newViews = viewsInput !== "" ? Math.max(0, parseInt(viewsInput, 10) || 0) : post.views_count;
+        const newBookmarks = bookmarksInput !== "" ? Math.max(0, parseInt(bookmarksInput, 10) || 0) : post.bookmarks_count;
+
+        await sql`
+          UPDATE posts
+          SET likes_count = ${newLikes},
+              reposts_count = ${newReposts},
+              replies_count = ${newReplies},
+              views_count = ${newViews},
+              bookmarks_count = ${newBookmarks},
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid
+        `;
+        console.log(`  ${c.brightGreen}✔ Statistiques d'engagement mises à jour !${c.reset}`);
+        break;
+      }
+      case '8': {
+        const confirmDel = (await rl.question(`  ${c.brightRed}⚠️ Confirmer la suppression DÉFINITIVE de cette publication ? (o/N) : ${c.reset}`)).trim().toLowerCase();
+        if (!['o', 'oui', 'y'].includes(confirmDel)) {
+          console.log(`${c.dim}Suppression annulée.${c.reset}`);
+          break;
+        }
+        await sql`DELETE FROM media_assets WHERE post_id = ${postId}::uuid`;
+        await sql`DELETE FROM bookmarks WHERE post_id = ${postId}::uuid`;
+        await sql`DELETE FROM post_interactions WHERE post_id = ${postId}::uuid`;
+        await sql`DELETE FROM notifications WHERE post_id = ${postId}::uuid`;
+        await sql`DELETE FROM posts WHERE id = ${postId}::uuid`;
+        await sql`UPDATE profiles SET posts_count = GREATEST(0, posts_count - 1) WHERE user_id = ${post.author_id}`;
+        console.log(`\n${c.brightGreen}🗑️ Publication ${postId} supprimée définitivement avec succès !${c.reset}\n`);
+        return;
+      }
+    }
+  }
+}
+
+export async function handleManagePosts(rl: readline.Interface, prefilteredAuthor?: TargetUser | any) {
+  let author: any = prefilteredAuthor || null;
+  let statusFilter: 'all' | 'published' | 'scheduled' | 'pinned' = 'all';
+  let keywordFilter = "";
+
+  while (true) {
+    const authorId = author ? Number(author.id) : null;
+    let query;
+    if (authorId) {
+      query = await sql`
+        SELECT p.id, p.author_id, p.content, p.format, p.visibility, p.status, p.scheduled_at,
+               p.is_pinned, p.ai_generated, p.likes_count, p.reposts_count, p.replies_count,
+               p.views_count, p.bookmarks_count, p.created_at, p.updated_at, p.published_at,
+               u.username, u.email,
+               (SELECT COUNT(*)::int FROM media_assets m WHERE m.post_id = p.id) as media_count
+        FROM posts p
+        LEFT JOIN users u ON u.id = p.author_id
+        WHERE p.author_id = ${authorId}
+        ORDER BY COALESCE(p.created_at, p.published_at, NOW()) DESC
+        LIMIT 60
+      `;
+    } else {
+      query = await sql`
+        SELECT p.id, p.author_id, p.content, p.format, p.visibility, p.status, p.scheduled_at,
+               p.is_pinned, p.ai_generated, p.likes_count, p.reposts_count, p.replies_count,
+               p.views_count, p.bookmarks_count, p.created_at, p.updated_at, p.published_at,
+               u.username, u.email,
+               (SELECT COUNT(*)::int FROM media_assets m WHERE m.post_id = p.id) as media_count
+        FROM posts p
+        LEFT JOIN users u ON u.id = p.author_id
+        ORDER BY COALESCE(p.created_at, p.published_at, NOW()) DESC
+        LIMIT 60
+      `;
+    }
+
+    let posts = query as any[];
+
+    if (statusFilter === 'published') {
+      posts = posts.filter(p => (p.status || 'published') === 'published');
+    } else if (statusFilter === 'scheduled') {
+      posts = posts.filter(p => p.status === 'scheduled');
+    } else if (statusFilter === 'pinned') {
+      posts = posts.filter(p => Boolean(p.is_pinned));
+    }
+
+    if (keywordFilter.trim()) {
+      const kw = keywordFilter.toLowerCase();
+      posts = posts.filter(p =>
+        (p.content || '').toLowerCase().includes(kw) ||
+        (p.username || '').toLowerCase().includes(kw) ||
+        String(p.id).toLowerCase().includes(kw)
+      );
+    }
+
+    const scopeLabel = author ? `@${author.username} (ID: ${author.id})` : 'Toute la plateforme';
+    console.log(`\n${c.bgPurple}${c.bold}${c.brightWhite} 📰 GESTIONNAIRE DES POSTS / VIBES 📰 ${c.reset}`);
+    console.log(`  ${c.dim}Périmètre :${c.reset} ${c.bold}${scopeLabel}${c.reset}  |  ${c.dim}Filtre statut :${c.reset} [${statusFilter}]  |  ${c.dim}Recherche :${c.reset} ${keywordFilter ? `"${keywordFilter}"` : '(aucune)'}`);
+    console.log(`  ${c.dim}Publications trouvées : ${posts.length}${c.reset}\n`);
+
+    if (posts.length === 0) {
+      console.log(`  ${c.brightYellow}⚠️  Aucune publication trouvée avec les critères actuels.${c.reset}`);
+    } else {
+      console.log("─".repeat(110));
+      console.log(` #  | ${c.bold}${"DATE".padEnd(16)}${c.reset} | ${c.bold}${"AUTEUR".padEnd(16)}${c.reset} | ${c.bold}${"STATUT / AUDIENCE".padEnd(20)}${c.reset} | ${c.bold}${"STATS".padEnd(22)}${c.reset} | ${c.bold}EXTRAIT DU CONTENU${c.reset}`);
+      console.log("─".repeat(110));
+
+      posts.forEach((p, idx) => {
+        const dateStr = p.created_at
+          ? new Date(p.created_at).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : '-';
+        const authorStr = `@${p.username || p.author_id}`.padEnd(16).substring(0, 16);
+        const statusBadge = p.status === 'scheduled' ? '⏳ Prog' : '⚡ Pub';
+        const visBadge = (p.visibility || 'public').substring(0, 4);
+        const pinBadge = p.is_pinned ? '📌' : '  ';
+        const aiBadge = p.ai_generated ? '🤖' : '  ';
+        const mediaBadge = Number(p.media_count) > 0 ? `🖼️${p.media_count}` : '';
+        const tag = `${statusBadge} [${visBadge}] ${pinBadge}${aiBadge} ${mediaBadge}`.padEnd(20);
+        const statsStr = `❤️${p.likes_count || 0} 🔁${p.reposts_count || 0} 💬${p.replies_count || 0} 👁️${p.views_count || 0}`.padEnd(22);
+        const cleanContent = stripVibeHtml(p.content || '').replace(/\r?\n/g, ' ');
+        const snippet = cleanContent.length > 35 ? cleanContent.substring(0, 35) + '…' : cleanContent;
+
+        console.log(` ${String(idx + 1).padStart(2)} | ${dateStr.padEnd(16)} | ${authorStr} | ${tag} | ${statsStr} | ${c.dim}${snippet}${c.reset}`);
+      });
+      console.log("─".repeat(110));
+    }
+
+    console.log(`\n${c.bold}OPTIONS DISPONIBLES :${c.reset}`);
+    console.log(`  ${c.brightCyan}[1-${posts.length}]${c.reset} ✏️  Sélectionner un post pour le modifier / supprimer / épingler`);
+    console.log(`  ${c.brightYellow}[S]${c.reset} 🔍 Rechercher un post (mot-clé ou ID)`);
+    console.log(`  ${c.brightYellow}[F]${c.reset} 🚦 Changer le filtre statut (Tous, Publiés, Programmés, Épinglés)`);
+    if (!author) {
+      console.log(`  ${c.brightCyan}[U]${c.reset} 👤 Filtrer par un utilisateur spécifique`);
+    } else {
+      console.log(`  ${c.brightCyan}[U]${c.reset} 🌍 Réinitialiser et voir tous les posts (Tous les utilisateurs)`);
+    }
+    console.log(`  ${c.brightGreen}[P]${c.reset} 🚀 Publier une nouvelle Vibe (Assistant de publication)`);
+    console.log(`  ${c.white}[0]${c.reset} ↩️  Retour`);
+
+    const ans = (await rl.question(`\n  ${c.brightYellow}➔ Choix [0-${posts.length}], [S], [F], [U], [P] : ${c.reset}`)).trim();
+
+    if (ans === '0' || ans.toLowerCase() === 'retour' || ans.toLowerCase() === 'exit') {
+      break;
+    }
+
+    if (ans.toLowerCase() === 's') {
+      keywordFilter = (await rl.question(`  ➔ Mot-clé ou terme de recherche (vide pour effacer) : `)).trim();
+      continue;
+    }
+
+    if (ans.toLowerCase() === 'f') {
+      console.log(`\n  [1] Tous les posts`);
+      console.log(`  [2] Uniquement publiés (⚡ published)`);
+      console.log(`  [3] Uniquement programmés (⏳ scheduled)`);
+      console.log(`  [4] Uniquement épinglés (📌 is_pinned)`);
+      const fc = (await rl.question(`  ➔ Choix filtre [1-4] : `)).trim();
+      if (fc === '2') statusFilter = 'published';
+      else if (fc === '3') statusFilter = 'scheduled';
+      else if (fc === '4') statusFilter = 'pinned';
+      else statusFilter = 'all';
+      continue;
+    }
+
+    if (ans.toLowerCase() === 'u') {
+      if (author) {
+        author = null;
+        console.log(`  ${c.brightGreen}✔ Filtre utilisateur retiré (affichage global).${c.reset}`);
+      } else {
+        const sel = await promptSelectUser(rl);
+        if (sel) author = sel;
+      }
+      continue;
+    }
+
+    if (ans.toLowerCase() === 'p') {
+      await runVibePublisher();
+      continue;
+    }
+
+    const n = parseInt(ans, 10);
+    if (!isNaN(n) && n >= 1 && n <= posts.length) {
+      const selectedPost = posts[n - 1];
+      await handleEditSinglePost(rl, selectedPost.id);
+    } else {
+      console.log(`❌ Option invalide.`);
+    }
+  }
+}
+
+export async function runPostManagerCli() {
+  const rl = readline.createInterface({ input, output });
+  try {
+    await handleManagePosts(rl);
+  } finally {
+    rl.close();
   }
 }
 
@@ -1490,27 +2234,43 @@ export async function runCustomerAccountManager() {
   const rl = readline.createInterface({ input, output });
 
   console.log("\n=======================================================");
-  console.log("👥  GESTIONNAIRE INTERACTIF DES COMPTES CLIENTS mAI");
+  console.log("👥  GESTIONNAIRE DES COMPTES & PROFILS CLIENTS mAI");
   console.log("=======================================================");
 
   let running = true;
   while (running) {
-    console.log("\n--- MENU DES COMPTES CLIENTS ---");
+    console.log("\n--- MENU DES COMPTES & PROFILS CLIENTS ---");
     console.log("  1. 📋 Lister tous les comptes clients");
-    console.log("  2. 🚫 Bloquer / Débloquer un compte");
-    console.log("  3. 🗑️  Supprimer un compte client");
+    console.log("  2. ✏️  Modifier un profil client (Nom, Bio, Tier, Avatar, Compteurs...)");
+    console.log("  3. 🔵 Basculer la coche Vérifiée d'un profil (Badge Vérifié)");
+    console.log("  4. 📰 Gérer & modifier les posts / Vibes d'un compte");
+    console.log("  5. 🚫 Bloquer / Débloquer un compte");
+    console.log("  6. 🗑️  Supprimer un compte client");
     console.log("  0. ↩️  Retour / Quitter");
 
-    const choice = (await rl.question("\n👉 Entrez votre choix [0-3] : ")).trim();
+    const choice = (await rl.question("\n👉 Entrez votre choix [0-6] : ")).trim();
 
     switch (choice) {
       case '1':
         await handleListCustomers();
         break;
       case '2':
+        await handleEditCustomerProfile(rl);
+        break;
+      case '3':
+        await handleToggleVerifiedBadge(rl);
+        break;
+      case '4': {
+        const customer = await pickCustomer(rl, "SÉLECTION DU CLIENT POUR GÉRER SES POSTS");
+        if (customer) {
+          await handleManagePosts(rl, { id: String(customer.id), username: customer.username, email: customer.email });
+        }
+        break;
+      }
+      case '5':
         await handleToggleBlockCustomer(rl);
         break;
-      case '3': 
+      case '6': 
         await handleDeleteCustomer(rl);
         break;
       case '0': 
@@ -1519,7 +2279,7 @@ export async function runCustomerAccountManager() {
         running = false;
         break;
       default:
-        console.log("?? Option invalide.");
+        console.log("⚠️ Option invalide.");
     }
   }
 
@@ -2571,6 +3331,24 @@ export async function runAdminCli() {
     await runCustomerAccountManager();
     process.exit(0);
   }
+  if (args.includes('--edit-profile')) {
+    const rl = readline.createInterface({ input, output });
+    await handleEditCustomerProfile(rl);
+    rl.close();
+    process.exit(0);
+  }
+  if (args.includes('--verify-user')) {
+    const rl = readline.createInterface({ input, output });
+    await handleToggleVerifiedBadge(rl);
+    rl.close();
+    process.exit(0);
+  }
+  if (args.includes('--posts') || args.includes('--manage-posts') || args.includes('--edit-post')) {
+    const rl = readline.createInterface({ input, output });
+    await handleManagePosts(rl);
+    rl.close();
+    process.exit(0);
+  }
   if (args.includes('--vibe') || args.includes('--publish-vibe')) {
     await runVibePublisher();
     process.exit(0);
@@ -2615,13 +3393,14 @@ export async function runAdminCli() {
     console.log(`  ${c.brightYellow}[6]${c.reset} 📈 ${c.bold}Augmenter temporairement un quota (Boost jusqu'à une date ou période)${c.reset}`);
     console.log(`  ${c.brightMagenta}[7]${c.reset} 🎟️  Gérer les codes d'abonnement (Créer, Lister, Activer, Modifier)`);
     console.log(`  ${c.brightYellow}[8]${c.reset} 📧 Lancer le Studio de Newsletter (Éditeur HTML & CLI)`);
-    console.log(`  ${c.brightWhite}[9]${c.reset} 👥 Gérer les comptes clients (Lister, Bloquer, Supprimer)`);
+    console.log(`  ${c.brightWhite}[9]${c.reset} 👥 Gérer les comptes & profils clients (Lister, Modifier profil, Coche vérifiée, Bloquer, Supprimer)`);
     console.log(`  ${c.brightCyan}[10]${c.reset} 🔔 Gérer les Notifications & Actualités (Broadcast)`);
     console.log(`  ${c.brightGreen}[11]${c.reset} 📝 ${c.bold}Publier une Vibe pour un utilisateur (Éditeur web & CLI)${c.reset}`);
+    console.log(`  ${c.brightYellow}[12]${c.reset} 📰 ${c.bold}Gérer & modifier les posts / Vibes (Lister, Modifier texte/statut/médias/stats, Supprimer)${c.reset}`);
     console.log(`  ${c.white}[0]${c.reset} 🚪 Quitter`);
     console.log("");
 
-    const choice = (await rl.question(`  ${c.brightYellow}➔ Votre choix [0-11] : ${c.reset}`)).trim();
+    const choice = (await rl.question(`  ${c.brightYellow}➔ Votre choix [0-12] : ${c.reset}`)).trim();
 
     switch (choice) {
       case '1':
@@ -2667,6 +3446,11 @@ export async function runAdminCli() {
         await runVibePublisher();
         rl = readline.createInterface({ input, output });
         break;
+      case '12':
+        rl.close();
+        await runPostManagerCli();
+        rl = readline.createInterface({ input, output });
+        break;
       case '0':
       case 'exit':
       case 'quit':
@@ -2684,6 +3468,9 @@ export async function runAdminCli() {
 // Exécution si appelé directement
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('admin.ts')) {
   runAdminCli().catch((err) => {
+    if (err?.code === 'ERR_READLINE_ACTION' || err?.message?.includes('closed') || err?.code === 'EPIPE') {
+      process.exit(0);
+    }
     console.error("❌ Erreur fatale :", err?.message || err);
     process.exit(1);
   });

@@ -423,10 +423,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           )}
           <button
             onClick={() => setIsShareOpen(true)}
-            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+            className="p-2 rounded-full text-black dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
             title="Partager le profil (Carte, QR Code, Lien)"
           >
-            <Share2 className="w-4 h-4 text-cyan-400" />
+            <Share2 className="w-4 h-4 text-black dark:text-white" />
           </button>
 
           {isSelf && (
@@ -535,20 +535,20 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsShareOpen(true)}
-              className="py-2 px-4 rounded-full border border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-white font-semibold text-xs transition-all flex items-center gap-1.5 shadow-sm hover:border-zinc-500"
+              className="py-2 px-4 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900/80 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-black dark:text-white font-semibold text-xs transition-all flex items-center gap-1.5 shadow-sm hover:border-zinc-400 dark:hover:border-zinc-500"
               title="Partager le compte Vibe (Carte HD, QR Code, Lien)"
             >
-              <Share2 className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Partager</span>
+              <Share2 className="w-3.5 h-3.5 text-black dark:text-white" />
+              <span className="text-black dark:text-white">Partager</span>
             </button>
 
             {isSelf ? (
               <button
                 onClick={() => setIsEditOpen(true)}
-                className="py-2 px-5 rounded-full border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
+                className="py-2 px-5 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-black dark:text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
               >
-                <Edit3 className="w-3.5 h-3.5" />
-                <span>Modifier le profil</span>
+                <Edit3 className="w-3.5 h-3.5 text-black dark:text-white" />
+                <span className="text-black dark:text-white">Modifier le profil</span>
               </button>
             ) : blockedByMe ? (
               <button

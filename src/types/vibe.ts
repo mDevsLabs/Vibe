@@ -150,6 +150,13 @@ export interface DirectMessage {
   recipient_id: string;
   content: string;
   is_read: boolean;
+  read_at?: string | null;
+  is_edited?: boolean;
+  edited_at?: string | null;
+  reply_to_id?: string | null;
+  reply_to_content?: string | null;
+  reply_to_username?: string | null;
+  reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
   created_at: string;
 }
 
@@ -235,6 +242,11 @@ export interface UserSettings {
   mai_default_model?: string;
   /** Voix de lecture mAI (mini-lecteur audio flottant, cf. GET /v1/speech/voices). */
   mai_tts_voice?: string;
+  /** Langue cible de traduction (code DeepL : FR, EN-US…) ; vide/null = langue du navigateur. */
+  ui_language?: string;
   accent_color?: string;
   font_size?: 'small' | 'medium' | 'large';
+  message_bubble_theme?: string;
+  chat_background_theme?: string;
+  message_bubble_shape?: string;
 }

@@ -22,6 +22,10 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_default_model TEXT`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_tts_voice TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS ui_language TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_theme TEXT DEFAULT 'monochrome'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS chat_background_theme TEXT DEFAULT 'default'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_shape TEXT DEFAULT 'pill'`;
       personalizationColumnsReady = true;
     } catch (err) {
       console.warn("[vibe-settings] ensurePersonalizationColumns skipped:", (err as any)?.message);
@@ -101,7 +105,8 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           blur_sensitive_content, age_restriction_enabled, allow_dms, dms_enabled,
           feed_default_mode, hide_reposts, blocked_keywords, two_factor_auth, allow_mentions,
           theme_preference, accent_color, font_size, mai_auto_approve_tools,
-          posts_ai_generated_by_default, mai_default_model, mai_tts_voice
+          posts_ai_generated_by_default, mai_default_model, mai_tts_voice, ui_language,
+          message_bubble_theme, chat_background_theme, message_bubble_shape
         )
         VALUES (
           ${userId},
@@ -127,7 +132,11 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.mai_auto_approve_tools ?? false},
           ${body.posts_ai_generated_by_default ?? false},
           ${body.mai_default_model || null},
-          ${body.mai_tts_voice || null}
+          ${body.mai_tts_voice || null},
+          ${body.ui_language || null},
+          ${body.message_bubble_theme || 'monochrome'},
+          ${body.chat_background_theme || 'default'},
+          ${body.message_bubble_shape || 'pill'}
         )
         ON CONFLICT (user_id)
         DO UPDATE SET
@@ -154,6 +163,10 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           posts_ai_generated_by_default = CASE WHEN ${body.posts_ai_generated_by_default !== undefined} THEN EXCLUDED.posts_ai_generated_by_default ELSE user_settings.posts_ai_generated_by_default END,
           mai_default_model = CASE WHEN ${body.mai_default_model !== undefined} THEN EXCLUDED.mai_default_model ELSE user_settings.mai_default_model END,
           mai_tts_voice = CASE WHEN ${body.mai_tts_voice !== undefined} THEN EXCLUDED.mai_tts_voice ELSE user_settings.mai_tts_voice END,
+          ui_language = CASE WHEN ${body.ui_language !== undefined} THEN EXCLUDED.ui_language ELSE user_settings.ui_language END,
+          message_bubble_theme = CASE WHEN ${body.message_bubble_theme !== undefined} THEN EXCLUDED.message_bubble_theme ELSE user_settings.message_bubble_theme END,
+          chat_background_theme = CASE WHEN ${body.chat_background_theme !== undefined} THEN EXCLUDED.chat_background_theme ELSE user_settings.chat_background_theme END,
+          message_bubble_shape = CASE WHEN ${body.message_bubble_shape !== undefined} THEN EXCLUDED.message_bubble_shape ELSE user_settings.message_bubble_shape END,
           updated_at = NOW()
       `;
 

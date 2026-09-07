@@ -225,7 +225,7 @@ export function registerVibeBooksRoutes(app: Hono, registerMulti: RegisterMultiF
         JOIN users u ON u.id = p.author_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
         WHERE bi.book_id = ${bookId}::uuid
-          AND (p.status <> 'scheduled' OR p.author_id = ${userId})
+          AND (COALESCE(p.status, 'published') <> 'scheduled' OR p.author_id = ${userId})
         ORDER BY bi.added_at DESC
         LIMIT 200
       `;

@@ -15,6 +15,7 @@ import { registerModelRoutes } from "./models.ts";
 import { registerProjectRoutes } from "./projects.ts";
 import { registerRealtimeRoutes } from "./realtime.ts";
 import { registerStorageRoutes } from "./storage.ts";
+import { registerTranslateRoutes } from "./translate.ts";
 import { registerVibeAIRoutes } from "./vibe-ai.ts";
 import { registerVibeRoutes } from "./vibe.ts";
 import { registerWebRoutes } from "./web.ts";
@@ -142,6 +143,7 @@ registerProjectRoutes(app);
 registerDeviceRoutes(app);
 registerRealtimeRoutes(app);
 registerVibeAIRoutes(app);
+registerTranslateRoutes(app);
 registerVibeRoutes(app);
 
 export default app.fetch;

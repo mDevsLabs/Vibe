@@ -241,7 +241,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           JOIN users u ON u.id = p.author_id
           LEFT JOIN profiles pr ON pr.user_id = u.id
           WHERE p.author_id = ${row.id}
-            AND (p.status = 'published' OR ${currentUserId}::bigint = p.author_id)
+            AND (COALESCE(p.status, 'published') = 'published' OR ${currentUserId}::bigint = p.author_id)
             AND (
               p.visibility = 'public'
               OR ${currentUserId ? sql`p.author_id = ${currentUserId}

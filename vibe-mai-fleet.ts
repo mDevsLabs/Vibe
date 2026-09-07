@@ -388,35 +388,6 @@ export class MAIAgentFleet {
           break;
         }
 
-        case "summarize": {
-          const recent = await sql`
-            SELECT p.content, u.username FROM posts p
-            JOIN users u ON u.id = p.author_id
-            ORDER BY p.published_at DESC LIMIT 30
-          `;
-          if (recent.length === 0) {
-            resultData = { summary: "Le fil est calme : aucune publication récente à résumer." };
-            break;
-          }
-          const hashtags: Record<string, number> = {};
-          for (const r of recent) {
-            for (const m of String(r.content).matchAll(/#([\p{L}\p{N}_]{2,30})/gu)) {
-              const tag = m[1].toLowerCase();
-              hashtags[tag] = (hashtags[tag] || 0) + 1;
-            }
-          }
-          const topTags = Object.entries(hashtags).sort((a, b) => b[1] - a[1]).slice(0, 5);
-          const authors = [...new Set(recent.map((r: any) => `@${r.username}`))].slice(0, 5).join(", ");
-          resultData = {
-            summary: [
-              `📄 ${recent.length} publications récentes analysées, principalement par ${authors}.`,
-              topTags.length > 0 ? `🏷️ Sujets dominants : ${topTags.map(([t, n]) => `#${t} (${n})`).join(", ")}.` : "",
-              "💡 Le flux tourne surtout autour de ces thématiques — explorez les tendances pour en savoir plus.",
-            ].filter(Boolean).join("\n\n"),
-          };
-          break;
-        }
-
         case "fact_check": {
           const { statement } = args;
           const search = await executeWebSearch(String(statement || ""), 5).catch(() => null);

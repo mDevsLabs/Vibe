@@ -17,7 +17,7 @@
 
 ### 🤖 mAI — l'assistant IA intégré
 - **mAI Hub** (`MAIStudioPage`) : chat multi-modèles (mAI 1.5 Apex/Light, Gemini, Claude, GPT-4o, DeepSeek…)
-- **Commandes slash & mentions** : `/image`, `/search`, `/summarize`, `/fact_check`, `/rewrite`, `/translate`, `/publish`, `/follow`, `/trends`, `/stats`, `/quotas`, `/notifications` (alias `@` disponibles)
+- **Commandes slash & mentions** : `/image`, `/search`, `/fact_check`, `/rewrite`, `/translate`, `/publish`, `/follow`, `/trends`, `/stats`, `/quotas`, `/notifications` (alias `@` disponibles)
 - **Outils compte (function-style)** exécutés côté serveur avec journalisation complète (`mai_tool_executions`) :
   | Outil | Description | Approbation requise |
   |---|---|---|
@@ -29,7 +29,7 @@
   | `search_posts` | Recherche de publications | Non |
   | `search_web` | Recherche web (You.com + fallbacks) | Non |
   | `generate_vibe_image` | Génération d'image IA (quota daily) | Non |
-  | `summarize` / `fact_check` / `rewrite_post` / `translate` | Outils textuels (OpenRouter) | Non |
+  | `fact_check` / `rewrite_post` / `translate` | Outils textuels (OpenRouter) | Non |
   | `analyze_trends` | Tendances hashtags 7 jours | Non |
   | `check_quotas` | Quotas tokens/images | Non |
   | `get_notifications` | Notifications récentes | Non |

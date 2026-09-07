@@ -32,17 +32,18 @@ import {
   Pin,
   PinOff,
   EyeOff,
-  Ban
+  Ban,
+  X
 } from 'lucide-react';
 import { Post } from '../../types/vibe';
-import { ApiService } from '../../services/api';
+import { ApiService, TRANSLATION_LANGUAGES } from '../../services/api';
 import { RealtimeService } from '../../services/realtimeService';
 import { useAudioPlayer } from '../../context/AudioPlayerContext';
 import { useAuth } from '../../context/AuthContext';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
-import { RichContent, htmlToPlainText } from '../common/RichContent';
+import { RichContent } from '../common/RichContent';
 import { usePostViewTracking } from '../../hooks/usePostViewTracking';
 import { formatCompactCount } from '../../algorithms';
 import { PostShareModal } from './PostShareModal';
@@ -54,6 +55,7 @@ interface PostCardProps {
   onOpenThread?: (post: Post) => void;
   onOpenExplain?: (post: Post) => void;
   onOpenProfile?: (username: string) => void;
+  onRemoveFromBook?: (postId: string) => void;
 }
 
 const formatTimeAgo = (dateStr: string): string => {
@@ -77,6 +79,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   onOpenThread,
   onOpenExplain,
   onOpenProfile,
+  onRemoveFromBook,
 }) => {
   const { user } = useAuth();
   const { playQueue } = useAudioPlayer();
@@ -91,8 +94,8 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const [likeBurst, setLikeBurst] = useState(false);
   // Retour d'algorithme : « Cela m'intéresse » / « Cela ne m'intéresse pas »
   const [myFeedback, setMyFeedback] = useState<'more' | 'less' | null>(post.my_feedback || null);
-  // Traduction « Traduire avec mAI » (affichée sous le texte d'origine)
-  const [translation, setTranslation] = useState<{ text: string; language: string } | null>(null);
+  // Traduction DeepL (repli mAI côté serveur), affichée sous le texte d'origine
+  const [translation, setTranslation] = useState<{ text: string; language: string; targetLanguage?: string; provider?: string } | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
   // Épinglage sur le profil + modale de partage
   const [isPinned, setIsPinned] = useState(post.is_pinned || false);
@@ -173,20 +176,41 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId: post.id } }));
   };
 
-  /** Traduction avec mAI : détection de langue + traduction instantanée (cache serveur). */
+  /** Traduction DeepL (repli mAI côté serveur) : langue cible = réglage ou navigateur. */
   const handleTranslate = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isTranslating || translation) return;
     setIsTranslating(true);
     try {
-      const res = await ApiService.translatePost(post.id);
-      if (res?.translation) {
-        setTranslation({ text: res.translation, language: res.detected_language || '' });
+      const userLang = ApiService.resolveTargetLanguage();
+      let res = await ApiService.translatePost(post.id, userLang);
+      // Si la publication est déjà dans la langue cible (ex : post en français pour un utilisateur francophone),
+      // on traduit vers l'anglais (ou vers le français si la cible initiale était l'anglais).
+      if (res?.same_language) {
+        const altLang = userLang.slice(0, 2).toUpperCase() === 'FR' ? 'EN-US' : 'FR';
+        res = await ApiService.translatePost(post.id, altLang);
+      }
+      if (res?.translation && !res.same_language) {
+        const rawLang = res.detected_language || '';
+        const prettyLang = rawLang
+          ? res.provider === 'deepl'
+            ? TRANSLATION_LANGUAGES.find((l) => l.code === rawLang.toUpperCase())?.label || rawLang
+            : rawLang
+          : '';
+        const targetLabel = res.target_lang
+          ? TRANSLATION_LANGUAGES.find((l) => l.code === res.target_lang?.toUpperCase())?.label || res.target_lang
+          : (userLang.slice(0, 2).toUpperCase() === 'FR' && rawLang.toUpperCase().startsWith('FR') ? 'Anglais' : undefined);
+        setTranslation({
+          text: res.translation,
+          language: prettyLang,
+          targetLanguage: targetLabel,
+          provider: res.provider,
+        });
       } else {
-        NotificationService.showInAppToast('Traduction indisponible', "mAI n'a pas pu traduire cette publication.", 'error');
+        NotificationService.showInAppToast('Traduction indisponible', "La traduction n'a pas pu être récupérée.", 'error');
       }
     } catch (err: any) {
-      NotificationService.showInAppToast('Traduction impossible', err?.message || "mAI n'a pas pu traduire cette publication.", 'error');
+      NotificationService.showInAppToast('Traduction impossible', err?.message || "La traduction n'a pas pu être récupérée.", 'error');
     } finally {
       setIsTranslating(false);
     }
@@ -443,21 +467,52 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               )}
             </div>
 
-            {/* Options Menu */}
-            <div className="relative">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowMenu(!showMenu);
-                }}
-                className="text-zinc-500 hover:text-white p-1 rounded-full hover:bg-zinc-900 transition-colors"
-              >
-                <MoreHorizontal className="w-4 h-4" />
-              </button>
+            {/* Options Menu & Actions */}
+            <div className="flex items-center gap-1">
+              {onRemoveFromBook && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveFromBook(post.id);
+                  }}
+                  className="p-1 rounded-full text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                  title="Retirer du Livre"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
 
-              {showMenu && (
-                <div className="absolute right-0 top-6 z-20 w-48 vibe-menu rounded-2xl p-1.5 space-y-1">
-                  {onOpenExplain && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowMenu(!showMenu);
+                  }}
+                  className="text-zinc-500 hover:text-white p-1 rounded-full hover:bg-zinc-900 transition-colors"
+                  title="Options de la publication"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
+
+                {showMenu && (
+                  <div className="absolute right-0 top-6 z-20 w-48 vibe-menu rounded-2xl p-1.5 space-y-1">
+                    {onRemoveFromBook && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowMenu(false);
+                          onRemoveFromBook(post.id);
+                        }}
+                        className="w-full text-left px-3 py-2 rounded-xl text-xs text-red-400 hover:bg-red-500/10 flex items-center gap-2"
+                      >
+                        <X className="w-3.5 h-3.5 text-red-400" />
+                        <span>Retirer du Livre</span>
+                      </button>
+                    )}
+                    {onOpenExplain && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -598,30 +653,33 @@ export const PostCardBase: React.FC<PostCardProps> = ({
               )}
             </div>
           </div>
+        </div>
 
           {/* Post Text (Unlimited, rendu riche sécurisé) */}
           <div className="text-zinc-100 text-sm sm:text-base leading-relaxed">
             <RichContent content={post.content} onOpenProfile={onOpenProfile} />
           </div>
 
-          {/* Traduction avec mAI : affichée sous le texte d'origine */}
+          {/* Traduction DeepL (repli mAI) : affichée sous le texte d'origine */}
           {(translation || isTranslating) && (
             <div onClick={(e) => e.stopPropagation()} className="pt-1.5">
               {isTranslating ? (
                 <div className="flex items-center gap-2 text-[11px] text-zinc-500">
                   <Loader2 className="w-3 h-3 animate-spin" />
-                  <span>mAI traduit cette publication…</span>
+                  <span>Traduction en cours…</span>
                 </div>
               ) : (
                 <div className="pl-2.5 border-l-2 border-zinc-700">
-                  <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap break-words">
-                    {translation!.text}
-                  </p>
+                  <div className="text-sm text-zinc-300 leading-relaxed break-words">
+                    <RichContent content={translation!.text} />
+                  </div>
                   <div className="mt-1 flex items-center gap-3 text-[11px]">
                     <span className="text-zinc-600">
-                      {translation!.language
-                        ? `Traduit de l'« ${translation!.language} » par mAI`
-                        : 'Traduit par mAI'}
+                      {translation!.targetLanguage
+                        ? `Traduit en ${translation!.targetLanguage} via mAI`
+                        : translation!.language
+                        ? `Traduit de l'« ${translation!.language} » via mAI`
+                        : `Traduit via mAI`}
                     </span>
                     <button
                       onClick={() => setTranslation(null)}
@@ -635,16 +693,16 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             </div>
           )}
 
-          {/* Bouton « Traduire avec mAI » (détection de langue automatique) */}
+          {/* Bouton « Traduire » (langue cible = réglage utilisateur ou navigateur) */}
           {!translation && !isTranslating && post.content?.trim() && (
             <div onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={handleTranslate}
                 className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600 hover:text-white transition-colors"
-                title="Détecter la langue et traduire avec mAI"
+                title="Traduire dans votre langue (mAI)"
               >
                 <Languages className="w-3.5 h-3.5" />
-                <span>Traduire avec mAI</span>
+                <span>Traduire</span>
               </button>
             </div>
           )}
@@ -901,5 +959,6 @@ export const PostCard = React.memo(
     prev.onOpenThread === next.onOpenThread &&
     prev.onOpenProfile === next.onOpenProfile &&
     prev.onOpenExplain === next.onOpenExplain &&
-    prev.onPostDeleted === next.onPostDeleted
+    prev.onPostDeleted === next.onPostDeleted &&
+    prev.onRemoveFromBook === next.onRemoveFromBook
 );

@@ -2,8 +2,7 @@
  * ============================================================================
  * VIBE SOCIAL PLATFORM — RICH TEXT EDITOR (src/components/common/RichTextEditor.tsx)
  * Éditeur WYSIWYG contenteditable : gras, italique, souligné, barré, listes à
- * puces/numérotées, citations, code, liens, raccourcis Markdown à la frappe,
- * barre d'outils flottante sur sélection & collage d'URL avec nom de lien.
+ * barre d'outils WYSIWYG & collage d'URL avec nom de lien.
  * ============================================================================
  */
 
@@ -52,6 +51,8 @@ interface RichTextEditorProps {
   compact?: boolean;
   disabled?: boolean;
   className?: string;
+  /** Mode étendu (modal) : remplit toute la hauteur disponible */
+  fillHeight?: boolean;
 }
 
 interface LinkDraft {
@@ -75,15 +76,14 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       compact = false,
       disabled = false,
       className = '',
+      fillHeight = false,
     },
     ref
   ) => {
     const editorRef = useRef<HTMLDivElement>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const savedRangeRef = useRef<Range | null>(null);
-    const [isEmpty, setIsEmpty] = useState(true);
-    const [showFloatBar, setShowFloatBar] = useState(false);
-    const [floatPos, setFloatPos] = useState({ top: 0, left: 0 });
+    const [_isEmpty, setIsEmpty] = useState(true);
     const [activeStates, setActiveStates] = useState({
       bold: false,
       italic: false,
@@ -336,47 +336,11 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       }
     }, [emitChange]);
 
-    // ── Barre flottante de sélection ────────────────────────────────────
-
-    const updateFloatBar = useCallback(() => {
-      const el = editorRef.current;
-      const wrapper = wrapperRef.current;
-      if (!el || !wrapper || !el.contains(document.activeElement)) {
-        setShowFloatBar(false);
-        return;
-      }
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !el.contains(sel.anchorNode)) {
-        setShowFloatBar(false);
-        return;
-      }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) {
-        setShowFloatBar(false);
-        return;
-      }
-      const wrapperRect = wrapper.getBoundingClientRect();
-      const left = Math.min(
-        Math.max(8, rect.left - wrapperRect.left + rect.width / 2),
-        wrapperRect.width - 8
-      );
-      setFloatPos({
-        top: Math.max(-4, rect.top - wrapperRect.top - 46),
-        left,
-      });
-      setShowFloatBar(true);
+    // ── Synchronisation de la sélection avec la barre d'outils ─────────
+    const handleSelectionUpdate = useCallback(() => {
       readActiveStates();
       saveSelection();
     }, [readActiveStates, saveSelection]);
-
-    useEffect(() => {
-      const onSelectionChange = () => {
-        if (linkDraft) return;
-        updateFloatBar();
-      };
-      document.addEventListener('selectionchange', onSelectionChange);
-      return () => document.removeEventListener('selectionchange', onSelectionChange);
-    }, [updateFloatBar, linkDraft]);
 
     // ── Colle le lien : popover de nommage ──────────────────────────────
 
@@ -417,7 +381,6 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
           document.execCommand('insertHTML', false, html);
         }
         savedRangeRef.current = null;
-        setShowFloatBar(false);
         emitChange();
       },
       [emitChange, restoreSelection]
@@ -429,7 +392,6 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
         sel && !sel.isCollapsed && editorRef.current?.contains(sel.anchorNode) ? sel.toString() : '';
       saveSelection();
       setLinkDraft({ url: '', text: selectedText, lockedUrl: false });
-      setShowFloatBar(false);
       setTimeout(() => linkTextInputRef.current?.focus(), 30);
     }, [saveSelection]);
 
@@ -544,30 +506,9 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
         onClick={onClick}
         disabled={disabled}
         className={`p-1.5 rounded-lg transition-colors ${
-          active ? 'bg-white text-black' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
-        }`}
-        title={title}
-      >
-        {icon}
-      </button>
-    );
-
-    const floatingBtn = (
-      icon: React.ReactNode,
-      title: string,
-      onClick: () => void,
-      active?: boolean
-    ) => (
-      <button
-        key={title}
-        type="button"
-        onMouseDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onClick();
-        }}
-        className={`p-1.5 rounded-lg transition-colors ${
-          active ? 'bg-white text-black' : 'text-zinc-300 hover:text-black hover:bg-zinc-300'
+          active
+            ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-black shadow-sm'
+            : 'text-zinc-600 hover:text-zinc-950 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'
         }`}
         title={title}
       >
@@ -576,16 +517,29 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     );
 
     return (
-      <div ref={wrapperRef} className={`relative ${className}`}>
+      <div
+        ref={wrapperRef}
+        className={`relative ${fillHeight ? 'flex-1 flex flex-col min-h-0' : ''} ${className}`}
+        onClick={(e) => {
+          // Cliquer dans la zone libre de l'éditeur place le focus
+          if (
+            e.target === wrapperRef.current &&
+            editorRef.current &&
+            document.activeElement !== editorRef.current
+          ) {
+            editorRef.current.focus();
+          }
+        }}
+      >
         {/* Barre d'outils principale */}
-        <div className="flex items-center gap-0.5 flex-wrap pb-1.5 border-b border-zinc-900 mb-1">
+        <div className="flex items-center gap-0.5 flex-wrap pb-1.5 border-b border-zinc-200 dark:border-zinc-800 mb-1 shrink-0">
           {toolbarBtn(<Bold className="w-3.5 h-3.5" />, 'Gras (**texte**)', () => exec('bold'), activeStates.bold)}
           {toolbarBtn(<Italic className="w-3.5 h-3.5" />, 'Italique (*texte*)', () => exec('italic'), activeStates.italic)}
           {toolbarBtn(<UnderlineIcon className="w-3.5 h-3.5" />, 'Souligné (__texte__)', () => exec('underline'), activeStates.underline)}
           {toolbarBtn(<Strikethrough className="w-3.5 h-3.5" />, 'Barré (~~texte~~)', () => exec('strikeThrough'), activeStates.strikeThrough)}
           {!compact && (
             <>
-              <span className="w-px h-4 bg-zinc-800 mx-1" />
+              <span className="w-px h-4 bg-zinc-300 dark:bg-zinc-800 mx-1" />
               {toolbarBtn(<List className="w-3.5 h-3.5" />, 'Liste à puces (- + espace)', () => exec('insertUnorderedList'))}
               {toolbarBtn(<ListOrdered className="w-3.5 h-3.5" />, 'Liste numérotée (1. + espace)', () => exec('insertOrderedList'))}
               {toolbarBtn(<Quote className="w-3.5 h-3.5" />, 'Citation (> + espace)', toggleBlockquote)}
@@ -595,7 +549,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
               })}
             </>
           )}
-          <span className="w-px h-4 bg-zinc-800 mx-1" />
+          <span className="w-px h-4 bg-zinc-300 dark:bg-zinc-800 mx-1" />
           {toolbarBtn(<Link2 className="w-3.5 h-3.5" />, 'Insérer un lien', openLinkPopover)}
         </div>
 
@@ -610,15 +564,18 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
           onInput={handleInput}
           onKeyDown={handleMentionKeyDown}
           onPaste={handlePaste}
-          onKeyUp={readActiveStates}
-          onMouseUp={updateFloatBar}
+          onKeyUp={handleSelectionUpdate}
+          onMouseUp={handleSelectionUpdate}
           onBlur={() => {
             saveSelection();
             closeMention();
-            if (!linkDraft) setTimeout(() => setShowFloatBar(false), 150);
           }}
-          className={`rte-content w-full bg-transparent text-white text-sm sm:text-base leading-relaxed focus:outline-none overflow-y-auto ${
-            compact ? 'min-h-[2.75rem] max-h-32' : 'min-h-[7rem] max-h-[45vh]'
+          className={`rte-content w-full bg-transparent text-black dark:text-white text-sm sm:text-base leading-relaxed focus:outline-none overflow-y-auto ${
+            fillHeight
+              ? 'flex-1 min-h-[10rem] sm:min-h-[14rem]'
+              : compact
+              ? 'min-h-[2.75rem] max-h-32'
+              : 'min-h-[7rem] max-h-[45vh]'
           }`}
         />
 
@@ -631,34 +588,18 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
           />
         )}
 
-        {/* Barre flottante sur sélection de texte */}
-        {showFloatBar && !linkDraft && (
-          <div
-            className="absolute z-30 flex items-center gap-0.5 px-1.5 py-1 rounded-xl bg-white text-black shadow-2xl border border-zinc-300 animate-fadeIn"
-            style={{ top: floatPos.top, left: floatPos.left, transform: 'translateX(-50%)' }}
-            onMouseDown={(e) => e.preventDefault()}
-          >
-            {floatingBtn(<Bold className="w-3.5 h-3.5" />, 'Gras', () => exec('bold'), activeStates.bold)}
-            {floatingBtn(<Italic className="w-3.5 h-3.5" />, 'Italique', () => exec('italic'), activeStates.italic)}
-            {floatingBtn(<UnderlineIcon className="w-3.5 h-3.5" />, 'Souligné', () => exec('underline'), activeStates.underline)}
-            {floatingBtn(<Strikethrough className="w-3.5 h-3.5" />, 'Barré', () => exec('strikeThrough'), activeStates.strikeThrough)}
-            <span className="w-px h-4 bg-zinc-300 mx-0.5" />
-            {floatingBtn(<Link2 className="w-3.5 h-3.5" />, 'Ajouter un lien', openLinkPopover)}
-          </div>
-        )}
-
         {/* Popover de nommage des liens (collage d'URL ou bouton lien) */}
         {linkDraft && (
-          <div className="absolute z-30 top-0 left-0 right-0 p-3 rounded-2xl bg-zinc-950 border border-zinc-700 shadow-2xl animate-fadeIn space-y-2">
+          <div className="absolute z-30 top-0 left-0 right-0 p-3 rounded-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 shadow-2xl animate-fadeIn space-y-2 text-black dark:text-white">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
                 <Link2 className="w-3 h-3" />
                 {linkDraft.lockedUrl ? 'Coller un lien' : 'Insérer un lien'}
               </span>
               <button
                 type="button"
                 onClick={() => setLinkDraft(null)}
-                className="p-0.5 rounded-full text-zinc-400 hover:text-white"
+                className="p-0.5 rounded-full text-zinc-400 hover:text-black dark:hover:text-white"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -676,7 +617,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
                   }
                 }}
                 placeholder="Nom du lien (ex : ICI)"
-                className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-zinc-50 dark:bg-black border border-zinc-200 dark:border-zinc-800 text-sm text-black dark:text-white placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
               />
               {!linkDraft.lockedUrl && (
                 <input
@@ -690,13 +631,13 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
                     }
                   }}
                   placeholder="https://…"
-                  className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500 font-mono text-xs"
+                  className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-zinc-50 dark:bg-black border border-zinc-200 dark:border-zinc-800 text-sm text-black dark:text-white placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-500 font-mono text-xs"
                 />
               )}
               <button
                 type="button"
                 onClick={confirmLink}
-                className="px-3 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors flex items-center gap-1 shrink-0"
+                className="px-3 py-2 rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-black text-xs font-bold hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors flex items-center gap-1 shrink-0"
               >
                 <Check className="w-3.5 h-3.5" />
                 Insérer
@@ -713,7 +654,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
                     setLinkDraft(null);
                     emitChange();
                   }}
-                  className="text-[11px] text-zinc-400 hover:text-white flex items-center gap-1 shrink-0"
+                  className="text-[11px] text-zinc-500 hover:text-black dark:text-zinc-400 dark:hover:text-white flex items-center gap-1 shrink-0"
                 >
                   <CornerDownLeft className="w-3 h-3" />
                   Coller l'URL telle quelle

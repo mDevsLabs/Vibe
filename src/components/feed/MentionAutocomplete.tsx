@@ -34,13 +34,13 @@ export const MentionAutocomplete: React.FC<MentionAutocompleteProps> = ({
   if (users.length === 0) return null;
 
   return (
-    <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
-      <div className="p-2 border-b border-zinc-900 bg-zinc-900/50 flex items-center justify-between text-[11px] font-mono text-zinc-400">
+    <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm vibe-menu rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
+      <div className="p-2 border-b border-zinc-200 dark:border-zinc-800 bg-black/5 dark:bg-zinc-900/50 flex items-center justify-between text-[11px] font-mono text-zinc-600 dark:text-zinc-400">
         <span>Comptes Vibe</span>
         <span>{users.length} suggéré(s)</span>
       </div>
 
-      <div className="divide-y divide-zinc-900 max-h-56 overflow-y-auto">
+      <div className="divide-y divide-zinc-100 dark:divide-zinc-900 max-h-56 overflow-y-auto">
         {users.map((user, index) => (
           <button
             key={user.id}
@@ -50,7 +50,7 @@ export const MentionAutocomplete: React.FC<MentionAutocompleteProps> = ({
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => onSelect(user)}
             className={`w-full p-2.5 flex items-center gap-3 text-left transition-colors ${
-              index === highlightedIndex ? 'bg-zinc-900' : 'hover:bg-zinc-900'
+              index === highlightedIndex ? 'bg-black/10 dark:bg-zinc-900' : 'hover:bg-black/5 dark:hover:bg-zinc-900'
             }`}
           >
             <ProfileAvatar
@@ -61,7 +61,7 @@ export const MentionAutocomplete: React.FC<MentionAutocompleteProps> = ({
             />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-bold text-white truncate">
+                <span className="text-xs font-bold text-zinc-900 dark:text-white truncate">
                   {user.display_name || user.username}
                 </span>
                 <VerifiedBadge isVerified={user.is_verified} size="xs" />

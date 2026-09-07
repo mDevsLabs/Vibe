@@ -27,6 +27,7 @@ import { ApiService } from '../services/api';
 import { ToolAutocomplete } from '../components/layout/ToolAutocomplete';
 import { MAITool } from '../data/maiTools';
 import { ModelDropdown } from '../components/common/ModelDropdown';
+import { RichContent } from '../components/common/RichContent';
 
 interface ChatMessage {
   id: string;
@@ -388,8 +389,8 @@ export const MAIStudioPage: React.FC = () => {
                   </div>
                 )}
 
-                <div className="whitespace-pre-wrap leading-relaxed space-y-2">
-                  {m.content}
+                <div className="leading-relaxed space-y-2">
+                  <RichContent content={m.content} className="leading-relaxed" />
                 </div>
 
                 {/* Panneau d'approbation utilisateur pour les outils sensibles */}

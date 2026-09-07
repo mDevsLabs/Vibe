@@ -273,22 +273,28 @@ function VibeApp() {
           }}
         />
 
-        {/* Modal Post Composer (hauteur étendue pour la rédaction) */}
+        {/* Modal Post Composer (hauteur et largeur étendues pour la rédaction) */}
         {isComposerModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-end sm:items-start justify-center sm:pt-10 bg-black/70 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn h-dvh">
-            <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl animate-scaleUp h-[94dvh] max-h-[94dvh] flex flex-col">
-              <div className="p-3 pt-safe sm:pt-3 border-b border-zinc-800 flex justify-between items-center bg-black/60 shrink-0">
+          <div
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn h-dvh"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsComposerModalOpen(false);
+            }}
+          >
+            <div className="w-full max-w-2xl lg:max-w-3xl bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl animate-scaleUp h-[94dvh] sm:h-[86dvh] max-h-[94dvh] flex flex-col">
+              <div className="p-3.5 pt-safe sm:pt-3.5 border-b border-zinc-800 flex justify-between items-center bg-black/60 shrink-0">
                 <span className="text-xs font-bold text-white uppercase font-mono tracking-wider">
                   {editingPost ? 'Modifier la vibe' : 'Poster une vibe'}
                 </span>
                 <button
                   onClick={() => setIsComposerModalOpen(false)}
                   className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+                  title="Fermer"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <div className="overflow-y-auto flex-1">
+              <div className="overflow-y-auto flex-1 flex flex-col min-h-0">
                 <PostComposer
                   isModal
                   editingPost={editingPost}
