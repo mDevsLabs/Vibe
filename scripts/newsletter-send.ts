@@ -6,8 +6,34 @@ import { exec } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+function loadEnv() {
+  if (!process.env.DATABASE_URL) {
+    const envPaths = ['.env', '.env.local'];
+    for (const envPath of envPaths) {
+      const fullPath = path.resolve(process.cwd(), envPath);
+      if (fs.existsSync(fullPath)) {
+        const content = fs.readFileSync(fullPath, 'utf8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+            const [key, ...vals] = trimmed.split('=');
+            let val = vals.join('=').trim();
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+              val = val.slice(1, -1);
+            }
+            if (!process.env[key.trim()]) {
+              process.env[key.trim()] = val;
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
-const sql = neon(process.env.DATABASE_URL!);
+loadEnv();
+
+const sql = neon(process.env.DATABASE_URL || "postgres://localhost/dummy");
 
 // ─────────────────────────────────────────────
 // Styles & Palette ANSI CLI

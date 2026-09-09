@@ -1226,6 +1226,7 @@ export async function initCustomersTable() {
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`;
     await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`;
+    await sql`ALTER TABLE profiles ALTER COLUMN display_name DROP NOT NULL;`.catch(() => {});
   } catch (err: any) {
     console.error("ℹ Note lors de la vérification des colonnes dans users/profiles :", err.message || err);
   }
@@ -1380,7 +1381,22 @@ async function getFullCustomerProfile(userId: number | string) {
     WHERE u.id = ${Number(userId)}
     LIMIT 1
   `;
-  return rows[0] || null;
+  const profile = rows[0] || null;
+  if (!profile) return null;
+
+  // Paramètre "code de vérification à chaque connexion" (colonne optionnelle jusqu'à application du script tmp/016)
+  try {
+    const flagRows = await sql`
+      SELECT COALESCE(require_login_verification, TRUE) AS flag
+      FROM users WHERE id = ${Number(userId)} LIMIT 1
+    `;
+    (profile as any).require_login_verification = flagRows[0]?.flag !== false;
+  } catch {
+    // Colonne non migrée : on considère le code exigé (comportement par défaut de l'API)
+    (profile as any).require_login_verification = true;
+  }
+
+  return profile;
 }
 
 function renderProfileCard(user: any, actualPostsCount?: number) {
@@ -1407,6 +1423,130 @@ function renderProfileCard(user: any, actualPostsCount?: number) {
     : `${user.posts_count || 0}`;
   console.log(`║  ${c.dim}Stats :${c.reset} 📝 ${postsInfo} posts  |  👥 ${user.followers_count || 0} abonnés  |  🚶 ${user.following_count || 0} abonnements`);
   console.log("╚".padEnd(68, "═") + "╝\n");
+}
+
+export async function handleEditCustomerAvatar(rl: readline.Interface, targetUserArg?: any) {
+  let user = targetUserArg;
+  if (!user) {
+    user = await pickCustomer(rl, "MODIFIER L'IMAGE D'AVATAR D'UN PROFIL CLIENT");
+    if (!user) return;
+  }
+
+  const full = await getFullCustomerProfile(user.id);
+  if (!full) {
+    console.log(`❌ Profil introuvable.`);
+    return;
+  }
+
+  const currentAvatar = full.profile_avatar || full.user_avatar || '';
+  console.log(`\n${c.bold}🖼️  AVATAR ACTUEL DE @${full.username} :${c.reset}`);
+  console.log(`  ${currentAvatar || c.dim + '(aucun — avatar par défaut)' + c.reset}`);
+  console.log(`\n${c.bold}Actions disponibles :${c.reset}`);
+  console.log(`  ${c.brightCyan}[1]${c.reset} 🔗 Définir une nouvelle image via URL`);
+  console.log(`  ${c.brightCyan}[2]${c.reset} 🎲 Générer un avatar aléatoire (DiceBear)`);
+  console.log(`  ${c.brightCyan}[3]${c.reset} 🧹 Réinitialiser (supprimer l'avatar personnalisé)`);
+  console.log(`  ${c.white}[0]${c.reset} ↩️  Annuler`);
+
+  const choice = (await rl.question(`\n  ${c.brightYellow}➔ Choix [0-3] : ${c.reset}`)).trim();
+  if (choice === '0') return;
+
+  let newAvatarUrl: string | null = null;
+  if (choice === '1') {
+    newAvatarUrl = (await rl.question(`  ➔ URL de la nouvelle image d'avatar : `)).trim() || null;
+    if (!newAvatarUrl) {
+      console.log(`❌ Aucune URL fournie. Action annulée.`);
+      return;
+    }
+  } else if (choice === '2') {
+    const seed = `${full.username}-${crypto.randomBytes(4).toString('hex')}`;
+    newAvatarUrl = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(seed)}`;
+  } else if (choice === '3') {
+    newAvatarUrl = null;
+  } else {
+    console.log(`❌ Option invalide.`);
+    return;
+  }
+
+  await sql`UPDATE users SET avatar_url = ${newAvatarUrl} WHERE id = ${Number(full.id)}`;
+  await sql`
+    INSERT INTO profiles (user_id, display_name, avatar_url, updated_at)
+    VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${newAvatarUrl}, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET avatar_url = ${newAvatarUrl}, updated_at = NOW()
+  `;
+
+  const resultLabel = newAvatarUrl
+    ? `✔ Avatar mis à jour pour @${full.username} :\n    ${newAvatarUrl}`
+    : `✔ Avatar réinitialisé : @${full.username} utilisera l'avatar par défaut de l'application.`;
+  console.log(`\n${c.brightGreen}${resultLabel}${c.reset}\n`);
+}
+
+// ─────────────────────────────────────────────
+// 6b. MODIFICATION DU NOMBRE D'ABONNÉS D'UN UTILISATEUR VIBE
+// ─────────────────────────────────────────────
+export async function handleEditVibeUserFollowers(rl: readline.Interface, targetUserArg?: TargetUser | string) {
+  let user: TargetUser | null = null;
+
+  if (targetUserArg) {
+    if (typeof targetUserArg === 'object') {
+      user = targetUserArg;
+    } else {
+      // Identifiant passé en argument : résoudre id / username / email
+      const found = (await sql`
+        SELECT id, email, username FROM users
+        WHERE id::text = ${targetUserArg} OR username = ${targetUserArg} OR email = ${targetUserArg}
+        LIMIT 1
+      `) as unknown as TargetUser[];
+      user = found[0] || null;
+    }
+  } else {
+    // Sélection interactive d'un utilisateur Vibe (liste + recherche)
+    user = await promptSelectUser(rl);
+  }
+
+  if (!user) {
+    console.log(`\n${c.dim}Action annulée (aucun utilisateur Vibe sélectionné).${c.reset}`);
+    return;
+  }
+
+  const fallbackDisplayName = user.username || `User_${user.id}`;
+
+  // S'assurer que le profil existe (créé avec le nom d'affichage par défaut sinon) puis lire le compteur actuel
+  await sql`
+    INSERT INTO profiles (user_id, display_name, updated_at)
+    VALUES (${Number(user.id)}, ${fallbackDisplayName}, NOW())
+    ON CONFLICT (user_id) DO NOTHING
+  `;
+  const rows = await sql`SELECT followers_count FROM profiles WHERE user_id = ${Number(user.id)} LIMIT 1`;
+  const current = Number(rows[0]?.followers_count ?? 0);
+
+  console.log(`\n${c.bold}👥 NOMBRE D'ABONNÉS — @${user.username} (actuel : ${current.toLocaleString('fr-FR')})${c.reset}`);
+  console.log(`  ${c.dim}Laisser vide pour conserver la valeur actuelle.${c.reset}`);
+  const folStr = (await rl.question(`  ➔ Nouveau nombre d'abonnés (ou +/-N pour relatif, ex: 1200, +500, -50) : `)).trim();
+  if (!folStr) {
+    console.log(`  ${c.dim}Inchangé.${c.reset}`);
+    return;
+  }
+
+  let newFollowers: number | null = null;
+  const relMatch = folStr.match(/^([+-])\s*(\d+)$/);
+  if (relMatch) {
+    const delta = Number(relMatch[2]);
+    newFollowers = relMatch[1] === '+' ? current + delta : Math.max(0, current - delta);
+  } else if (!isNaN(Number(folStr.replace(/\s+/g, '')))) {
+    newFollowers = Math.max(0, Math.floor(Number(folStr.replace(/\s+/g, ''))));
+  }
+  if (newFollowers === null) {
+    console.log(`  ${c.red}❌ Valeur invalide (entier attendu, ex: 1200, +500, -50).${c.reset}`);
+    return;
+  }
+
+  await sql`
+    INSERT INTO profiles (user_id, display_name, followers_count, updated_at)
+    VALUES (${Number(user.id)}, ${fallbackDisplayName}, ${newFollowers}, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET followers_count = ${newFollowers}, updated_at = NOW()
+  `;
+
+  console.log(`  ${c.brightGreen}✔ Nombre d'abonnés de @${user.username} mis à jour : ${current.toLocaleString('fr-FR')} → ${newFollowers.toLocaleString('fr-FR')}${c.reset}\n`);
 }
 
 export async function handleToggleVerifiedBadge(rl: readline.Interface, targetUserArg?: any) {
@@ -1455,8 +1595,8 @@ export async function handleToggleVerifiedBadge(rl: readline.Interface, targetUs
   // Appliquer en DB (users + profiles)
   await sql`UPDATE users SET is_verified = ${targetState} WHERE id = ${Number(full.id)}`;
   await sql`
-    INSERT INTO profiles (user_id, is_verified, updated_at)
-    VALUES (${Number(full.id)}, ${targetState}, NOW())
+    INSERT INTO profiles (user_id, display_name, is_verified, updated_at)
+    VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${targetState}, NOW())
     ON CONFLICT (user_id) DO UPDATE SET is_verified = ${targetState}, updated_at = NOW()
   `;
 
@@ -1511,9 +1651,11 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
     console.log(`  ${c.brightCyan}[7]${c.reset} 🖼️  Modifier l'Avatar & Bannière (URLs)`);
     console.log(`  ${c.brightCyan}[8]${c.reset} 📊 Synchroniser / Recalculer les compteurs (Posts, Abonnés)`);
     console.log(`  ${c.brightGreen}[9]${c.reset} 📰 ${c.bold}Gérer & modifier les posts de ce compte (${actualPosts} posts)${c.reset}`);
+    console.log(`  ${c.brightCyan}[10]${c.reset} 🔐 Code de vérification à chaque connexion (Actuel : ${full.require_login_verification ? 'Activé' : 'Désactivé'})`);
+    console.log(`  ${c.brightCyan}[11]${c.reset} 👥 Modifier le nombre d'abonnés (Actuel : ${(full.followers_count || 0).toLocaleString('fr-FR')})`);
     console.log(`  ${c.white}[0]${c.reset} ↩️  Retour`);
 
-    const choice = (await rl.question(`\n  ${c.brightYellow}➔ Votre choix [0-9] : ${c.reset}`)).trim();
+    const choice = (await rl.question(`\n  ${c.brightYellow}➔ Votre choix [0-11] : ${c.reset}`)).trim();
 
     switch (choice) {
       case '1':
@@ -1563,12 +1705,14 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
       }
       case '4': {
         const newName = (await rl.question(`  ➔ Nom affiché (actuel: "${full.display_name || ''}") : `)).trim();
+        const effectiveName = newName || full.display_name || full.username;
         await sql`
           INSERT INTO profiles (user_id, display_name, updated_at)
-          VALUES (${Number(full.id)}, ${newName || null}, NOW())
-          ON CONFLICT (user_id) DO UPDATE SET display_name = ${newName || null}, updated_at = NOW()
+          VALUES (${Number(full.id)}, ${effectiveName}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET display_name = ${effectiveName}, updated_at = NOW()
         `;
-        console.log(`  ${c.brightGreen}✔ Nom d'affichage mis à jour !${c.reset}`);
+        full.display_name = effectiveName;
+        console.log(`  ${c.brightGreen}✔ Nom d'affichage mis à jour : ${effectiveName}${c.reset}`);
         break;
       }
       case '5': {
@@ -1576,10 +1720,11 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
         const newBio = (await rl.question(`  ➔ Nouvelle biographie (tapez '-' pour vider) : `)).trim();
         const bioVal = newBio === '-' ? null : (newBio || full.bio);
         await sql`
-          INSERT INTO profiles (user_id, bio, updated_at)
-          VALUES (${Number(full.id)}, ${bioVal}, NOW())
+          INSERT INTO profiles (user_id, display_name, bio, updated_at)
+          VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${bioVal}, NOW())
           ON CONFLICT (user_id) DO UPDATE SET bio = ${bioVal}, updated_at = NOW()
         `;
+        full.bio = bioVal || undefined;
         console.log(`  ${c.brightGreen}✔ Biographie mise à jour !${c.reset}`);
         break;
       }
@@ -1587,14 +1732,16 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
         const newLoc = (await rl.question(`  ➔ Localisation (actuel: "${full.location || ''}") : `)).trim();
         const newWeb = (await rl.question(`  ➔ Site web (actuel: "${full.website || full.website_url || ''}") : `)).trim();
         await sql`
-          INSERT INTO profiles (user_id, location, website, website_url, updated_at)
-          VALUES (${Number(full.id)}, ${newLoc || null}, ${newWeb || null}, ${newWeb || null}, NOW())
+          INSERT INTO profiles (user_id, display_name, location, website, website_url, updated_at)
+          VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${newLoc || null}, ${newWeb || null}, ${newWeb || null}, NOW())
           ON CONFLICT (user_id) DO UPDATE SET
             location = COALESCE(${newLoc || null}, profiles.location),
             website = COALESCE(${newWeb || null}, profiles.website),
             website_url = COALESCE(${newWeb || null}, profiles.website_url),
             updated_at = NOW()
         `;
+        if (newLoc) full.location = newLoc;
+        if (newWeb) { full.website = newWeb; full.website_url = newWeb; }
         console.log(`  ${c.brightGreen}✔ Localisation et site web mis à jour !${c.reset}`);
         break;
       }
@@ -1603,19 +1750,21 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
         if (newAvatar) {
           await sql`UPDATE users SET avatar_url = ${newAvatar} WHERE id = ${Number(full.id)}`;
           await sql`
-            INSERT INTO profiles (user_id, avatar_url, updated_at)
-            VALUES (${Number(full.id)}, ${newAvatar}, NOW())
+            INSERT INTO profiles (user_id, display_name, avatar_url, updated_at)
+            VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${newAvatar}, NOW())
             ON CONFLICT (user_id) DO UPDATE SET avatar_url = ${newAvatar}, updated_at = NOW()
           `;
+          full.profile_avatar = newAvatar;
           console.log(`  ${c.brightGreen}✔ Avatar mis à jour !${c.reset}`);
         }
         const newBanner = (await rl.question(`  ➔ URL de la Bannière (vide pour conserver) : `)).trim();
         if (newBanner) {
           await sql`
-            INSERT INTO profiles (user_id, banner_url, updated_at)
-            VALUES (${Number(full.id)}, ${newBanner}, NOW())
+            INSERT INTO profiles (user_id, display_name, banner_url, updated_at)
+            VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${newBanner}, NOW())
             ON CONFLICT (user_id) DO UPDATE SET banner_url = ${newBanner}, updated_at = NOW()
           `;
+          full.banner_url = newBanner;
           console.log(`  ${c.brightGreen}✔ Bannière mise à jour !${c.reset}`);
         }
         break;
@@ -1632,19 +1781,84 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
         const realFollowing = followingCountRes[0]?.n || 0;
 
         await sql`
-          INSERT INTO profiles (user_id, posts_count, followers_count, following_count, updated_at)
-          VALUES (${Number(full.id)}, ${realPosts}, ${realFollowers}, ${realFollowing}, NOW())
+          INSERT INTO profiles (user_id, display_name, posts_count, followers_count, following_count, updated_at)
+          VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${realPosts}, ${realFollowers}, ${realFollowing}, NOW())
           ON CONFLICT (user_id) DO UPDATE SET
             posts_count = ${realPosts},
             followers_count = ${realFollowers},
             following_count = ${realFollowing},
             updated_at = NOW()
         `;
+        full.posts_count = realPosts;
+        full.followers_count = realFollowers;
+        full.following_count = realFollowing;
         console.log(`  ${c.brightGreen}✔ Compteurs synchronisés : ${realPosts} posts, ${realFollowers} abonnés, ${realFollowing} abonnements.${c.reset}`);
         break;
       }
       case '9': {
         await handleManagePosts(rl, { id: String(full.id), username: full.username, email: full.email });
+        break;
+      }
+      case '10': {
+        const currentFlag = Boolean(full.require_login_verification);
+        const targetFlag = !currentFlag;
+        console.log(`\n${c.bold}🔐 CODE DE VÉRIFICATION À CHAQUE CONNEXION : @${full.username}${c.reset}`);
+        console.log(`  - Statut actuel : ${currentFlag ? `${c.brightGreen}✓ Activé (un code est envoyé à chaque connexion)${c.reset}` : `${c.dim}○ Désactivé (connexion directe sans code)${c.reset}`}`);
+        console.log(`\n  ${c.brightCyan}[1]${c.reset} ✅ Exiger un code de vérification à chaque connexion (TRUE)`);
+        console.log(`  ${c.brightCyan}[2]${c.reset} ❌ Ne plus exiger de code (connexion directe, FALSE)`);
+        console.log(`  ${c.brightCyan}[3]${c.reset} 🔄 Inverser le statut actuel`);
+        console.log(`  ${c.white}[0]${c.reset} ↩️  Annuler`);
+        const otpChoice = (await rl.question(`\n  ${c.brightYellow}➔ Choix [0-3] : ${c.reset}`)).trim();
+        if (otpChoice === '0') break;
+        let newState: boolean | null = null;
+        if (otpChoice === '1') newState = true;
+        else if (otpChoice === '2') newState = false;
+        else if (otpChoice === '3') newState = !currentFlag;
+        if (newState === null) {
+          console.log(`❌ Option invalide.`);
+          break;
+        }
+        try {
+          await sql`UPDATE users SET require_login_verification = ${newState} WHERE id = ${Number(full.id)}`;
+        } catch (e: any) {
+          if (String(e?.message || '').includes('does not exist')) {
+            console.log(`\n  ${c.red}❌ La colonne users.require_login_verification n'existe pas en base.${c.reset}`);
+            console.log(`  ${c.yellow}ℹ Appliquez d'abord le script SQL temporaire : tmp/016_require_login_verification.sql${c.reset}`);
+          } else {
+            throw e;
+          }
+          break;
+        }
+        console.log(`\n  ${c.brightGreen}✔ Paramètre mis à jour : ${newState ? '🔐 UN CODE DE VÉRIFICATION SERA EXIGÉ À CHAQUE CONNEXION' : '⚡ CONNEXION DIRECTE SANS CODE DE VÉRIFICATION'} pour @${full.username}.${c.reset}`);
+        break;
+      }
+      case '11': {
+        console.log(`\n${c.bold}👥 NOMBRE D'ABONNÉS (actuel : ${(full.followers_count || 0).toLocaleString('fr-FR')})${c.reset}`);
+        console.log(`  ${c.dim}Laisser vide pour conserver la valeur actuelle.${c.reset}`);
+        const folStr = (await rl.question(`  ➔ Nouveau nombre d'abonnés (ou +/-N pour relatif, ex: +500, -50) : `)).trim();
+        if (!folStr) {
+          console.log(`  ${c.dim}Inchangé.${c.reset}`);
+          break;
+        }
+        let newFollowers: number | null = null;
+        const relMatch = folStr.match(/^([+-])\s*(\d+)$/);
+        if (relMatch) {
+          const delta = Number(relMatch[2]);
+          newFollowers = relMatch[1] === '+' ? (full.followers_count || 0) + delta : Math.max(0, (full.followers_count || 0) - delta);
+        } else if (!isNaN(Number(folStr.replace(/\s+/g, '')))) {
+          newFollowers = Math.max(0, Math.floor(Number(folStr.replace(/\s+/g, ''))));
+        }
+        if (newFollowers === null) {
+          console.log(`  ${c.red}❌ Valeur invalide (entier attendu, ex: 1200, +500, -50).${c.reset}`);
+          break;
+        }
+        await sql`
+          INSERT INTO profiles (user_id, display_name, followers_count, updated_at)
+          VALUES (${Number(full.id)}, ${full.display_name || full.username}, ${newFollowers}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET followers_count = ${newFollowers}, updated_at = NOW()
+        `;
+        full.followers_count = newFollowers;
+        console.log(`  ${c.brightGreen}✔ Nombre d'abonnés mis à jour : ${(full.followers_count || 0).toLocaleString('fr-FR')} → ${newFollowers.toLocaleString('fr-FR')}${c.reset}`);
         break;
       }
       case '0':
@@ -2246,9 +2460,10 @@ export async function runCustomerAccountManager() {
     console.log("  4. 📰 Gérer & modifier les posts / Vibes d'un compte");
     console.log("  5. 🚫 Bloquer / Débloquer un compte");
     console.log("  6. 🗑️  Supprimer un compte client");
+    console.log("  7. 🖼️  Modifier l'image d'avatar d'un profil");
     console.log("  0. ↩️  Retour / Quitter");
 
-    const choice = (await rl.question("\n👉 Entrez votre choix [0-6] : ")).trim();
+    const choice = (await rl.question("\n👉 Entrez votre choix [0-7] : ")).trim();
 
     switch (choice) {
       case '1':
@@ -2272,6 +2487,9 @@ export async function runCustomerAccountManager() {
         break;
       case '6': 
         await handleDeleteCustomer(rl);
+        break;
+      case '7':
+        await handleEditCustomerAvatar(rl);
         break;
       case '0': 
       case 'exit': 
@@ -3289,6 +3507,7 @@ export async function runVibePublisher() {
 export async function runAdminCli() {
   await initPendingResetsTable().catch(() => {});
   await initQuotaBoostsTable().catch(() => {});
+  await initCustomersTable().catch(() => {});
   // Support des flags en ligne de commande pour exécution non interactive / crons
   const args = process.argv.slice(2);
   const noEmail = args.includes('--no-email') || args.includes('--no-notify');
@@ -3397,10 +3616,11 @@ export async function runAdminCli() {
     console.log(`  ${c.brightCyan}[10]${c.reset} 🔔 Gérer les Notifications & Actualités (Broadcast)`);
     console.log(`  ${c.brightGreen}[11]${c.reset} 📝 ${c.bold}Publier une Vibe pour un utilisateur (Éditeur web & CLI)${c.reset}`);
     console.log(`  ${c.brightYellow}[12]${c.reset} 📰 ${c.bold}Gérer & modifier les posts / Vibes (Lister, Modifier texte/statut/médias/stats, Supprimer)${c.reset}`);
+    console.log(`  ${c.brightWhite}[13]${c.reset} 👥 Modifier le nombre d'abonnés d'un utilisateur Vibe`);
     console.log(`  ${c.white}[0]${c.reset} 🚪 Quitter`);
     console.log("");
 
-    const choice = (await rl.question(`  ${c.brightYellow}➔ Votre choix [0-12] : ${c.reset}`)).trim();
+    const choice = (await rl.question(`  ${c.brightYellow}➔ Votre choix [0-13] : ${c.reset}`)).trim();
 
     switch (choice) {
       case '1':
@@ -3450,6 +3670,9 @@ export async function runAdminCli() {
         rl.close();
         await runPostManagerCli();
         rl = readline.createInterface({ input, output });
+        break;
+      case '13':
+        await handleEditVibeUserFollowers(rl);
         break;
       case '0':
       case 'exit':

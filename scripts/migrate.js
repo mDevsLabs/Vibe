@@ -63,6 +63,10 @@ async function migrate() {
     'profiles.updated_at',
     `ALTER TABLE profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`
   );
+  await runAlter(
+    'profiles.display_name_nullable',
+    `ALTER TABLE profiles ALTER COLUMN display_name DROP NOT NULL`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 3. user_settings — Ajouter les 5 colonnes manquantes

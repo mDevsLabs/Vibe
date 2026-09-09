@@ -185,6 +185,28 @@ export function registerAuthRoutes(app: Hono) {
         );
       }
 
+      // Paramètre administrateur : ce compte exige-t-il un code de vérification à chaque connexion ?
+      // (colonne users.require_login_verification — script SQL tmp/016_require_login_verification.sql ;
+      //  défaut TRUE si la colonne est absente ou NULL)
+      let requiresOtp = true;
+      try {
+        const flags = await sql`
+          SELECT COALESCE(require_login_verification, TRUE) AS flag
+          FROM users
+          WHERE id = ${user.id}
+          LIMIT 1
+        `;
+        requiresOtp = flags[0]?.flag !== false;
+      } catch {
+        // Colonne non migrée : comportement par défaut conservé (code exigé)
+      }
+
+      if (!requiresOtp) {
+        // Connexion directe sans code de vérification (paramètre désactivé par un administrateur)
+        const token = await signToken({ sub: user.id, tier: user.tier });
+        return c.json({ success: true, tier: user.tier, token });
+      }
+
       const code = await generateVerificationCode(user.email, "login");
       await sendVerificationEmail(user.email, code, "login");
 
