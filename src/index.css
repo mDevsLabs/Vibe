@@ -212,12 +212,16 @@ html.light .bg-white,
 }
 
 html.light .bg-zinc-50,
-[data-theme="light"] .bg-zinc-50 {
+[data-theme="light"] .bg-zinc-50,
+html.light .hover\:bg-zinc-50:hover,
+[data-theme="light"] .hover\:bg-zinc-50:hover {
   background-color: #f8fafc !important;
 }
 
 html.light .bg-zinc-100,
-[data-theme="light"] .bg-zinc-100 {
+[data-theme="light"] .bg-zinc-100,
+html.light .hover\:bg-zinc-100:hover,
+[data-theme="light"] .hover\:bg-zinc-100:hover {
   background-color: #f1f5f9 !important;
 }
 

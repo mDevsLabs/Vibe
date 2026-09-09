@@ -20,19 +20,50 @@ export async function ensureCircleTable() {
   if (circleTableReady) return;
   const sql = getDb();
   await sql`
+    CREATE TABLE IF NOT EXISTS user_circles (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name VARCHAR(100) NOT NULL DEFAULT 'Cercle Privé',
+      description TEXT DEFAULT 'Personnes autorisées à voir mes Vibes privées',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, name)
+    )
+  `;
+  await sql`
     CREATE TABLE IF NOT EXISTS circle_members (
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       member_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (user_id, member_user_id)
     )
   `;
+  try {
+    await sql`ALTER TABLE circle_members ADD COLUMN IF NOT EXISTS circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE`;
+  } catch {}
+  await sql`CREATE INDEX IF NOT EXISTS idx_user_circles_user ON user_circles(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_circle_member ON circle_members(member_user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_circle_user ON circle_members(user_id)`;
   circleTableReady = true;
 }
 
+export async function getOrCreateUserCircle(userId: number, name = 'Cercle Privé') {
+  const sql = getDb();
+  await ensureCircleTable();
+  const existing = await sql`SELECT * FROM user_circles WHERE user_id = ${userId} AND name = ${name} LIMIT 1`;
+  if (existing.length > 0) return existing[0];
+  const inserted = await sql`
+    INSERT INTO user_circles (user_id, name, description)
+    VALUES (${userId}, ${name}, 'Personnes autorisées à voir mes Vibes privées')
+    ON CONFLICT (user_id, name) DO UPDATE SET updated_at = NOW()
+    RETURNING *
+  `;
+  return inserted[0];
+}
+
 export function registerVibeCircleRoutes(app: Hono, registerMulti: RegisterMultiFn) {
-  // Mon cercle (liste de membres)
+  // Mon cercle (liste de membres & métadonnées du cercle en base)
   const handleGetCircle = async (c: any) => {
     try {
       const token = extractToken(c.req.raw);
@@ -42,6 +73,7 @@ export function registerVibeCircleRoutes(app: Hono, registerMulti: RegisterMulti
 
       const sql = getDb();
       await ensureCircleTable();
+      const circle = await getOrCreateUserCircle(userId);
       const rows = await sql`
         SELECT u.id, u.username, u.is_verified, u.tier,
                p.display_name, p.avatar_url, cm.created_at AS added_at
@@ -52,7 +84,7 @@ export function registerVibeCircleRoutes(app: Hono, registerMulti: RegisterMulti
         ORDER BY cm.created_at DESC
         LIMIT 500
       `;
-      return c.json({ members: rows });
+      return c.json({ circle, members: rows });
     } catch (err: any) {
       console.error("[vibe-circle] get circle error:", err);
       return c.json({ error: "Erreur chargement du cercle." }, 500);
@@ -104,12 +136,14 @@ export function registerVibeCircleRoutes(app: Hono, registerMulti: RegisterMulti
       const memberId = Number(target[0].id);
       if (memberId === userId) return c.json({ error: "Vous ne pouvez pas vous ajouter vous-même." }, 400);
 
+      const circle = await getOrCreateUserCircle(userId);
       await sql`
-        INSERT INTO circle_members (user_id, member_user_id)
-        VALUES (${userId}, ${memberId})
-        ON CONFLICT (user_id, member_user_id) DO NOTHING
+        INSERT INTO circle_members (user_id, member_user_id, circle_id)
+        VALUES (${userId}, ${memberId}, ${circle.id})
+        ON CONFLICT (user_id, member_user_id) DO UPDATE SET circle_id = EXCLUDED.circle_id
       `;
-      return c.json({ success: true, in_circle: true });
+      await sql`UPDATE user_circles SET updated_at = NOW() WHERE id = ${circle.id}`;
+      return c.json({ success: true, in_circle: true, circle_id: circle.id });
     } catch (err: any) {
       console.error("[vibe-circle] add error:", err);
       return c.json({ error: "Erreur ajout au cercle." }, 500);
@@ -133,7 +167,9 @@ export function registerVibeCircleRoutes(app: Hono, registerMulti: RegisterMulti
       const target = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${username}) LIMIT 1`;
       if (target.length === 0) return c.json({ error: "Utilisateur introuvable." }, 404);
 
+      const circle = await getOrCreateUserCircle(userId);
       await sql`DELETE FROM circle_members WHERE user_id = ${userId} AND member_user_id = ${Number(target[0].id)}`;
+      await sql`UPDATE user_circles SET updated_at = NOW() WHERE id = ${circle.id}`;
       return c.json({ success: true, in_circle: false });
     } catch (err: any) {
       console.error("[vibe-circle] remove error:", err);

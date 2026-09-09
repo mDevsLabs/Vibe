@@ -91,13 +91,15 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
       try {
         const res = await ApiService.getModels();
         if (res?.models && res.models.length > 0) {
-          const list = [...res.models];
+          const list = res.models.filter((m: any) => m && m.id !== 'openrouter/free' && !m.id.startsWith('openrouter/'));
           const lagunaIdx = list.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
           if (lagunaIdx > 0) {
             const [laguna] = list.splice(lagunaIdx, 1);
             list.unshift(laguna);
           }
-          setAvailableModels(list);
+          if (list.length > 0) {
+            setAvailableModels(list);
+          }
         }
       } catch {}
     };
@@ -105,7 +107,9 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
     ApiService.getSettings()
       .then((res: any) => {
         const saved = res?.settings?.mai_default_model;
-        if (saved) setSelectedModel(String(saved));
+        if (saved && saved !== 'openrouter/free' && !saved.startsWith('openrouter/')) {
+          setSelectedModel(String(saved));
+        }
       })
       .catch(() => {});
     if (isOpen) {
@@ -350,20 +354,22 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
           </div>
         </div>
 
-        {/* Bannière utilisateur */}
-        <div className="mx-3 mt-3 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center gap-3 animate-fadeIn">
-          <div className="w-8 h-8 rounded-xl bg-white text-black flex items-center justify-center font-black shrink-0">
-            <Sparkles className="w-4 h-4 text-black" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-white truncate">
-              Bienvenue, @{user?.username || 'utilisateur'} !
+        {/* Bannière utilisateur (affichée uniquement avant le début de la conversation) */}
+        {messages.length === 0 && (
+          <div className="mx-3 mt-3 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center gap-3 animate-fadeIn">
+            <div className="w-8 h-8 rounded-xl bg-white text-black flex items-center justify-center font-black shrink-0">
+              <Sparkles className="w-4 h-4 text-black" />
             </div>
-            <div className="text-[10px] text-zinc-400 truncate">
-              Laguna XS 2.1 sélectionné par défaut.
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate">
+                Bienvenue, @{user?.username || 'utilisateur'} !
+              </div>
+              <div className="text-[10px] text-zinc-400 truncate">
+                Posez vos questions ou utilisez les commandes @ ou /.
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Messages Container */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">

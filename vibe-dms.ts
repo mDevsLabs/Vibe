@@ -180,10 +180,10 @@ async function generateMAIDMReply(sql: any, conversationId: string, senderId: nu
       reply = "";
       if (openRouterApiKey) {
         const candidateModels = [
+          "poolside/laguna-xs-2.1:free",
           "minimax/minimax-m2.7:free",
           "liquid/lfm-2.5-2.6b:free",
           "nvidia/nemotron-3.5-lightning:free",
-          "openrouter/free",
         ];
         for (const modelToTry of candidateModels) {
           try {
@@ -736,10 +736,10 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       const candidateModels = [
         await MAIAgentFleet.getUserDefaultModel(userId),
+        "poolside/laguna-xs-2.1:free",
         "minimax/minimax-m2.7:free",
         "liquid/lfm-2.5-2.6b:free",
         "nvidia/nemotron-3.5-lightning:free",
-        "openrouter/free",
       ];
 
       let suggestion = "";

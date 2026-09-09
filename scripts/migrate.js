@@ -405,6 +405,50 @@ async function migrate() {
   await runAlter('idx_dm_unread', `CREATE INDEX IF NOT EXISTS idx_dm_unread ON direct_messages(conversation_id, recipient_id, is_read)`);
 
   // ─────────────────────────────────────────────────────────────
+  // 15. Cercle Privé (user_circles, circle_members) & Audience par défaut
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n🔒 CERCLE PRIVÉ & AUDIENCE PAR DÉFAUT:');
+  await runAlter(
+    'TABLE user_circles',
+    `CREATE TABLE IF NOT EXISTS user_circles (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name VARCHAR(100) NOT NULL DEFAULT 'Cercle Privé',
+      description TEXT DEFAULT 'Personnes autorisées à voir mes Vibes privées',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, name)
+    )`
+  );
+  await runAlter('idx_user_circles_user', `CREATE INDEX IF NOT EXISTS idx_user_circles_user ON user_circles(user_id)`);
+
+  await runAlter(
+    'TABLE circle_members',
+    `CREATE TABLE IF NOT EXISTS circle_members (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      member_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, member_user_id)
+    )`
+  );
+  await runAlter('circle_members.circle_id', `ALTER TABLE circle_members ADD COLUMN IF NOT EXISTS circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE`);
+  await runAlter('idx_circle_member', `CREATE INDEX IF NOT EXISTS idx_circle_member ON circle_members(member_user_id)`);
+  await runAlter('idx_circle_user', `CREATE INDEX IF NOT EXISTS idx_circle_user ON circle_members(user_id)`);
+
+  await runAlter('user_settings.default_vibe_audience', `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS default_vibe_audience VARCHAR(32) DEFAULT 'public'`);
+
+  await runAlter(
+    'TABLE vibe_audience_preferences',
+    `CREATE TABLE IF NOT EXISTS vibe_audience_preferences (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      default_audience VARCHAR(32) NOT NULL DEFAULT 'public',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`
+  );
+  await runAlter('idx_vibe_audience_user', `CREATE INDEX IF NOT EXISTS idx_vibe_audience_user ON vibe_audience_preferences(user_id)`);
+
+  // ─────────────────────────────────────────────────────────────
   // VÉRIFICATION FINALE
   // ─────────────────────────────────────────────────────────────
   console.log('\n═'.repeat(60));
@@ -421,6 +465,10 @@ async function migrate() {
     ['posts.status', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='status'`],
     ['posts.scheduled_at', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='scheduled_at'`],
     ['user_settings.ui_language', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='ui_language'`],
+    ['user_settings.default_vibe_audience', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='default_vibe_audience'`],
+    ['user_circles', `SELECT 1 FROM information_schema.tables WHERE table_name='user_circles'`],
+    ['vibe_audience_preferences', `SELECT 1 FROM information_schema.tables WHERE table_name='vibe_audience_preferences'`],
+    ['circle_members', `SELECT 1 FROM information_schema.tables WHERE table_name='circle_members'`],
     ['comment_translations', `SELECT 1 FROM information_schema.tables WHERE table_name='comment_translations'`],
   ];
 

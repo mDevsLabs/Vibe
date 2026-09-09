@@ -245,6 +245,12 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     ApiService.getSettings()
       .then((res: any) => {
         setIsAIGenerated(Boolean(res?.settings?.posts_ai_generated_by_default));
+        if (res?.settings?.default_vibe_audience) {
+          const defaultAudience = res.settings.default_vibe_audience as PostVisibility;
+          if (['public', 'followers', 'circle'].includes(defaultAudience)) {
+            setVisibility(defaultAudience);
+          }
+        }
       })
       .catch(() => {});
   }, [isEditing]);

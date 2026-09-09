@@ -19,7 +19,7 @@ import { HomePage } from './pages/HomePage';
 import { AuthModal } from './pages/AuthModal';
 import { PageSkeleton } from './components/common/PageSkeleton';
 import { Post } from './types/vibe';
-import { X, CheckCircle } from 'lucide-react';
+import { X, CheckCircle, Loader2 } from 'lucide-react';
 import { InAppToast } from './services/notificationService';
 import { ApiService } from './services/api';
 import { RealtimeService } from './services/realtimeService';
@@ -82,7 +82,7 @@ function ScrollManager() {
 }
 
 function VibeApp() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoadingSession } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
@@ -206,6 +206,22 @@ function VibeApp() {
     (username: string) => navigate(`/@${username.replace(/^@/, '')}`),
     [navigate]
   );
+
+  if (isLoadingSession) {
+    return (
+      <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-4 selection:bg-white selection:text-black">
+        <div className="flex flex-col items-center gap-4 animate-fadeIn">
+          <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center shadow-2xl">
+            <Loader2 className="w-7 h-7 text-white animate-spin" />
+          </div>
+          <div className="text-center space-y-1">
+            <p className="text-white font-semibold text-sm tracking-wide">Chargement...</p>
+            <p className="text-zinc-500 text-xs">Connexion à votre espace Vibe</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return (

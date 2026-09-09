@@ -22,7 +22,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
   isFullScreen = false,
 }) => {
-  const { loginWithToken } = useAuth();
+  const { loginWithToken, isAuthenticated, isLoadingSession } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [step, setStep] = useState<'credentials' | 'otp'>('credentials');
 
@@ -60,6 +60,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   if (!isOpen) return null;
+
+  if (isAuthenticated || isLoadingSession) {
+    return (
+      <div className="w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-3xl p-8 flex flex-col items-center justify-center text-center shadow-2xl animate-fadeIn">
+        <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-4">
+          <Loader2 className="w-7 h-7 text-white animate-spin" />
+        </div>
+        <p className="text-white font-semibold text-sm">Chargement...</p>
+        <p className="text-zinc-500 text-xs mt-1">Vous êtes déjà connecté</p>
+      </div>
+    );
+  }
 
   const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

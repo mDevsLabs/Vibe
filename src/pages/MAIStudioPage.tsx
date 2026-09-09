@@ -40,7 +40,6 @@ interface ChatMessage {
 }
 
 const DEFAULT_MODELS = [
-  { id: 'openrouter/free', name: 'mAI Auto Free', description: 'Sélection automatique du meilleur modèle gratuit actif', provider: 'mDevsLabs' },
   { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
   { id: 'mai-1.5-apex', name: 'mAI 1.5 Apex', description: 'Modèle IA d\'élite mAI — Raisonnement profond & Vision', provider: 'mDevsLabs' },
   { id: 'mai-1.5-light', name: 'mAI 1.5 Light', description: 'Modèle agile mAI ultra-rapide', provider: 'mDevsLabs' },
@@ -53,7 +52,7 @@ const DEFAULT_MODELS = [
 
 export const MAIStudioPage: React.FC = () => {
   const { user, quotas, refreshQuotas } = useAuth();
-  const [selectedModel, setSelectedModel] = useState<string>('openrouter/free');
+  const [selectedModel, setSelectedModel] = useState<string>('poolside/laguna-xs-2.1:free');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string; description: string; provider?: string }>>(DEFAULT_MODELS);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [promptInput, setPromptInput] = useState('');
@@ -77,16 +76,26 @@ export const MAIStudioPage: React.FC = () => {
       try {
         const res = await ApiService.getModels();
         if (res.models && res.models.length > 0) {
-          const list = [...res.models];
-          const lagunaIdx = list.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
+          const list = res.models.filter((m: any) => m && m.id !== 'openrouter/free' && !m.id.startsWith('openrouter/'));
+          const lagunaIdx = list.findIndex((m: any) => m.id === 'poolside/laguna-xs-2.1:free');
           if (lagunaIdx > 0) {
             const [laguna] = list.splice(lagunaIdx, 1);
             list.unshift(laguna);
           }
-          setAvailableModels(list);
+          if (list.length > 0) {
+            setAvailableModels(list);
+          }
         }
       } catch {}
     };
+    ApiService.getSettings()
+      .then((res: any) => {
+        const saved = res?.settings?.mai_default_model;
+        if (saved && saved !== 'openrouter/free' && !saved.startsWith('openrouter/')) {
+          setSelectedModel(String(saved));
+        }
+      })
+      .catch(() => {});
     loadModels();
   }, []);
 
@@ -137,6 +146,11 @@ export const MAIStudioPage: React.FC = () => {
     } catch {
       setAutoApprove(!next);
     }
+  };
+
+  const handleSelectModel = (modelId: string) => {
+    setSelectedModel(modelId);
+    ApiService.updateSettings({ mai_default_model: modelId }).catch(() => {});
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -290,7 +304,7 @@ export const MAIStudioPage: React.FC = () => {
           <ModelDropdown
             models={availableModels}
             selectedModelId={selectedModel}
-            onSelectModel={setSelectedModel}
+            onSelectModel={handleSelectModel}
           />
 
           <button
@@ -338,22 +352,24 @@ export const MAIStudioPage: React.FC = () => {
         </div>
       )}
 
-      {/* Bannière utilisateur */}
-      <div className="mx-4 mt-3 p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-zinc-900 via-zinc-900/80 to-zinc-950 border border-zinc-800 shadow-xl flex items-center justify-between gap-4 animate-fadeIn">
-        <div className="flex items-center gap-3.5 min-w-0">
-          <div className="w-10 h-10 rounded-2xl bg-white text-black flex items-center justify-center font-black shrink-0 shadow-md">
-            <Sparkles className="w-5 h-5 text-black" />
-          </div>
-          <div className="min-w-0">
-            <h2 className="text-sm sm:text-base font-bold text-white tracking-tight truncate">
-              Bienvenue, <span className="text-white font-black">@{user?.username || 'utilisateur'}</span> !
-            </h2>
-            <p className="text-xs text-zinc-400 truncate">
-              Assistant mAI configuré sur Laguna XS 2.1 — Posez vos questions ou utilisez les commandes @ et /.
-            </p>
+      {/* Bannière utilisateur (affichée uniquement avant le début de la conversation) */}
+      {messages.length === 0 && (
+        <div className="mx-4 mt-3 p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-zinc-900 via-zinc-900/80 to-zinc-950 border border-zinc-800 shadow-xl flex items-center justify-between gap-4 animate-fadeIn">
+          <div className="flex items-center gap-3.5 min-w-0">
+            <div className="w-10 h-10 rounded-2xl bg-white text-black flex items-center justify-center font-black shrink-0 shadow-md">
+              <Sparkles className="w-5 h-5 text-black" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-bold text-white tracking-tight truncate">
+                Bienvenue, <span className="text-white font-black">@{user?.username || 'utilisateur'}</span> !
+              </h2>
+              <p className="text-xs text-zinc-400 truncate">
+                Assistant mAI — Posez vos questions ou utilisez les commandes @ et /.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Chat Messages Log */}
       <div className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto">
@@ -383,7 +399,7 @@ export const MAIStudioPage: React.FC = () => {
                   <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-zinc-900 text-[11px] font-mono text-zinc-400">
                     <span className="flex items-center gap-1 font-bold text-white">
                       <Sparkles className="w-3 h-3" />
-                      mAI ({m.modelUsed || selectedModel})
+                      mAI
                     </span>
                     <span>{m.time}</span>
                   </div>

@@ -249,4 +249,6 @@ export interface UserSettings {
   message_bubble_theme?: string;
   chat_background_theme?: string;
   message_bubble_shape?: string;
+  /** Audience par défaut lors de la création d'une Vibe ('public', 'followers', 'circle') */
+  default_vibe_audience?: 'public' | 'followers' | 'circle';
 }

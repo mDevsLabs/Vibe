@@ -423,10 +423,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           )}
           <button
             onClick={() => setIsShareOpen(true)}
-            className="p-2 rounded-full text-black dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
             title="Partager le profil (Carte, QR Code, Lien)"
           >
-            <Share2 className="w-4 h-4 text-black dark:text-white" />
+            <Share2 className="w-4 h-4" />
           </button>
 
           {isSelf && (

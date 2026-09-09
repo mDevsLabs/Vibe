@@ -404,7 +404,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         DO UPDATE SET tokens_used = weekly_usage.tokens_used + 250
       `.catch(() => {});
 
-      let reply = `Bonjour @${username} ! Je suis mAI (modèle ${effectiveModel}). Comment puis-je vous aider ?`;
+      let reply = `Bonjour @${username} ! Je suis mAI. Comment puis-je vous aider ?`;
 
       if (!toolToRun) {
         const keyRows = await sql`
@@ -416,7 +416,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
           (keyRows.length > 0 ? keyRows[0].api_key : "");
 
         const resolveModel = (m: string) => {
-          if (!m || m === "default" || m === "mai-1.5-light") return "openrouter/free";
+          if (!m || m === "default" || m === "mai-1.5-light" || m === "openrouter/free") return "poolside/laguna-xs-2.1:free";
           if (m === "mai-1.5-apex") return "openai/gpt-4o";
           return m;
         };
@@ -431,7 +431,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         if (hasImages) {
           if (!modelsToTry.includes("google/gemini-2.5-flash")) modelsToTry.push("google/gemini-2.5-flash");
         } else {
-          if (primaryModel !== "openrouter/free") modelsToTry.push("openrouter/free");
+          if (!modelsToTry.includes("poolside/laguna-xs-2.1:free")) modelsToTry.push("poolside/laguna-xs-2.1:free");
           if (!modelsToTry.includes("nvidia/nemotron-3.5-lightning:free")) modelsToTry.push("nvidia/nemotron-3.5-lightning:free");
         }
 
