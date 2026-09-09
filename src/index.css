@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Dark variant pilotée par les classes html.dark / body.dark (alignée sur le ThemeProvider,
+   plus fiable que prefers-color-scheme car l'app pilote le thème manuellement). */
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
 @theme {
   --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -24,6 +28,15 @@
     /* Tailwind Palette Mapping for LIGHT THEME */
     --color-black: #ffffff;
     --color-white: #000000;
+
+    /* Chat semantic tokens (Messages page) */
+    --chat-border: #e2e8f0;
+    --chat-border-soft: #f1f5f9;
+    --chat-surface: #ffffff;
+    --chat-surface-raised: #f8fafc;
+    --chat-surface-muted: rgba(0, 0, 0, 0.03);
+    --chat-hover: #f4f4f5;
+    --chat-active: #f1f5f9;
     --color-zinc-50: #000000;
     --color-zinc-100: #000000;
     --color-zinc-200: #09090b;
@@ -55,6 +68,15 @@
     --text-primary: #ffffff;
     --text-secondary: #a1a1aa;
     --text-muted: #71717a;
+
+    /* Chat semantic tokens (Messages page) */
+    --chat-border: #27272a;
+    --chat-border-soft: #18181b;
+    --chat-surface: #09090b;
+    --chat-surface-raised: #18181b;
+    --chat-surface-muted: rgba(255, 255, 255, 0.05);
+    --chat-hover: #18181b;
+    --chat-active: #27272a;
 
     /* Sent Bubble Variables for DARK THEME */
     --vibe-sent-bubble-bg: #18181b;
@@ -630,204 +652,122 @@ html.dark .rte-content[data-empty="true"]::before,
 .rte-content b, .rte-content strong { font-weight: 700; }
 
 /* ══════════════════════════════════════════════════════════════════════
-   VIBE MESSAGES & CHAT SYSTEM — DEDICATED STYLES (REFAIT DE ZÉRO)
+   VIBE MESSAGES & CHAT SYSTEM — Built from the app-wide global theme
+   Uses the same semantic tokens as the rest of the app (--bg-primary,
+   --bg-secondary, --bg-card, --border-subtle, --text-*) so Messages now
+   follows the global theme instead of being a one-off.
    Garantit :
-   - Fond blanc partout & texte noir partout en mode clair (#ffffff / #000000)
-   - Fond noir partout & texte blanc partout en mode sombre (#000000 / #ffffff)
+   - Fond blanc & texte noir partout en mode clair (#ffffff / #000000)
+   - Fond noir & texte blanc partout en mode sombre (#000000 / #ffffff)
    - AUCUNE bulle bleue / contour parasite sur le champ de saisie
    - Bulles de messages nettes, sans contrastes inversés
    ══════════════════════════════════════════════════════════════════════ */
 
-/* Conteneur principal de la page de messages */
+/* Page principale de messages (mêmes tokens que le layout global) */
 .vibe-chat-page {
-  background-color: #ffffff !important;
-  color: #000000 !important;
-}
-html.dark .vibe-chat-page,
-[data-theme="dark"] .vibe-chat-page {
-  background-color: #000000 !important;
-  color: #ffffff !important;
+  background-color: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-subtle) !important;
 }
 
 /* Colonne de gauche (liste des conversations) */
 .vibe-chat-sidebar {
-  background-color: #ffffff !important;
-  border-color: #e4e4e7 !important;
-}
-html.dark .vibe-chat-sidebar,
-[data-theme="dark"] .vibe-chat-sidebar {
-  background-color: #09090b !important;
-  border-color: #27272a !important;
+  background-color: var(--bg-primary) !important;
+  border-color: var(--border-subtle) !important;
 }
 
 /* En-tête de la colonne des conversations */
 .vibe-chat-sidebar-header {
-  border-bottom: 1px solid #e4e4e7 !important;
-}
-html.dark .vibe-chat-sidebar-header,
-[data-theme="dark"] .vibe-chat-sidebar-header {
-  border-bottom: 1px solid #27272a !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
 }
 
 /* Champ de recherche de membres */
 .vibe-chat-search-bar {
-  background-color: #f8fafc !important;
-  border-bottom: 1px solid #e4e4e7 !important;
-}
-html.dark .vibe-chat-search-bar,
-[data-theme="dark"] .vibe-chat-search-bar {
-  background-color: rgba(0, 0, 0, 0.4) !important;
-  border-bottom: 1px solid #18181b !important;
+  background-color: var(--bg-primary) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
 }
 
 .vibe-chat-search-input {
-  background-color: #ffffff !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
 }
 .vibe-chat-search-input::placeholder {
-  color: #71717a !important;
+  color: var(--text-muted) !important;
 }
-html.dark .vibe-chat-search-input,
-[data-theme="dark"] .vibe-chat-search-input {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-search-input::placeholder,
-[data-theme="dark"] .vibe-chat-search-input::placeholder {
-  color: #71717a !important;
+
+/* Résultats de recherche & panneaux internes de la sidebar */
+.vibe-chat-search-bar [class*="bg-white"] {
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-subtle) !important;
 }
 
 /* Élément de la liste des conversations */
 .vibe-chat-conv-item {
   background-color: transparent;
-  color: #000000 !important;
+  color: var(--text-primary) !important;
   transition: background-color 0.15s ease;
 }
 .vibe-chat-conv-item:hover {
-  background-color: #f4f4f5 !important;
+  background-color: var(--chat-hover) !important;
 }
 .vibe-chat-conv-item.active {
-  background-color: #f4f4f5 !important;
-  border-left: 2px solid #000000 !important;
-}
-html.dark .vibe-chat-conv-item,
-[data-theme="dark"] .vibe-chat-conv-item {
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-conv-item:hover,
-[data-theme="dark"] .vibe-chat-conv-item:hover {
-  background-color: #18181b !important;
-}
-html.dark .vibe-chat-conv-item.active,
-[data-theme="dark"] .vibe-chat-conv-item.active {
-  background-color: #18181b !important;
-  border-left: 2px solid #ffffff !important;
+  background-color: var(--chat-active) !important;
+  border-left: 2px solid var(--text-primary) !important;
 }
 
 /* Badge de messages non lus */
 .vibe-chat-badge-unread {
-  background-color: #000000 !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-badge-unread,
-[data-theme="dark"] .vibe-chat-badge-unread {
-  background-color: #ffffff !important;
-  color: #000000 !important;
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
 }
 
 /* Colonne droite (chat actif) */
 .vibe-chat-main {
-  background-color: #ffffff !important;
-  color: #000000 !important;
-}
-html.dark .vibe-chat-main,
-[data-theme="dark"] .vibe-chat-main {
-  background-color: #000000 !important;
-  color: #ffffff !important;
+  background-color: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
 }
 
-/* En-tête supérieur du chat */
+/* En-tête supérieur du chat (léger flou glassé, tokens globaux) */
 .vibe-chat-header {
-  background-color: rgba(255, 255, 255, 0.96) !important;
-  border-bottom: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
-}
-html.dark .vibe-chat-header,
-[data-theme="dark"] .vibe-chat-header {
-  background-color: rgba(9, 9, 11, 0.9) !important;
-  border-bottom: 1px solid #27272a !important;
-  color: #ffffff !important;
+  background-color: color-mix(in srgb, var(--bg-primary) 94%, transparent) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
 }
 
 /* Zone centrale des messages */
 .vibe-chat-thread {
-  background-color: #ffffff;
-}
-html.dark .vibe-chat-thread,
-[data-theme="dark"] .vibe-chat-thread {
-  background-color: #000000;
+  background-color: var(--bg-primary);
 }
 
 /* ─────────────────────────────────────────────────────────────
  * BULLES DE MESSAGES
  * ───────────────────────────────────────────────────────────── */
 
-/* Bulle reçue (partenaire) */
+/* Bulle reçue (partenaire) — surface secondaire globale */
 .vibe-msg-bubble-partner {
-  background-color: #f4f4f5 !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
 }
 .vibe-msg-bubble-partner,
 .vibe-msg-bubble-partner *,
 .vibe-msg-bubble-partner .rich-content,
 .vibe-msg-bubble-partner .rich-content * {
-  color: #000000 !important;
+  color: var(--text-primary) !important;
 }
 
-html.dark .vibe-msg-bubble-partner,
-[data-theme="dark"] .vibe-msg-bubble-partner {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-msg-bubble-partner,
-html.dark .vibe-msg-bubble-partner *,
-[data-theme="dark"] .vibe-msg-bubble-partner,
-[data-theme="dark"] .vibe-msg-bubble-partner *,
-html.dark .vibe-msg-bubble-partner .rich-content,
-[data-theme="dark"] .vibe-msg-bubble-partner .rich-content {
-  color: #ffffff !important;
-}
-
-/* Bulle envoyée (monochrome par défaut) */
+/* Bulle envoyée (monochrome) — inverse net, tokens globaux */
 .vibe-msg-bubble-me-mono {
-  background-color: #ffffff !important;
-  border: 1.5px solid #000000 !important;
-  color: #000000 !important;
+  background-color: var(--vibe-sent-bubble-bg) !important;
+  border: var(--vibe-sent-bubble-border) !important;
+  color: var(--vibe-sent-bubble-color) !important;
 }
 .vibe-msg-bubble-me-mono,
 .vibe-msg-bubble-me-mono *,
 .vibe-msg-bubble-me-mono .rich-content,
 .vibe-msg-bubble-me-mono .rich-content * {
-  color: #000000 !important;
-}
-
-html.dark .vibe-msg-bubble-me-mono,
-[data-theme="dark"] .vibe-msg-bubble-me-mono {
-  background-color: #18181b !important;
-  border: 1px solid #3f3f46 !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-msg-bubble-me-mono,
-html.dark .vibe-msg-bubble-me-mono *,
-[data-theme="dark"] .vibe-msg-bubble-me-mono,
-[data-theme="dark"] .vibe-msg-bubble-me-mono *,
-html.dark .vibe-msg-bubble-me-mono .rich-content,
-[data-theme="dark"] .vibe-msg-bubble-me-mono .rich-content {
-  color: #ffffff !important;
+  color: var(--vibe-sent-bubble-color) !important;
 }
 
 /* Bulle média seul (aucune bordure ni padding parasite) */
@@ -835,50 +775,26 @@ html.dark .vibe-msg-bubble-me-mono .rich-content,
   padding: 0 !important;
   background: transparent !important;
   overflow: hidden;
-  border: 1px solid #e4e4e7;
-}
-html.dark .vibe-msg-media-bubble,
-[data-theme="dark"] .vibe-msg-media-bubble {
-  border: 1px solid #27272a;
+  border: 1px solid var(--border-subtle);
 }
 
 /* Citation de message auquel on répond */
 .vibe-msg-quote-partner {
-  background-color: #e4e4e7 !important;
+  background-color: var(--chat-surface-muted) !important;
   border-left: 3px solid #0284c7 !important;
-  color: #000000 !important;
+  color: var(--text-primary) !important;
 }
 .vibe-msg-quote-partner * {
-  color: #000000 !important;
-}
-html.dark .vibe-msg-quote-partner,
-[data-theme="dark"] .vibe-msg-quote-partner {
-  background-color: #27272a !important;
-  border-left: 3px solid #38bdf8 !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-msg-quote-partner *,
-[data-theme="dark"] .vibe-msg-quote-partner * {
-  color: #ffffff !important;
+  color: var(--text-primary) !important;
 }
 
 .vibe-msg-quote-me-mono {
-  background-color: #f4f4f5 !important;
-  border-left: 3px solid #000000 !important;
-  color: #000000 !important;
+  background-color: var(--chat-surface-muted) !important;
+  border-left: 3px solid var(--text-primary) !important;
+  color: var(--vibe-sent-bubble-color) !important;
 }
 .vibe-msg-quote-me-mono * {
-  color: #000000 !important;
-}
-html.dark .vibe-msg-quote-me-mono,
-[data-theme="dark"] .vibe-msg-quote-me-mono {
-  background-color: #27272a !important;
-  border-left: 3px solid #ffffff !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-msg-quote-me-mono *,
-[data-theme="dark"] .vibe-msg-quote-me-mono * {
-  color: #ffffff !important;
+  color: var(--vibe-sent-bubble-color) !important;
 }
 
 .vibe-msg-quote-gradient {
@@ -891,40 +807,26 @@ html.dark .vibe-msg-quote-me-mono *,
 }
 
 /* ─────────────────────────────────────────────────────────────
- * BARRE DE SAISIE INFÉRIEURE ET SUPPRESSION DE LA BULLE BLEUE
+ * BARRE DE SAISIE INFÉRIEURE (tokens globaux, focus net sans halo bleu)
  * ───────────────────────────────────────────────────────────── */
 
 .vibe-chat-bottom-bar {
-  background-color: #ffffff !important;
-  border-top: 1px solid #e4e4e7 !important;
-}
-html.dark .vibe-chat-bottom-bar,
-[data-theme="dark"] .vibe-chat-bottom-bar {
-  background-color: #000000 !important;
-  border-top: 1px solid #27272a !important;
+  background-color: var(--bg-primary) !important;
+  border-top: 1px solid var(--border-subtle) !important;
 }
 
 /* Bulle ronde externe de saisie */
 .vibe-chat-input-pill {
-  background-color: #f4f4f5 !important;
-  border: 1px solid #e4e4e7 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
   border-radius: 9999px !important;
   transition: border-color 0.15s ease;
 }
 .vibe-chat-input-pill:focus-within {
-  border-color: #71717a !important;
-}
-html.dark .vibe-chat-input-pill,
-[data-theme="dark"] .vibe-chat-input-pill {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-}
-html.dark .vibe-chat-input-pill:focus-within,
-[data-theme="dark"] .vibe-chat-input-pill:focus-within {
-  border-color: #52525b !important;
+  border-color: var(--text-muted) !important;
 }
 
-/* CHAMP DE TEXTE : AUCUNE BULLE BLEUE, AUCUN CONTOUR (FOCUS PUR ET NET) */
+/* CHAMP DE TEXTE : AUCUN CONTOUR BLEU, FOCUS PUR ET NET */
 .vibe-chat-input,
 .vibe-chat-input:focus,
 .vibe-chat-input:focus-visible,
@@ -943,141 +845,147 @@ input.vibe-chat-input:focus-visible {
 }
 
 .vibe-chat-input {
-  color: #000000 !important;
+  color: var(--text-primary) !important;
 }
 .vibe-chat-input::placeholder {
-  color: #71717a !important;
-}
-html.dark .vibe-chat-input,
-[data-theme="dark"] .vibe-chat-input {
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-input::placeholder,
-[data-theme="dark"] .vibe-chat-input::placeholder {
-  color: #71717a !important;
+  color: var(--text-muted) !important;
 }
 
 /* Bouton + */
 .vibe-chat-plus-btn {
-  background-color: #f4f4f5 !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
   border-radius: 9999px !important;
   transition: all 0.15s ease;
 }
 .vibe-chat-plus-btn:hover {
-  background-color: #e4e4e7 !important;
-  color: #000000 !important;
-}
-html.dark .vibe-chat-plus-btn,
-[data-theme="dark"] .vibe-chat-plus-btn {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-plus-btn:hover,
-[data-theme="dark"] .vibe-chat-plus-btn:hover {
-  background-color: #27272a !important;
-  color: #ffffff !important;
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
 }
 
-/* Bouton d'envoi */
+/* Bouton d'envoi — inverse net, tokens globaux */
 .vibe-chat-send-btn {
-  background-color: #000000 !important;
-  color: #ffffff !important;
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
   border-radius: 9999px !important;
   transition: all 0.15s ease;
 }
 .vibe-chat-send-btn:hover:not(:disabled) {
-  background-color: #27272a !important;
-}
-.vibe-chat-send-btn:disabled {
-  opacity: 0.35 !important;
-}
-html.dark .vibe-chat-send-btn,
-[data-theme="dark"] .vibe-chat-send-btn {
-  background-color: #ffffff !important;
-  color: #000000 !important;
+  filter: brightness(0.85);
 }
 html.dark .vibe-chat-send-btn:hover:not(:disabled),
 [data-theme="dark"] .vibe-chat-send-btn:hover:not(:disabled) {
-  background-color: #e4e4e7 !important;
+  filter: brightness(0.85);
+}
+.vibe-chat-send-btn:disabled {
+  opacity: 0.35 !important;
+  filter: none;
+}
+
+/* Boutons ronds utilitaires de la page messages (retour, X, options) */
+.vibe-chat-icon-btn {
+  color: var(--text-secondary) !important;
+  border-radius: 9999px !important;
+  transition: all 0.15s ease;
+}
+.vibe-chat-icon-btn:hover {
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Puces de réactions sous les bulles (état neutre, tokens globaux) */
+.vibe-chat-reaction-chip {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-secondary) !important;
+}
+.vibe-chat-reaction-chip:hover {
+  border-color: var(--text-muted) !important;
+}
+
+/* Indicateur « en train d'écrire » */
+.vibe-chat-typing {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+}
+
+/* Bouton de suppression d'un média en aperçu */
+.vibe-chat-remove-media {
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
+  transition: filter 0.15s ease;
+}
+.vibe-chat-remove-media:hover {
+  filter: brightness(0.85);
+}
+
+/* Bouton secondaire des modales (Annuler) */
+.vibe-chat-modal-btn {
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 9999px !important;
+  transition: background-color 0.15s ease;
+}
+.vibe-chat-modal-btn:hover {
+  background-color: var(--chat-hover) !important;
+}
+
+/* Bouton d'action coloré des modales (accent mAI, Signaler) */
+.vibe-chat-accent-btn {
+  color: #000000 !important;
+  border-radius: 9999px !important;
+  transition: filter 0.15s ease;
+}
+.vibe-chat-accent-btn:hover:not(:disabled) {
+  filter: brightness(0.9);
 }
 
 /* Bandeaux de modification et réponse */
 .vibe-chat-banner {
-  background-color: #f4f4f5 !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
   border-radius: 1rem !important;
 }
 .vibe-chat-banner * {
-  color: #000000 !important;
-}
-html.dark .vibe-chat-banner,
-[data-theme="dark"] .vibe-chat-banner {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-banner *,
-[data-theme="dark"] .vibe-chat-banner * {
-  color: #ffffff !important;
+  color: var(--text-primary) !important;
 }
 
-/* Modale de personnalisation du chat */
-.vibe-chat-modal-content {
-  background-color: #ffffff !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+/* Boutons internes des menus vibe-menu de la page messages */
+.vibe-menu .vibe-chat-menu-item {
+  color: var(--text-secondary) !important;
 }
-html.dark .vibe-chat-modal-content,
-[data-theme="dark"] .vibe-chat-modal-content {
-  background-color: #09090b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
+.vibe-menu .vibe-chat-menu-item:hover {
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Modales de personnalisation du chat (fond et cartes) */
+.vibe-chat-modal-content {
+  background-color: var(--bg-card) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
 }
 
 .vibe-chat-modal-card {
-  background-color: #f8fafc !important;
-  border: 1px solid #e4e4e7 !important;
-  color: #000000 !important;
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
   transition: all 0.15s ease;
 }
 .vibe-chat-modal-card:hover {
-  background-color: #f1f5f9 !important;
-  border-color: #cbd5e1 !important;
+  background-color: var(--chat-hover) !important;
+  border-color: var(--text-muted) !important;
 }
 .vibe-chat-modal-card.selected {
-  background-color: #f4f4f5 !important;
-  border: 1.5px solid #000000 !important;
-  color: #000000 !important;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  background-color: var(--chat-hover) !important;
+  border: 1.5px solid var(--text-primary) !important;
+  color: var(--text-primary) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 .vibe-chat-modal-card * {
-  color: #000000 !important;
-}
-
-html.dark .vibe-chat-modal-card,
-[data-theme="dark"] .vibe-chat-modal-card {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  color: #ffffff !important;
-}
-html.dark .vibe-chat-modal-card:hover,
-[data-theme="dark"] .vibe-chat-modal-card:hover {
-  background-color: #27272a !important;
-  border-color: #3f3f46 !important;
-}
-html.dark .vibe-chat-modal-card.selected,
-[data-theme="dark"] .vibe-chat-modal-card.selected {
-  background-color: #27272a !important;
-  border: 1.5px solid #ffffff !important;
-  color: #ffffff !important;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
-}
-html.dark .vibe-chat-modal-card *,
-[data-theme="dark"] .vibe-chat-modal-card * {
-  color: #ffffff !important;
+  color: var(--text-primary) !important;
 }
 

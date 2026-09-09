@@ -150,6 +150,23 @@ export const ensurePostColumns = async () => {
     await sql`CREATE INDEX IF NOT EXISTS idx_posts_scheduled_due ON posts(status, scheduled_at) WHERE status = 'scheduled'`.catch(() => {});
     // Médias joints aux commentaires
     await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`.catch(() => {});
+    // Table comments : rendre path optionnel et garantir les colonnes requises
+    await sql`ALTER TABLE comments ALTER COLUMN path DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE comments ALTER COLUMN path SET DEFAULT ''`.catch(() => {});
+    await sql`ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`.catch(() => {});
+    await sql`ALTER TABLE comments ADD COLUMN IF NOT EXISTS depth INTEGER DEFAULT 0`.catch(() => {});
+    await sql`ALTER TABLE comments ADD COLUMN IF NOT EXISTS likes_count INTEGER DEFAULT 0`.catch(() => {});
+    await sql`ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE`.catch(() => {});
+    // Table comment_likes pour persister les likes de commentaires
+    await sql`
+      CREATE TABLE IF NOT EXISTS comment_likes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id BIGINT NOT NULL,
+        comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE (user_id, comment_id)
+      )
+    `.catch(() => {});
     postColumnsReady = true;
   } catch (err) {
     console.warn("[vibe-posts] ensurePostColumns skipped:", (err as any)?.message);
@@ -1237,7 +1254,17 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       }, 201);
     } catch (err: any) {
       console.error("[Add Comment Error]:", err);
-      return c.json({ error: err?.message?.includes("relation") ? "Table comments incomplète — migration requise." : "Erreur ajout commentaire." }, 500);
+      const isMissingTable =
+        err?.code === "42P01" ||
+        (err?.message?.includes("does not exist") && (err?.message?.includes("comments") || err?.message?.includes("relation")));
+      return c.json(
+        {
+          error: isMissingTable
+            ? "Table comments incomplète — migration requise."
+            : (err?.message || "Erreur ajout commentaire."),
+        },
+        500
+      );
     }
   };
 

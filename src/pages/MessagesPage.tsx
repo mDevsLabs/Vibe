@@ -688,7 +688,7 @@ export const MessagesPage: React.FC = () => {
 
           {/* Loader pendant la recherche */}
           {isSearchingUsers && (
-            <div className="mt-2 p-3 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl text-center text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-center gap-2">
+            <div className="vibe-chat-modal-content mt-2 p-3 rounded-2xl text-center text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-center gap-2">
               <Loader2 className="w-3.5 h-3.5 animate-spin text-black dark:text-white" />
               <span>Recherche des membres...</span>
             </div>
@@ -696,12 +696,12 @@ export const MessagesPage: React.FC = () => {
 
           {/* Search Results Dropdown */}
           {searchResults.length > 0 && !isSearchingUsers && (
-            <div className="mt-2 divide-y divide-zinc-200 dark:divide-zinc-900 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="vibe-chat-modal-content mt-2 divide-y divide-zinc-200 dark:divide-zinc-900 rounded-2xl overflow-hidden shadow-2xl">
               {searchResults.map((u) => (
                 <button
                   key={u.id}
                   onClick={() => handleStartConversationWith(u)}
-                  className="w-full p-2.5 flex items-center gap-3 hover:bg-zinc-100 dark:hover:bg-zinc-900 cursor-pointer transition-colors text-left"
+                  className="vibe-chat-menu-item w-full p-2.5 flex items-center gap-3 cursor-pointer transition-colors text-left"
                 >
                   <ProfileAvatar
                     src={u.avatar_url}
@@ -724,7 +724,7 @@ export const MessagesPage: React.FC = () => {
 
           {/* Aucun résultat */}
           {searchQuery.trim().length > 0 && searchResults.length === 0 && !isSearchingUsers && (
-            <div className="mt-2 p-4 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl text-center text-xs text-zinc-500">
+            <div className="vibe-chat-modal-content mt-2 p-4 rounded-2xl text-center text-xs text-zinc-500">
               <p className="font-semibold text-zinc-600 dark:text-zinc-400">Aucun résultat</p>
               <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">Aucun compte trouvé pour « {searchQuery} »</p>
             </div>
@@ -796,7 +796,7 @@ export const MessagesPage: React.FC = () => {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setActivePartnerId(null)}
-                  className="md:hidden p-1.5 rounded-full text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900"
+                  className="vibe-chat-icon-btn md:hidden p-1.5"
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
@@ -827,7 +827,7 @@ export const MessagesPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setThemeModalOpen(true)}
-                  className="p-2 rounded-full text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                  className="vibe-chat-icon-btn p-2 transition-colors"
                   title="Personnaliser les couleurs et le fond de discussion"
                 >
                   <Palette className="w-4 h-4" />
@@ -837,7 +837,7 @@ export const MessagesPage: React.FC = () => {
                 <div className="relative">
                   <button
                     onClick={() => setConvMenuOpen(!convMenuOpen)}
-                    className="p-2 rounded-full text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                    className="vibe-chat-icon-btn p-2 transition-colors"
                     title="Options de la conversation"
                   >
                     <MoreVertical className="w-4 h-4" />
@@ -849,14 +849,14 @@ export const MessagesPage: React.FC = () => {
                     <div className="absolute right-0 top-full mt-1 w-56 z-30 p-1.5 rounded-2xl vibe-menu shadow-2xl animate-fadeIn">
                       <button
                         onClick={() => { setRenameValue(activeConv?.custom_name || ''); setRenameModalOpen(true); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 text-left"
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] vibe-chat-menu-item text-left"
                       >
                         <Pencil className="w-3.5 h-3.5" /> Renommer la conversation
                       </button>
                       <button
                         onClick={handleBlockPartner}
                         disabled={isModerating}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 text-left disabled:opacity-40"
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] vibe-chat-menu-item text-left disabled:opacity-40"
                       >
                         <Ban className="w-3.5 h-3.5" /> {activePartnerBlocked ? 'Débloquer cet utilisateur' : 'Bloquer cet utilisateur'}
                       </button>
@@ -891,7 +891,7 @@ export const MessagesPage: React.FC = () => {
 
             {/* Bandeau utilisateur bloqué */}
             {activePartnerBlocked && (
-              <div className="m-3 p-3 rounded-2xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
+              <div className="vibe-chat-banner m-3 p-3 text-xs flex items-center gap-2">
                 <Ban className="w-4 h-4 text-red-400 shrink-0" />
                 <span>
                   Vous avez bloqué <strong>@{activePartner.username}</strong>. Vous ne pouvez plus échanger de messages.
@@ -903,7 +903,7 @@ export const MessagesPage: React.FC = () => {
             {/* Indicateur de frappe du partenaire (temps réel) */}
             {partnerTyping && !activePartnerBlocked && (
               <div className="px-4 pt-1.5 pb-0.5 flex items-center gap-2 animate-fadeIn" aria-live="polite">
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+                <div className="vibe-chat-typing flex items-center gap-1.5 px-3 py-1.5 rounded-full">
                   <span className="flex gap-0.5">
                     <span className="w-1 h-1 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '0ms' }} />
                     <span className="w-1 h-1 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -1022,7 +1022,7 @@ export const MessagesPage: React.FC = () => {
                             e.stopPropagation();
                             setActionMenuFor(actionMenuFor === m.id ? null : m.id);
                           }}
-                          className="p-1.5 rounded-full text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/80 transition-colors"
+                          className="vibe-chat-icon-btn p-1.5 transition-colors"
                           title="Options du message"
                         >
                           <MoreVertical className="w-3.5 h-3.5" />
@@ -1047,7 +1047,7 @@ export const MessagesPage: React.FC = () => {
                               <button
                                 key={emoji}
                                 onClick={() => handleToggleReaction(m, emoji)}
-                                className="p-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800/60 text-base transition-transform hover:scale-125"
+                                className="p-1 rounded-lg hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 text-base transition-transform hover:scale-125"
                               >
                                 {emoji}
                               </button>
@@ -1064,7 +1064,7 @@ export const MessagesPage: React.FC = () => {
                                 setMessageInput(m.content);
                                 setActionMenuFor(null);
                               }}
-                              className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors text-left"
+                              className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
                             >
                               <Pencil className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Modifier le message
                             </button>
@@ -1077,7 +1077,7 @@ export const MessagesPage: React.FC = () => {
                               setInfoModalMessage(m);
                               setActionMenuFor(null);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors text-left"
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
                           >
                             <Info className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Informations
                           </button>
@@ -1088,7 +1088,7 @@ export const MessagesPage: React.FC = () => {
                               setReplyTo(m);
                               setActionMenuFor(null);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors text-left"
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
                           >
                             <Reply className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Répondre
                           </button>
@@ -1099,7 +1099,7 @@ export const MessagesPage: React.FC = () => {
                               setForwardingMessage(m);
                               setActionMenuFor(null);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors text-left"
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
                           >
                             <Forward className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Transférer
                           </button>
@@ -1107,7 +1107,7 @@ export const MessagesPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => handleCopyMessage(m)}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800/60 transition-colors text-left"
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
                           >
                             <Copy className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Copier le message
                           </button>
@@ -1132,8 +1132,8 @@ export const MessagesPage: React.FC = () => {
                           <button
                             key={r.emoji}
                             onClick={() => handleToggleReaction(m, r.emoji)}
-                            className={`px-1.5 py-0.5 rounded-full text-[10px] border transition-colors ${
-                              r.mine ? 'bg-sky-500/20 border-sky-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-600'
+                            className={`vibe-chat-reaction-chip px-1.5 py-0.5 rounded-full text-[10px] border transition-colors ${
+                              r.mine ? 'bg-sky-500/20 border-sky-500 text-sky-600 dark:text-sky-300' : ''
                             }`}
                           >
                             {r.emoji} {r.count}
@@ -1171,7 +1171,7 @@ export const MessagesPage: React.FC = () => {
 
             {/* Attached Multi-Media Preview (Up to 5 images / 2 videos) */}
             {attachedMediaList.length > 0 && (
-              <div className="vibe-chat-bottom-bar p-3 border-t-0 flex items-center gap-2 overflow-x-auto">
+              <div className="vibe-chat-bottom-bar p-3 border-t flex items-center gap-2 overflow-x-auto">
                 {attachedMediaList.map((media, idx) => (
                   <div key={idx} className="relative group shrink-0">
                     {media.type === 'video' ? (
@@ -1181,7 +1181,7 @@ export const MessagesPage: React.FC = () => {
                     )}
                     <button
                       onClick={() => setAttachedMediaList((prev) => prev.filter((_, i) => i !== idx))}
-                      className="absolute -top-1 -right-1 p-1 rounded-full bg-zinc-900 text-white dark:bg-white dark:text-black hover:bg-black dark:hover:bg-zinc-200 shadow"
+                      className="vibe-chat-remove-media absolute -top-1 -right-1 p-1 rounded-full shadow"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -1216,7 +1216,7 @@ export const MessagesPage: React.FC = () => {
                       setEditingMessage(null);
                       setMessageInput('');
                     }}
-                    className="p-1 text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white"
+                    className="vibe-chat-icon-btn p-1 shrink-0"
                     title="Annuler la modification"
                   >
                     <X className="w-4 h-4" />
@@ -1230,7 +1230,7 @@ export const MessagesPage: React.FC = () => {
                   <span className="truncate">
                     Réponse à <strong>@{replyTo.sender_username}</strong> : {replyTo.content.slice(0, 60)}
                   </span>
-                  <button type="button" onClick={() => setReplyTo(null)} className="text-zinc-500 hover:text-black dark:hover:text-white shrink-0 ml-2">
+                  <button type="button" onClick={() => setReplyTo(null)} className="vibe-chat-icon-btn text-zinc-500 shrink-0 ml-2">
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -1238,7 +1238,7 @@ export const MessagesPage: React.FC = () => {
 
               {customPresetOpen && !isGeneratingSuggestion && (
                 <div className="flex items-center gap-2 mb-2">
-                  <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+                  <div className="vibe-chat-banner flex-1 flex items-center gap-2 px-3 py-1.5">
                     <PenLine className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />
                     <input
                       type="text"
@@ -1259,7 +1259,7 @@ export const MessagesPage: React.FC = () => {
                     type="button"
                     onClick={() => handleGenerateSuggestion('custom', customPresetText)}
                     disabled={!customPresetText.trim()}
-                    className="p-1.5 rounded-full bg-black text-white dark:bg-white dark:text-black disabled:opacity-40 shrink-0 shadow"
+                    className="vibe-chat-send-btn p-1.5 disabled:opacity-40 shrink-0 shadow"
                     title="Appliquer la consigne"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
@@ -1290,10 +1290,8 @@ export const MessagesPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setPlusMenuOpen((prev) => !prev)}
-                    className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
-                      plusMenuOpen
-                        ? 'bg-zinc-900 text-white dark:bg-white dark:text-black rotate-45 shadow-md'
-                        : 'bg-zinc-100 dark:bg-zinc-900 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white border border-zinc-200 dark:border-zinc-800'
+                    className={`vibe-chat-plus-btn w-10 h-10 rounded-full flex items-center justify-center transition-all ${
+                      plusMenuOpen ? 'rotate-45 shadow-md' : ''
                     }`}
                     title="Ajouter des médias ou options mAI"
                   >
@@ -1313,9 +1311,9 @@ export const MessagesPage: React.FC = () => {
                             fileInputRef.current?.click();
                           }}
                           disabled={isUploading}
-                          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl text-xs text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/60 hover:text-black dark:hover:text-white transition-colors text-left"
+                          className="vibe-chat-menu-item w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl text-xs transition-colors text-left"
                         >
-                          <div className="p-2 rounded-xl bg-zinc-100 dark:bg-zinc-900 text-zinc-800 dark:text-white border border-zinc-200 dark:border-zinc-800 shrink-0">
+                          <div className="vibe-chat-modal-card p-2 rounded-xl shrink-0">
                             <ImageIcon className="w-4 h-4" />
                           </div>
                           <div>
@@ -1340,7 +1338,7 @@ export const MessagesPage: React.FC = () => {
                               handleGenerateSuggestion(opt.key);
                             }}
                             disabled={!messageInput.trim() && opt.key !== 'custom'}
-                            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/60 hover:text-black dark:hover:text-white transition-colors text-left disabled:opacity-40 disabled:hover:bg-transparent"
+                            className="vibe-chat-menu-item w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs transition-colors text-left disabled:opacity-40 disabled:hover:bg-transparent"
                           >
                             <span className="text-zinc-500 dark:text-zinc-400">{opt.icon}</span>
                             <span>{opt.label}</span>
@@ -1375,7 +1373,7 @@ export const MessagesPage: React.FC = () => {
                       className={`p-1.5 rounded-full transition-colors ml-1.5 shrink-0 ${
                         isListening
                           ? 'bg-red-500 text-white animate-pulse'
-                          : 'text-zinc-500 hover:text-black dark:hover:text-white hover:bg-zinc-200 dark:hover:bg-zinc-800'
+                          : 'vibe-chat-icon-btn'
                       }`}
                       title={isListening ? 'Arrêter la dictée' : 'Dicter le message'}
                     >
@@ -1403,7 +1401,7 @@ export const MessagesPage: React.FC = () => {
             {/* Modale de renommage de conversation */}
             {renameModalOpen && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setRenameModalOpen(false)}>
-                <div className="w-full max-w-sm bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-5 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
+                <div className="w-full max-w-sm vibe-chat-modal-content rounded-3xl p-5 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
                   <h3 className="text-sm font-bold">Renommer la conversation</h3>
                   <input
                     type="text"
@@ -1411,19 +1409,19 @@ export const MessagesPage: React.FC = () => {
                     onChange={(e) => setRenameValue(e.target.value)}
                     maxLength={50}
                     placeholder={activePartner?.display_name || activePartner?.username}
-                    className="w-full p-2.5 rounded-xl bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
+                    className="vibe-chat-search-input w-full p-2.5 rounded-xl text-xs focus:outline-none"
                     autoFocus
                   />
                   <p className="text-[10px] text-zinc-500">Laissez vide pour réafficher le nom d'origine. Ce nom n'est visible que par vous.</p>
                   <div className="flex justify-end gap-2">
-                    <button onClick={() => setRenameModalOpen(false)} className="py-2 px-4 rounded-full bg-zinc-100 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 text-[11px] font-semibold hover:bg-zinc-200 dark:hover:bg-zinc-800">
+                    <button onClick={() => setRenameModalOpen(false)} className="vibe-chat-modal-btn py-2 px-4 text-[11px] font-semibold">
                       Annuler
                     </button>
                     <button
                       onClick={handleRenameConversation}
                       disabled={isModerating}
                       style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
-                      className="py-2 px-4 rounded-full bg-zinc-900 text-white dark:bg-white dark:text-black text-[11px] font-bold hover:brightness-90 disabled:opacity-40"
+                      className="vibe-chat-accent-btn py-2 px-4 text-[11px] font-bold disabled:opacity-40"
                     >
                       {isModerating ? '...' : 'Enregistrer'}
                     </button>
@@ -1435,7 +1433,7 @@ export const MessagesPage: React.FC = () => {
             {/* Modale de signalement */}
             {reportModalOpen && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setReportModalOpen(false)}>
-                <div className="w-full max-w-sm bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-5 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
+                <div className="w-full max-w-sm vibe-chat-modal-content rounded-3xl p-5 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center gap-2">
                     <Flag className="w-4 h-4 text-amber-500" />
                     <h3 className="text-sm font-bold">Signaler @{activePartner?.username}</h3>
@@ -1445,10 +1443,8 @@ export const MessagesPage: React.FC = () => {
                       <button
                         key={reason}
                         onClick={() => setReportReason(reason)}
-                        className={`w-full text-left px-3 py-2 rounded-xl text-[11px] border transition-colors ${
-                          reportReason === reason
-                            ? 'bg-zinc-100 dark:bg-zinc-900 border-zinc-900 dark:border-white text-zinc-900 dark:text-white font-bold'
-                            : 'bg-zinc-50 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                        className={`vibe-chat-modal-card w-full text-left px-3 py-2 rounded-xl text-[11px] transition-colors ${
+                          reportReason === reason ? 'selected font-bold' : ''
                         }`}
                       >
                         {reason}
@@ -1456,13 +1452,14 @@ export const MessagesPage: React.FC = () => {
                     ))}
                   </div>
                   <div className="flex justify-end gap-2">
-                    <button onClick={() => setReportModalOpen(false)} className="py-2 px-4 rounded-full bg-zinc-100 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 text-[11px] font-semibold hover:bg-zinc-200 dark:hover:bg-zinc-800">
+                    <button onClick={() => setReportModalOpen(false)} className="vibe-chat-modal-btn py-2 px-4 text-[11px] font-semibold">
                       Annuler
                     </button>
                     <button
                       onClick={handleReportConversation}
                       disabled={isModerating}
-                      className="py-2 px-4 rounded-full bg-amber-500 text-black text-[11px] font-bold hover:bg-amber-400 disabled:opacity-40"
+                      style={{ backgroundColor: '#f59e0b' }}
+                      className="vibe-chat-accent-btn py-2 px-4 text-[11px] font-bold disabled:opacity-40"
                     >
                       {isModerating ? '...' : 'Signaler'}
                     </button>
@@ -1474,10 +1471,10 @@ export const MessagesPage: React.FC = () => {
             {/* Modale de transfert */}
             {forwardingMessage && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn" onClick={() => setForwardingMessage(null)}>
-                <div className="w-full max-w-sm bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-4 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
+                <div className="w-full max-w-sm vibe-chat-modal-content rounded-3xl p-4 space-y-3 animate-scaleUp text-zinc-900 dark:text-white" onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-bold">Transférer le message</h3>
-                    <button onClick={() => setForwardingMessage(null)} className="p-1 rounded-full text-zinc-400 hover:text-black dark:hover:text-white">
+                    <button onClick={() => setForwardingMessage(null)} className="vibe-chat-icon-btn p-1">
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1492,7 +1489,7 @@ export const MessagesPage: React.FC = () => {
                       <button
                         key={conv.partner_id}
                         onClick={() => handleForwardTo(conv)}
-                        className="w-full p-3 flex items-center gap-3 hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors text-left"
+                        className="vibe-chat-menu-item w-full p-3 flex items-center gap-3 transition-colors text-left"
                       >
                         <ProfileAvatar
                           src={conv.partner_avatar_url}
@@ -1519,7 +1516,7 @@ export const MessagesPage: React.FC = () => {
                 onClick={() => setInfoModalMessage(null)}
               >
                 <div
-                  className="w-full max-w-sm bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-5 space-y-4 animate-scaleUp text-zinc-900 dark:text-white"
+                  className="w-full max-w-sm vibe-chat-modal-content rounded-3xl p-5 space-y-4 animate-scaleUp text-zinc-900 dark:text-white"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3">
@@ -1530,7 +1527,7 @@ export const MessagesPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setInfoModalMessage(null)}
-                      className="p-1 rounded-full text-zinc-400 hover:text-black dark:hover:text-white"
+                      className="vibe-chat-icon-btn p-1"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -1612,7 +1609,7 @@ export const MessagesPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setInfoModalMessage(null)}
-                      className="py-2 px-4 rounded-full bg-zinc-900 text-white dark:bg-white dark:text-black text-xs font-bold hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors shadow"
+                      className="vibe-chat-send-btn py-2 px-4 text-xs font-bold transition-colors shadow"
                     >
                       Fermer
                     </button>
@@ -1628,7 +1625,7 @@ export const MessagesPage: React.FC = () => {
                 onClick={() => setThemeModalOpen(false)}
               >
                 <div
-                  className="w-full max-w-md bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-5 space-y-4 animate-scaleUp text-zinc-900 dark:text-white max-h-[90vh] overflow-y-auto"
+                  className="w-full max-w-md vibe-chat-modal-content rounded-3xl p-5 space-y-4 animate-scaleUp text-zinc-900 dark:text-white max-h-[90vh] overflow-y-auto"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3">
@@ -1639,7 +1636,7 @@ export const MessagesPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setThemeModalOpen(false)}
-                      className="p-1 rounded-full text-zinc-400 hover:text-black dark:hover:text-white"
+                      className="vibe-chat-icon-btn p-1"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -1658,10 +1655,8 @@ export const MessagesPage: React.FC = () => {
                             key={themeOpt.id}
                             type="button"
                             onClick={() => setMessageBubbleTheme(themeOpt.id)}
-                            className={`p-2.5 rounded-2xl border text-left flex items-center gap-2.5 transition-all ${
-                              isSelected
-                                ? 'border-zinc-900 dark:border-white bg-zinc-100 dark:bg-zinc-900 shadow-md ring-1 ring-zinc-900/30 dark:ring-white/30'
-                                : 'border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-900/50'
+                            className={`vibe-chat-modal-card p-2.5 text-left flex items-center gap-2.5 transition-all ${
+                              isSelected ? 'selected shadow-md' : ''
                             }`}
                           >
                             <span
@@ -1688,10 +1683,8 @@ export const MessagesPage: React.FC = () => {
                             key={bgOpt.id}
                             type="button"
                             onClick={() => setChatBackgroundTheme(bgOpt.id)}
-                            className={`p-2.5 rounded-2xl border text-left flex items-center gap-2.5 transition-all ${
-                              isSelected
-                                ? 'border-zinc-900 dark:border-white bg-zinc-100 dark:bg-zinc-900 shadow-md ring-1 ring-zinc-900/30 dark:ring-white/30'
-                                : 'border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-900/50'
+                            className={`vibe-chat-modal-card p-2.5 text-left flex items-center gap-2.5 transition-all ${
+                              isSelected ? 'selected shadow-md' : ''
                             }`}
                           >
                             <span
@@ -1719,11 +1712,9 @@ export const MessagesPage: React.FC = () => {
                             key={shapeKey}
                             type="button"
                             onClick={() => setMessageBubbleShape(shapeKey)}
-                            className={`py-2 px-2 rounded-2xl border text-center text-[11px] font-semibold transition-all ${
-                              isSelected
-                                ? 'border-zinc-900 dark:border-white bg-zinc-900 text-white dark:bg-white dark:text-black font-bold shadow'
-                                : 'border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
-                            }`}
+                          className={`vibe-chat-modal-card py-2 px-2 text-center text-[11px] font-semibold transition-all ${
+                            isSelected ? 'selected font-bold shadow' : ''
+                          }`}
                           >
                             {s.label.split(' ')[0]}
                           </button>
@@ -1736,7 +1727,7 @@ export const MessagesPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setThemeModalOpen(false)}
-                      className="py-2 px-5 rounded-full bg-zinc-900 text-white dark:bg-white dark:text-black text-xs font-bold hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors shadow"
+                      className="vibe-chat-send-btn py-2 px-5 text-xs font-bold transition-colors shadow"
                     >
                       Terminer
                     </button>

@@ -27,7 +27,7 @@ const sql = neon(envVars.DATABASE_URL);
 
 async function runAlter(name, query) {
   try {
-    await sql.unsafe(query);
+    await sql.query(query);
     console.log(`  ✅ ${name}`);
   } catch (e) {
     if (e.message.includes('already exists') || e.message.includes('does not exist') || e.message.includes('duplicate')) {
@@ -183,6 +183,14 @@ async function migrate() {
   // 8b. comments — Colonnes réponses imbriquées + likes
   // ─────────────────────────────────────────────────────────────
   console.log('\n💬 TABLE comments:');
+  await runAlter(
+    'comments.path drop not null',
+    `ALTER TABLE comments ALTER COLUMN path DROP NOT NULL`
+  );
+  await runAlter(
+    'comments.path default empty',
+    `ALTER TABLE comments ALTER COLUMN path SET DEFAULT ''`
+  );
   await runAlter(
     'comments.parent_comment_id',
     `ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`
@@ -417,7 +425,7 @@ async function migrate() {
   ];
 
   for (const [name, q] of checks) {
-    const r = await sql.unsafe(q);
+    const r = await sql.query(q);
     console.log(`  ${r.length > 0 ? '✅' : '❌'} ${name}`);
   }
 
