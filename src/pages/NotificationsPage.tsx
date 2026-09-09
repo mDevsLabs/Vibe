@@ -15,32 +15,128 @@ import {
   MessageSquare,
   Sparkles,
   UserPlus,
+  Quote as QuoteIcon,
+  FileText,
   Check,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Mail,
+  Trash2,
+  CheckCheck,
+  RotateCcw
 } from 'lucide-react';
 import { NotificationItem } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { NotificationService } from '../services/notificationService';
+import { AppStorage } from '../services/storageAdapter';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 
 type PermissionState = 'unsupported' | 'default' | 'granted' | 'denied';
 
+// Clés de persistance locale pour empêcher toute réapparition après suppression ou modification
+const STORAGE_KEY_DELETED = 'vibe_deleted_notifications';
+const STORAGE_KEY_CLEARED_AT = 'vibe_notifications_cleared_at';
+const STORAGE_KEY_READ_OVERRIDES = 'vibe_notifications_read_overrides';
+const STORAGE_KEY_READ_ALL_AT = 'vibe_notifications_read_all_at';
+
+function getDeletedIds(): Set<string> {
+  const list = AppStorage.getJSON<string[]>(STORAGE_KEY_DELETED, []);
+  return new Set(Array.isArray(list) ? list : []);
+}
+
+function saveDeletedId(id: string) {
+  const current = getDeletedIds();
+  current.add(String(id));
+  AppStorage.setJSON(STORAGE_KEY_DELETED, Array.from(current).slice(-500));
+}
+
+function getClearedAt(): number {
+  const val = AppStorage.getItem(STORAGE_KEY_CLEARED_AT);
+  return val ? parseInt(val, 10) || 0 : 0;
+}
+
+function saveClearedAt(timestamp: number) {
+  AppStorage.setItem(STORAGE_KEY_CLEARED_AT, String(timestamp));
+}
+
+function getReadOverrides(): Record<string, boolean> {
+  return AppStorage.getJSON<Record<string, boolean>>(STORAGE_KEY_READ_OVERRIDES, {}) || {};
+}
+
+function saveReadOverride(id: string, isRead: boolean) {
+  const current = getReadOverrides();
+  current[String(id)] = isRead;
+  AppStorage.setJSON(STORAGE_KEY_READ_OVERRIDES, current);
+}
+
+function getReadAllAt(): number {
+  const val = AppStorage.getItem(STORAGE_KEY_READ_ALL_AT);
+  return val ? parseInt(val, 10) || 0 : 0;
+}
+
+function saveReadAllAt(timestamp: number) {
+  AppStorage.setItem(STORAGE_KEY_READ_ALL_AT, String(timestamp));
+}
+
 export const NotificationsPage: React.FC = () => {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [filter, setFilter] = useState<'all' | 'likes' | 'mentions' | 'verified'>('all');
+  const [filter, setFilter] = useState<'all' | 'messages' | 'likes' | 'mentions' | 'verified'>('all');
   const [isLoading, setIsLoading] = useState(true);
   const [permission, setPermission] = useState<PermissionState>('default');
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
+  // Filtrage client de secours : comptes masqués/bloqués (le serveur filtre
+  // déjà, ce set protège contre un backend pas encore à jour)
+  const [hiddenUsernames, setHiddenUsernames] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    Promise.all([
+      ApiService.getMutedUsers().catch(() => ({ muted: [] })),
+      ApiService.getBlockedUsers().catch(() => ({ blocked: [] })),
+    ]).then(([mutedRes, blockedRes]) => {
+      const names = new Set<string>();
+      for (const m of mutedRes?.muted || []) {
+        if ((m as any).muted_username) names.add(String((m as any).muted_username).toLowerCase());
+      }
+      for (const b of blockedRes?.blocked || []) {
+        if (b.blocked_username) names.add(String(b.blocked_username).toLowerCase());
+      }
+      setHiddenUsernames(names);
+    });
+  }, []);
 
   const fetchNotifications = async () => {
     try {
       const data = await ApiService.getNotifications();
-      setNotifications(data.notifications || []);
+      const rawList: NotificationItem[] = Array.isArray(data?.notifications) ? data.notifications : [];
+
+      const deletedIds = getDeletedIds();
+      const clearedAt = getClearedAt();
+      const readOverrides = getReadOverrides();
+      const readAllAt = getReadAllAt();
+
+      const filtered = rawList
+        .filter((n) => {
+          if (!n || !n.id) return false;
+          if (deletedIds.has(String(n.id))) return false;
+          if (clearedAt > 0 && new Date(n.created_at).getTime() <= clearedAt) return false;
+          return true;
+        })
+        .map((n) => {
+          const override = readOverrides[String(n.id)];
+          if (override !== undefined) {
+            return { ...n, is_read: override };
+          }
+          if (readAllAt > 0 && new Date(n.created_at).getTime() <= readAllAt) {
+            return { ...n, is_read: true };
+          }
+          return n;
+        });
+
+      setNotifications(filtered);
     } catch {
-      setNotifications([]);
+      // Préserver l'état en cas de micro-coupure réseau
     } finally {
       setIsLoading(false);
     }
@@ -51,8 +147,10 @@ export const NotificationsPage: React.FC = () => {
     const state = NotificationService.getPermissionState();
     setPermission(state === 'unsupported' ? 'unsupported' : (state as PermissionState));
 
-    // Rafraîchissement automatique toutes les 8s ou au focus/événement
-    const interval = setInterval(fetchNotifications, 8000);
+    // Temps réel via SSE : chaque notification est poussée par le serveur et
+    // rediffusée en 'vibe:notification_received' (realtimeService).
+    // L'intervalle ne sert que de filet de sécurité léger.
+    const interval = setInterval(fetchNotifications, 60000);
     const handleNotif = () => fetchNotifications();
     window.addEventListener('vibe:notification_received', handleNotif);
     window.addEventListener('vibe:feed_refresh', handleNotif);
@@ -77,15 +175,67 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const handleMarkAllAsRead = async () => {
+    saveReadAllAt(Date.now());
+    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    window.dispatchEvent(new CustomEvent('vibe:realtime_unread', { detail: { unread_notifications: 0 } }));
+    NotificationService.showInAppToast('Notifications lues', 'Toutes les notifications sont marquées comme lues.', 'info');
     try {
       await ApiService.markNotificationsRead();
-      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
-    } catch {}
+    } catch (err) {
+      console.warn('[Notifications] Error markAllRead:', err);
+    }
+  };
+
+  const handleToggleRead = async (e: React.MouseEvent, notif: NotificationItem) => {
+    e.stopPropagation();
+    const newStatus = !notif.is_read;
+    saveReadOverride(notif.id, newStatus);
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === notif.id ? { ...n, is_read: newStatus } : n))
+    );
+    try {
+      await ApiService.markNotificationRead(notif.id, newStatus);
+    } catch (err) {
+      console.warn('[Notifications] Error markNotificationRead:', err);
+    }
+  };
+
+  const handleDeleteOne = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    saveDeletedId(id);
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+    NotificationService.showInAppToast('Notification supprimée', 'La notification a bien été effacée.', 'info');
+    try {
+      await ApiService.deleteNotification(id);
+    } catch (err) {
+      console.warn('[Notifications] Error deleteNotification:', err);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!window.confirm('Voulez-vous supprimer toutes vos notifications ?')) return;
+    saveClearedAt(Date.now());
+    notifications.forEach((n) => saveDeletedId(n.id));
+    setNotifications([]);
+    window.dispatchEvent(new CustomEvent('vibe:realtime_unread', { detail: { unread_notifications: 0 } }));
+    NotificationService.showInAppToast('Notifications effacées', 'Toutes les notifications ont été supprimées.', 'info');
+    try {
+      await ApiService.clearAllNotifications();
+    } catch (err) {
+      console.warn('[Notifications] Error clearAllNotifications:', err);
+    }
   };
 
   const handleNotificationClick = (notif: NotificationItem) => {
-    if (notif.post_id) {
-      navigate(`/posts/${notif.post_id}`);
+    if (!notif.is_read) {
+      saveReadOverride(notif.id, true);
+      setNotifications((prev) => prev.map((n) => (n.id === notif.id ? { ...n, is_read: true } : n)));
+      ApiService.markNotificationRead(notif.id, true).catch(() => {});
+    }
+    if (notif.type === 'dm') {
+      navigate('/messages');
+    } else if (notif.post_id) {
+      navigate(`/post/${notif.post_id}`);
     } else if (notif.actor_username) {
       navigate(`/@${notif.actor_username}`);
     }
@@ -93,11 +243,15 @@ export const NotificationsPage: React.FC = () => {
 
   const getIcon = (type: string) => {
     switch (type) {
+      case 'dm':
+        return <Mail className="w-4 h-4 text-white" />;
       case 'like':
       case 'reaction':
         return <Heart className="w-4 h-4 text-rose-500 fill-rose-500" />;
       case 'repost':
         return <Repeat className="w-4 h-4 text-emerald-400" />;
+      case 'quote':
+        return <QuoteIcon className="w-4 h-4 text-emerald-400" />;
       case 'reply':
       case 'mention':
         return <MessageSquare className="w-4 h-4 text-sky-400" />;
@@ -107,14 +261,22 @@ export const NotificationsPage: React.FC = () => {
         return <UserPlus className="w-4 h-4 text-violet-400" />;
       case 'ai_digest':
         return <Sparkles className="w-4 h-4 text-amber-400" />;
+      case 'post':
+        return <FileText className="w-4 h-4 text-sky-400" />;
       default:
         return <Bell className="w-4 h-4 text-zinc-400" />;
     }
   };
 
   const filteredNotifications = notifications.filter((n) => {
+    // Secours client : aucun contenu d'un compte masqué ou bloqué
+    if (n.actor_username && hiddenUsernames.has(String(n.actor_username).toLowerCase())) return false;
+    // Messages privés
+    if (filter === 'messages') return n.type === 'dm';
+    // Mentions = uniquement les citations et réponses directes (+ mentions @)
+    if (filter === 'mentions') return n.type === 'quote' || n.type === 'reply' || n.type === 'mention';
     if (filter === 'likes') return n.type === 'like' || n.type === 'reaction';
-    if (filter === 'mentions') return n.type === 'reply' || n.type === 'mention';
+    // Comptes vérifiés : filtre anti-spam ne montrant que les comptes certifiés
     if (filter === 'verified') return Boolean((n as any).actor_verified);
     return true;
   });
@@ -122,8 +284,11 @@ export const NotificationsPage: React.FC = () => {
   // Regroupement par jour (Aujourd'hui / Hier / date)
   const grouped = useMemo(() => {
     const groups: { label: string; items: NotificationItem[] }[] = [];
-    const today = new Date().toDateString();
-    const yesterday = new Date(Date.now() - 86400000).toDateString();
+    const now = new Date();
+    const today = now.toDateString();
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = yesterdayDate.toDateString();
 
     for (const n of filteredNotifications) {
       const d = new Date(n.created_at).toDateString();
@@ -136,25 +301,39 @@ export const NotificationsPage: React.FC = () => {
   }, [filteredNotifications]);
 
   const likesCount = notifications.filter((n) => n.type === 'like' || n.type === 'reaction').length;
+  const messagesCount = notifications.filter((n) => n.type === 'dm').length;
 
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8 select-none">
       {/* Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 p-4 flex items-center justify-between">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4 flex items-center justify-between">
         <div>
           <h1 className="text-base font-bold text-white tracking-tight">Notifications</h1>
           <p className="text-xs text-zinc-500">Activités, mentions et mentions J'aime</p>
         </div>
 
-        {notifications.some((n) => !n.is_read) && (
-          <button
-            onClick={handleMarkAllAsRead}
-            className="flex items-center gap-1.5 py-1 px-3 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors"
-          >
-            <Check className="w-3.5 h-3.5" />
-            <span>Tout marquer lu</span>
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {notifications.some((n) => !n.is_read) && (
+            <button
+              onClick={handleMarkAllAsRead}
+              className="flex items-center gap-1.5 py-1 px-3 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors"
+              title="Tout marquer comme lu"
+            >
+              <CheckCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Tout marquer lu</span>
+            </button>
+          )}
+          {notifications.length > 0 && (
+            <button
+              onClick={handleClearAll}
+              className="flex items-center gap-1.5 py-1 px-3 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors"
+              title="Supprimer toutes les notifications"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Tout effacer</span>
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Bandeau d'activation des notifications appareil */}
@@ -201,12 +380,13 @@ export const NotificationsPage: React.FC = () => {
         </div>
       )}
 
-      {/* Filter Tabs */}
-      <div className="flex border-b border-zinc-800 bg-zinc-950 mt-4">
+      {/* Filter Tabs : Toutes / Messages / Mentions / J'aime / Comptes vérifiés */}
+      <div className="flex border-b border-zinc-800 bg-zinc-950 mt-4 overflow-x-auto scrollbar-none">
         {[
           { id: 'all', label: 'Toutes' },
-          { id: 'likes', label: `J'aime (${likesCount})` },
+          { id: 'messages', label: messagesCount > 0 ? `Messages (${messagesCount})` : 'Messages' },
           { id: 'mentions', label: 'Mentions' },
+          { id: 'likes', label: likesCount > 0 ? `J'aime (${likesCount})` : "J'aime" },
           { id: 'verified', label: 'Vérifiés' },
         ].map((t) => (
           <button
@@ -288,7 +468,32 @@ export const NotificationsPage: React.FC = () => {
                       </span>
                     </div>
 
-                    {!notif.is_read && <div className="w-2 h-2 rounded-full bg-rose-500 mt-1.5 shrink-0" />}
+                    {/* Actions individuelles (Marquer comme lu / non lu + Supprimer) */}
+                    <div className="flex items-center gap-1 shrink-0 ml-1">
+                      <button
+                        onClick={(e) => handleToggleRead(e, notif)}
+                        className={`p-1.5 rounded-full transition-colors ${
+                          notif.is_read
+                            ? 'text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/60'
+                            : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                        }`}
+                        title={notif.is_read ? 'Marquer comme non lu' : 'Marquer comme lu'}
+                      >
+                        {notif.is_read ? (
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <button
+                        onClick={(e) => handleDeleteOne(e, notif.id)}
+                        className="p-1.5 rounded-full text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors"
+                        title="Supprimer cette notification"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                      {!notif.is_read && <div className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -297,15 +502,27 @@ export const NotificationsPage: React.FC = () => {
 
           {filteredNotifications.length === 0 && (
             <div className="p-16 text-center text-zinc-500 text-xs space-y-2">
-              <Bell className="w-6 h-6 mx-auto text-zinc-600" />
+              {filter === 'messages' ? (
+                <Mail className="w-6 h-6 mx-auto text-zinc-600" />
+              ) : (
+                <Bell className="w-6 h-6 mx-auto text-zinc-600" />
+              )}
               <p className="font-semibold text-zinc-400">
-                {filter === 'likes'
+                {filter === 'messages'
+                  ? 'Aucune notification de message pour le moment'
+                  : filter === 'likes'
                   ? "Aucune mention J'aime pour le moment"
                   : filter === 'mentions'
                   ? 'Aucune mention pour le moment'
+                  : filter === 'verified'
+                  ? 'Aucune notification de comptes vérifiés'
                   : 'Aucune notification pour le moment'}
               </p>
-              <p className="text-[11px] text-zinc-600">Vos likes, repartages et mentions apparaîtront ici dès leur réception.</p>
+              <p className="text-[11px] text-zinc-600">
+                {filter === 'messages'
+                  ? 'Vos notifications de messages privés apparaîtront ici dès réception.'
+                  : 'Vos likes, repartages et mentions apparaîtront ici dès leur réception.'}
+              </p>
             </div>
           )}
         </>

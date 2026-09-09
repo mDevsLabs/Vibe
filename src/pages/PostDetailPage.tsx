@@ -6,11 +6,12 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Loader2, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle, Sparkles, Volume2 } from 'lucide-react';
 import { Post } from '../types/vibe';
 import { PostCard } from '../components/feed/PostCard';
 import { CommentSection } from '../components/comments/CommentSection';
 import { ApiService } from '../services/api';
+import { useAudioPlayer } from '../context/AudioPlayerContext';
 
 interface PostDetailPageProps {
   postId: string;
@@ -26,6 +27,37 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
   const [post, setPost] = useState<Post | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [isQueueingThread, setIsQueueingThread] = useState(false);
+  const { playQueue } = useAudioPlayer();
+
+  /** Écoute tout le fil avec la voix mAI : post principal puis commentaires. */
+  const handleListenThread = async () => {
+    if (!post || isQueueingThread) return;
+    setIsQueueingThread(true);
+    try {
+      const snippet = (post.content || '').trim().slice(0, 48);
+      const segments: Array<{ id: string; title: string; text: string }> = [
+        {
+          id: `post-${post.id}`,
+          title: `@${post.username}${snippet ? ` — ${snippet}${(post.content || '').length > 48 ? '…' : ''}` : ''}`,
+          text: post.content || '',
+        },
+      ];
+      try {
+        const res = await ApiService.getComments(post.id);
+        for (const c of (res.comments || []).slice(0, 30)) {
+          segments.push({
+            id: `comment-${c.id}`,
+            title: `Réponse de @${c.username}`,
+            text: c.content || '',
+          });
+        }
+      } catch {}
+      playQueue(segments);
+    } finally {
+      setIsQueueingThread(false);
+    }
+  };
 
   useEffect(() => {
     const fetchPost = async () => {
@@ -52,7 +84,7 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
   return (
     <div className="flex-1 min-h-screen border-r border-zinc-800 bg-black pb-8">
       {/* Header */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 py-3 flex items-center gap-4">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 flex items-center gap-4">
         <button
           onClick={onBack}
           className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
@@ -60,6 +92,29 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
           <ArrowLeft className="w-5 h-5" />
         </button>
         <h1 className="text-lg font-bold text-white tracking-tight">Publication</h1>
+        {post?.content?.trim() && (
+          <button
+            onClick={handleListenThread}
+            disabled={isQueueingThread}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-semibold hover:bg-zinc-800 transition-colors disabled:opacity-40"
+            title="Écouter la publication et son fil de discussion avec la voix de mAI"
+          >
+            {isQueueingThread ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Volume2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">Écouter le fil</span>
+            <span className="sm:hidden">Écouter</span>
+          </button>
+        )}
+        <button
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent('vibe:open_mai', { detail: { postId } }))
+          }
+          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-semibold hover:bg-zinc-800 transition-colors"
+          title="Mentionner cette publication à l'assistant mAI (contenu, médias, commentaires et stats transmis)"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Mentionner dans mAI</span>
+          <span className="sm:hidden">mAI</span>
+        </button>
       </header>
 
       {/* Loading state */}

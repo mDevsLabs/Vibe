@@ -27,7 +27,7 @@ const sql = neon(envVars.DATABASE_URL);
 
 async function runAlter(name, query) {
   try {
-    await sql.unsafe(query);
+    await sql.query(query);
     console.log(`  ✅ ${name}`);
   } catch (e) {
     if (e.message.includes('already exists') || e.message.includes('does not exist') || e.message.includes('duplicate')) {
@@ -63,6 +63,10 @@ async function migrate() {
     'profiles.updated_at',
     `ALTER TABLE profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`
   );
+  await runAlter(
+    'profiles.display_name_nullable',
+    `ALTER TABLE profiles ALTER COLUMN display_name DROP NOT NULL`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 3. user_settings — Ajouter les 5 colonnes manquantes
@@ -96,6 +100,14 @@ async function migrate() {
     'user_settings.mai_auto_approve_tools',
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`
   );
+  await runAlter(
+    'user_settings.posts_ai_generated_by_default',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`
+  );
+  await runAlter(
+    'user_settings.ui_language',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS ui_language TEXT`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. usage_logs — Ajouter colonne endpoint (manquante selon schéma)
@@ -128,6 +140,30 @@ async function migrate() {
     'posts.is_repost',
     `ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_repost BOOLEAN DEFAULT FALSE`
   );
+  await runAlter(
+    'posts.ai_generated',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN DEFAULT FALSE`
+  );
+  await runAlter(
+    'posts.quoted_post_id',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id UUID REFERENCES posts(id) ON DELETE SET NULL`
+  );
+  await runAlter(
+    'posts.status',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'published'`
+  );
+  await runAlter(
+    'posts.scheduled_at',
+    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ`
+  );
+  await runAlter(
+    'posts.update_null_status',
+    `UPDATE posts SET status = 'published' WHERE status IS NULL`
+  );
+  await runAlter(
+    'media_assets.comment_id',
+    `ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 7. notifications — Assurer is_read
@@ -152,6 +188,14 @@ async function migrate() {
   // ─────────────────────────────────────────────────────────────
   console.log('\n💬 TABLE comments:');
   await runAlter(
+    'comments.path drop not null',
+    `ALTER TABLE comments ALTER COLUMN path DROP NOT NULL`
+  );
+  await runAlter(
+    'comments.path default empty',
+    `ALTER TABLE comments ALTER COLUMN path SET DEFAULT ''`
+  );
+  await runAlter(
     'comments.parent_comment_id',
     `ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE`
   );
@@ -175,6 +219,37 @@ async function migrate() {
       comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       UNIQUE (user_id, comment_id)
+    )`
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // 8d. Traductions DeepL (posts + commentaires, cf. translate.ts)
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n🌍 TABLES TRADUCTIONS:');
+  await runAlter(
+    'TABLE post_translations',
+    `CREATE TABLE IF NOT EXISTS post_translations (
+      post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      target_lang TEXT NOT NULL,
+      detected_language TEXT,
+      translation TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (post_id, target_lang)
+    )`
+  );
+  await runAlter(
+    'post_translations.provider',
+    `ALTER TABLE post_translations ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'mai'`
+  );
+  await runAlter(
+    'TABLE comment_translations',
+    `CREATE TABLE IF NOT EXISTS comment_translations (
+      comment_id UUID NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      target_lang TEXT NOT NULL,
+      detected_language TEXT,
+      translation TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (comment_id, target_lang)
     )`
   );
 
@@ -257,6 +332,22 @@ async function migrate() {
     `CREATE INDEX IF NOT EXISTS idx_posts_published_at ON posts(published_at DESC)`
   );
   await runAlter(
+    'idx_posts_visibility_published',
+    `CREATE INDEX IF NOT EXISTS idx_posts_visibility_published ON posts(visibility, published_at DESC)`
+  );
+  await runAlter(
+    'extension_pg_trgm',
+    `CREATE EXTENSION IF NOT EXISTS pg_trgm`
+  );
+  await runAlter(
+    'idx_posts_content_trgm',
+    `CREATE INDEX IF NOT EXISTS idx_posts_content_trgm ON posts USING gin (content gin_trgm_ops)`
+  );
+  await runAlter(
+    'idx_users_username_trgm',
+    `CREATE INDEX IF NOT EXISTS idx_users_username_trgm ON users USING gin (username gin_trgm_ops)`
+  );
+  await runAlter(
     'idx_post_interactions_lookup',
     `CREATE INDEX IF NOT EXISTS idx_post_interactions_lookup ON post_interactions(post_id, interaction_type, user_id)`
   );
@@ -318,6 +409,50 @@ async function migrate() {
   await runAlter('idx_dm_unread', `CREATE INDEX IF NOT EXISTS idx_dm_unread ON direct_messages(conversation_id, recipient_id, is_read)`);
 
   // ─────────────────────────────────────────────────────────────
+  // 15. Cercle Privé (user_circles, circle_members) & Audience par défaut
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n🔒 CERCLE PRIVÉ & AUDIENCE PAR DÉFAUT:');
+  await runAlter(
+    'TABLE user_circles',
+    `CREATE TABLE IF NOT EXISTS user_circles (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name VARCHAR(100) NOT NULL DEFAULT 'Cercle Privé',
+      description TEXT DEFAULT 'Personnes autorisées à voir mes Vibes privées',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, name)
+    )`
+  );
+  await runAlter('idx_user_circles_user', `CREATE INDEX IF NOT EXISTS idx_user_circles_user ON user_circles(user_id)`);
+
+  await runAlter(
+    'TABLE circle_members',
+    `CREATE TABLE IF NOT EXISTS circle_members (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      member_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, member_user_id)
+    )`
+  );
+  await runAlter('circle_members.circle_id', `ALTER TABLE circle_members ADD COLUMN IF NOT EXISTS circle_id INTEGER REFERENCES user_circles(id) ON DELETE CASCADE`);
+  await runAlter('idx_circle_member', `CREATE INDEX IF NOT EXISTS idx_circle_member ON circle_members(member_user_id)`);
+  await runAlter('idx_circle_user', `CREATE INDEX IF NOT EXISTS idx_circle_user ON circle_members(user_id)`);
+
+  await runAlter('user_settings.default_vibe_audience', `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS default_vibe_audience VARCHAR(32) DEFAULT 'public'`);
+
+  await runAlter(
+    'TABLE vibe_audience_preferences',
+    `CREATE TABLE IF NOT EXISTS vibe_audience_preferences (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      default_audience VARCHAR(32) NOT NULL DEFAULT 'public',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`
+  );
+  await runAlter('idx_vibe_audience_user', `CREATE INDEX IF NOT EXISTS idx_vibe_audience_user ON vibe_audience_preferences(user_id)`);
+
+  // ─────────────────────────────────────────────────────────────
   // VÉRIFICATION FINALE
   // ─────────────────────────────────────────────────────────────
   console.log('\n═'.repeat(60));
@@ -331,10 +466,18 @@ async function migrate() {
     ['user_settings.two_factor_auth', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='two_factor_auth'`],
     ['user_settings.allow_mentions', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='allow_mentions'`],
     ['usage_logs.endpoint', `SELECT 1 FROM information_schema.columns WHERE table_name='usage_logs' AND column_name='endpoint'`],
+    ['posts.status', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='status'`],
+    ['posts.scheduled_at', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='scheduled_at'`],
+    ['user_settings.ui_language', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='ui_language'`],
+    ['user_settings.default_vibe_audience', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='default_vibe_audience'`],
+    ['user_circles', `SELECT 1 FROM information_schema.tables WHERE table_name='user_circles'`],
+    ['vibe_audience_preferences', `SELECT 1 FROM information_schema.tables WHERE table_name='vibe_audience_preferences'`],
+    ['circle_members', `SELECT 1 FROM information_schema.tables WHERE table_name='circle_members'`],
+    ['comment_translations', `SELECT 1 FROM information_schema.tables WHERE table_name='comment_translations'`],
   ];
 
   for (const [name, q] of checks) {
-    const r = await sql.unsafe(q);
+    const r = await sql.query(q);
     console.log(`  ${r.length > 0 ? '✅' : '❌'} ${name}`);
   }
 

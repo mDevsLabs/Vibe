@@ -170,11 +170,34 @@ export class MAIAgentFleet {
   }
 
   /**
-   * Appel générique OpenRouter pour les outils textuels (traduction, reformulation...).
+   * Modèle mAI par défaut de l'utilisateur (réglage user_settings.mai_default_model,
+   * choisi dans les paramètres ou directement dans mAI). Cache mémoire 60 s.
    */
-  public static async callOpenRouter(userId: number, system: string, user: string, model = "google/gemini-2.5-flash:free"): Promise<string | null> {
+  static userModelCache = new Map<string, { model: string; expiresAt: number }>();
+
+  public static async getUserDefaultModel(userId: number | string): Promise<string> {
+    const key = String(userId);
+    const cached = this.userModelCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.model;
+    let model = "poolside/laguna-xs-2.1:free";
+    try {
+      const sql = getDb();
+      const rows = await sql`SELECT mai_default_model FROM user_settings WHERE user_id = ${Number(key)} LIMIT 1`;
+      const saved = String(rows[0]?.mai_default_model || "").trim();
+      if (saved) model = saved;
+    } catch {}
+    this.userModelCache.set(key, { model, expiresAt: Date.now() + 60_000 });
+    return model;
+  }
+
+  /**
+   * Appel générique OpenRouter pour les outils textuels (traduction, reformulation...).
+   * Sans `model`, utilise le modèle par défaut de l'utilisateur.
+   */
+  public static async callOpenRouter(userId: number, system: string, user: string, model?: string): Promise<string | null> {
     const apiKey = await this.getOpenRouterKey(userId);
     if (!apiKey) return null;
+    const resolvedModel = model || (await this.getUserDefaultModel(userId));
     try {
       const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -185,7 +208,7 @@ export class MAIAgentFleet {
           "X-Title": "mAI Social Assistant",
         },
         body: JSON.stringify({
-          model,
+          model: resolvedModel,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },
@@ -235,8 +258,8 @@ export class MAIAgentFleet {
           if (!safety.isSafe) throw new Error(`Publication refusée par mAI : ${safety.flagReason}`);
 
           const inserted = await sql`
-            INSERT INTO posts (author_id, content, format, created_via, toxicity_score)
-            VALUES (${uid}, ${content.trim()}, ${format}, 'mai_agent', ${safety.toxicityScore})
+            INSERT INTO posts (author_id, content, format, created_via, toxicity_score, ai_generated)
+            VALUES (${uid}, ${content.trim()}, ${format}, 'mai_agent', ${safety.toxicityScore}, TRUE)
             RETURNING *
           `;
           const newPost = inserted[0];
@@ -362,35 +385,6 @@ export class MAIAgentFleet {
             .map((r) => `• **${r.title}** — ${r.snippet}\n  ${r.url}`)
             .join("\n");
           resultData = { query, snippet, provider: search.provider, results: search.results };
-          break;
-        }
-
-        case "summarize": {
-          const recent = await sql`
-            SELECT p.content, u.username FROM posts p
-            JOIN users u ON u.id = p.author_id
-            ORDER BY p.published_at DESC LIMIT 30
-          `;
-          if (recent.length === 0) {
-            resultData = { summary: "Le fil est calme : aucune publication récente à résumer." };
-            break;
-          }
-          const hashtags: Record<string, number> = {};
-          for (const r of recent) {
-            for (const m of String(r.content).matchAll(/#([\p{L}\p{N}_]{2,30})/gu)) {
-              const tag = m[1].toLowerCase();
-              hashtags[tag] = (hashtags[tag] || 0) + 1;
-            }
-          }
-          const topTags = Object.entries(hashtags).sort((a, b) => b[1] - a[1]).slice(0, 5);
-          const authors = [...new Set(recent.map((r: any) => `@${r.username}`))].slice(0, 5).join(", ");
-          resultData = {
-            summary: [
-              `📄 ${recent.length} publications récentes analysées, principalement par ${authors}.`,
-              topTags.length > 0 ? `🏷️ Sujets dominants : ${topTags.map(([t, n]) => `#${t} (${n})`).join(", ")}.` : "",
-              "💡 Le flux tourne surtout autour de ces thématiques — explorez les tendances pour en savoir plus.",
-            ].filter(Boolean).join("\n\n"),
-          };
           break;
         }
 

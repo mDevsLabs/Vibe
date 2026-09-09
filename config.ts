@@ -184,14 +184,28 @@ export function getTierStorageLimitBytes(tier?: string | null): number {
   return STORAGE_LIMITS_BYTES[normalizeTier(tier)];
 }
 
+let _cachedDb: ReturnType<typeof neon> | null = null;
+let _lastDbUrl: string | null = null;
+
 export function getDb() {
-  const url =
+  const rawUrl =
     (typeof (globalThis as any).Deno !== "undefined" ? (globalThis as any).Deno.env?.get("DATABASE_URL") : null) ||
     (typeof process !== "undefined" ? process.env?.DATABASE_URL : null);
-  if (!url) {
+  if (!rawUrl) {
     throw new Error("DATABASE_URL not set");
   }
-  return neon(url);
+
+  // Activer automatiquement le mode connection pooler Neon (-pooler) si disponible
+  let url = rawUrl;
+  if (url.includes('.neon.tech') && !url.includes('-pooler')) {
+    url = url.replace(/@([^:]+)(\.neon\.tech)/, '@$1-pooler$2');
+  }
+
+  if (!_cachedDb || _lastDbUrl !== url) {
+    _cachedDb = neon(url);
+    _lastDbUrl = url;
+  }
+  return _cachedDb;
 }
 
 export function getJwtSecret(): Uint8Array {

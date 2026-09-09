@@ -93,33 +93,33 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
 
       {/* Floating Menu Popover */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-72 sm:w-80 rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl z-50 overflow-hidden animate-fadeIn backdrop-blur-xl">
+        <div className="absolute right-0 mt-2 w-72 sm:w-80 rounded-2xl vibe-menu shadow-2xl z-50 overflow-hidden animate-fadeIn">
           {/* Header */}
-          <div className="px-3.5 py-2.5 bg-black/60 border-b border-zinc-900 flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-300">
-              <Sparkles className="w-3.5 h-3.5 text-white" />
+          <div className="px-3.5 py-2.5 bg-black/5 dark:bg-black/60 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-900 dark:text-zinc-100">
+              <Sparkles className="w-3.5 h-3.5 text-zinc-700 dark:text-white" />
               <span>Modèles IA</span>
             </div>
             <span className="text-[10px] text-zinc-500 font-mono">{filteredModels.length} modèle{filteredModels.length > 1 ? 's' : ''}</span>
           </div>
 
           {/* Search Bar */}
-          <div className="p-2 border-b border-zinc-900 bg-black/40">
+          <div className="p-2 border-b border-zinc-200 dark:border-zinc-800 bg-black/5 dark:bg-black/40">
             <div className="relative flex items-center">
-              <Search className="w-3.5 h-3.5 absolute left-2.5 text-zinc-500 pointer-events-none" />
+              <Search className="w-3.5 h-3.5 absolute left-2.5 text-zinc-400 pointer-events-none" />
               <input
                 ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Rechercher un modèle..."
-                className="w-full pl-8 pr-7 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600 font-sans"
+                className="w-full pl-8 pr-7 py-1.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 font-sans"
               />
               {searchQuery && (
                 <button
                   type="button"
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2 text-zinc-500 hover:text-white p-0.5"
+                  className="absolute right-2 text-zinc-400 hover:text-black dark:hover:text-white p-0.5"
                   title="Effacer la recherche"
                 >
                   <X className="w-3 h-3" />
@@ -129,7 +129,7 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
           </div>
 
           {/* Model Options List */}
-          <div className="max-h-72 overflow-y-auto divide-y divide-zinc-900 p-1">
+          <div className="max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-900 p-1">
             {filteredModels.map((model) => {
               const isSelected = model.id === selectedModelId;
 
@@ -143,16 +143,16 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
                   }}
                   className={`w-full p-2.5 rounded-xl text-left transition-all flex items-center gap-2.5 group ${
                     isSelected
-                      ? 'bg-zinc-900/90 text-white'
-                      : 'hover:bg-zinc-900/50 text-zinc-300'
+                      ? 'bg-zinc-100 dark:bg-zinc-900/90 text-zinc-900 dark:text-white font-semibold'
+                      : 'hover:bg-black/5 dark:hover:bg-zinc-900/50 text-zinc-700 dark:text-zinc-300'
                   }`}
                 >
                   <div className="shrink-0">
                     <div
                       className={`w-4 h-4 rounded-full flex items-center justify-center border ${
                         isSelected
-                          ? 'border-white bg-white text-black'
-                          : 'border-zinc-700 bg-zinc-950 text-transparent group-hover:border-zinc-500'
+                          ? 'border-zinc-900 dark:border-white bg-zinc-900 dark:bg-white text-white dark:text-black'
+                          : 'border-zinc-300 dark:border-zinc-700 bg-transparent text-transparent group-hover:border-zinc-500'
                       }`}
                     >
                       <Check className="w-2.5 h-2.5 stroke-[3]" />
@@ -160,7 +160,7 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
                   </div>
 
                   <div className="flex-1 min-w-0">
-                    <span className="font-bold text-xs text-white truncate block">
+                    <span className="font-bold text-xs text-zinc-900 dark:text-white truncate block">
                       {model.name}
                     </span>
                   </div>

@@ -20,6 +20,13 @@ interface ToolAutocompleteProps {
   trigger: '/' | '@';
   onSelect: (tool: MAITool) => void;
   onClose: () => void;
+  /** Action spéciale proposée en tête de liste (ex : « Mentionner un post »). */
+  specialAction?: {
+    label: string;
+    description: string;
+    iconName?: string;
+    onSelect: () => void;
+  };
 }
 
 const iconMap: Record<string, React.ElementType> = {
@@ -41,6 +48,7 @@ export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
   query,
   trigger,
   onSelect,
+  specialAction,
 }) => {
   const cleanQ = query.toLowerCase().replace(/^[/@]/, '');
 
@@ -54,16 +62,40 @@ export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
     );
   }).slice(0, 6);
 
-  if (matches.length === 0) return null;
+  const specialMatches =
+    specialAction &&
+    (!cleanQ ||
+      specialAction.label.toLowerCase().replace(/^[/@]/, '').includes(cleanQ) ||
+      'post publication mentionner'.includes(cleanQ));
+
+  if (matches.length === 0 && !specialMatches) return null;
 
   return (
-    <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
-      <div className="p-2 border-b border-zinc-900 bg-zinc-900/50 flex items-center justify-between text-[11px] font-mono text-zinc-400">
+    <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm vibe-menu rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
+      <div className="p-2 border-b border-zinc-200 dark:border-zinc-800 bg-black/5 dark:bg-zinc-900/50 flex items-center justify-between text-[11px] font-mono text-zinc-600 dark:text-zinc-400">
         <span>Outils & Actions mAI ({trigger === '/' ? 'Commandes /' : 'Mentions @'})</span>
-        <span>{matches.length} suggéré(s)</span>
+        <span>{matches.length + (specialMatches ? 1 : 0)} suggéré(s)</span>
       </div>
 
-      <div className="divide-y divide-zinc-900 max-h-56 overflow-y-auto">
+      <div className="divide-y divide-zinc-100 dark:divide-zinc-900 max-h-56 overflow-y-auto">
+        {specialMatches && specialAction && (
+          <button
+            type="button"
+            onClick={specialAction.onSelect}
+            className="w-full p-2.5 flex items-center gap-3 text-left hover:bg-black/5 dark:hover:bg-zinc-900 transition-colors group"
+          >
+            <div className="p-2 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 group-hover:bg-zinc-900 group-hover:text-white dark:group-hover:bg-white dark:group-hover:text-black transition-colors text-zinc-800 dark:text-white shrink-0">
+              <FileText className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono font-bold text-zinc-900 dark:text-white">{specialAction.label}</span>
+                <span className="text-[11px] text-zinc-600 dark:text-zinc-400 truncate font-semibold">Mentionner un post</span>
+              </div>
+              <p className="text-[11px] text-zinc-500 truncate mt-0.5">{specialAction.description}</p>
+            </div>
+          </button>
+        )}
         {matches.map((tool) => {
           const Icon = iconMap[tool.iconName] || Sparkles;
           const label = trigger === '/' ? tool.slashCommand : tool.mentionTag;
@@ -73,18 +105,18 @@ export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
               key={tool.id}
               type="button"
               onClick={() => onSelect(tool)}
-              className="w-full p-2.5 flex items-center gap-3 text-left hover:bg-zinc-900 transition-colors group"
+              className="w-full p-2.5 flex items-center gap-3 text-left hover:bg-black/5 dark:hover:bg-zinc-900 transition-colors group"
             >
-              <div className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 group-hover:bg-white group-hover:text-black transition-colors text-white shrink-0">
+              <div className="p-2 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 group-hover:bg-zinc-900 group-hover:text-white dark:group-hover:bg-white dark:group-hover:text-black transition-colors text-zinc-800 dark:text-white shrink-0">
                 <Icon className="w-4 h-4" />
               </div>
 
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono font-bold text-white group-hover:text-white">
+                  <span className="text-xs font-mono font-bold text-zinc-900 dark:text-white">
                     {label}
                   </span>
-                  <span className="text-[11px] text-zinc-400 truncate font-semibold">
+                  <span className="text-[11px] text-zinc-600 dark:text-zinc-400 truncate font-semibold">
                     {tool.name}
                   </span>
                 </div>

@@ -41,16 +41,6 @@ export const AVAILABLE_MAI_TOOLS: MAITool[] = [
     samplePrompt: '/search dernières découvertes en intelligence artificielle 2026',
   },
   {
-    id: 'summarize',
-    name: 'Résumer le Flux / Texte',
-    slashCommand: '/summarize',
-    mentionTag: '@summarize',
-    description: 'Synthétise les publications récentes ou un long fil de discussion',
-    iconName: 'FileText',
-    category: 'analysis',
-    samplePrompt: '/summarize les tendances du jour sur Vibe',
-  },
-  {
     id: 'fact_check',
     name: 'Vérification des Faits',
     slashCommand: '/fact_check',

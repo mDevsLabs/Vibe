@@ -7,6 +7,8 @@
 
 import type { Hono } from "npm:hono@4";
 import { extractToken, getDb, getTierMaiTokenLimit, getUserQuotaBoost, getWeekData, verifyToken } from "./config.ts";
+import { MAIAgentFleet } from "./vibe-mai-fleet.ts";
+import { pushRealtimeEvent } from "./realtime.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 
 /**
@@ -28,6 +30,15 @@ async function ensureDMTables() {
         blocked_user_id BIGINT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE (user_id, blocked_user_id)
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS muted_users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id BIGINT NOT NULL,
+        muted_user_id BIGINT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (user_id, muted_user_id)
       )
     `;
     await sql`
@@ -60,14 +71,200 @@ async function ensureDMTables() {
       )
     `;
     await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS reply_to_id UUID`.catch(() => {});
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE`.catch(() => {});
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`.catch(() => {});
     dmTablesReady = true;
   } catch (err) {
     console.warn("[vibe-dms] ensureDMTables skipped:", (err as any)?.message);
   }
 }
 
+/**
+ * Compte officiel mAI (pseudo-utilisateur) : répond automatiquement aux DMs.
+ * Seed idempotent — même pattern que la migration 005 du compte @bot.
+ */
+let maiAccountReady = false;
+async function ensureMAIAccount() {
+  if (maiAccountReady) return;
+  try {
+    const sql = getDb();
+    await sql`
+      INSERT INTO users (username, email, password_hash, tier, avatar_url, is_verified)
+      VALUES (
+        'mai',
+        'mai@vibe.ai',
+        '$2a$10$mAIvibeOfficialAccountNoLoginAllowedxxxxxxxxxxxxxxxxxxxx',
+        'Max',
+        'https://api.dicebear.com/7.x/bottts/svg?seed=mai-vibe',
+        TRUE
+      )
+      ON CONFLICT (username) DO UPDATE
+      SET is_verified = TRUE,
+          tier = 'Max',
+          avatar_url = 'https://api.dicebear.com/7.x/bottts/svg?seed=mai-vibe'
+    `;
+    await sql`
+      INSERT INTO profiles (user_id, display_name, bio, avatar_url, is_verified)
+      SELECT id, 'mAI', 'L''intelligence artificielle officielle de Vibe. Écrivez-moi en message privé : je réponds à toutes vos questions. ✨', 'https://api.dicebear.com/7.x/bottts/svg?seed=mai-vibe', TRUE
+      FROM users WHERE username = 'mai'
+      ON CONFLICT (user_id) DO UPDATE SET
+        display_name = 'mAI',
+        bio = 'L''intelligence artificielle officielle de Vibe. Écrivez-moi en message privé : je réponds à toutes vos questions. ✨',
+        avatar_url = 'https://api.dicebear.com/7.x/bottts/svg?seed=mai-vibe',
+        is_verified = TRUE
+    `;
+    await sql`
+      INSERT INTO user_settings (user_id, allow_dms)
+      SELECT id, 'everyone' FROM users WHERE username = 'mai'
+      ON CONFLICT (user_id) DO NOTHING
+    `;
+    maiAccountReady = true;
+  } catch (err) {
+    console.warn("[vibe-dms] ensureMAIAccount skipped:", (err as any)?.message);
+  }
+}
+
+/**
+ * Réponse automatique du compte mAI à un DM : génère une réponse avec
+ * OpenRouter en tenant compte de l'historique de la conversation, puis
+ * débite l'usage hebdomadaire de l'expéditeur.
+ */
+async function generateMAIDMReply(sql: any, conversationId: string, senderId: number, maiUserId: number, senderMessage: string) {
+  try {
+    // Historique de la conversation DM (contexte complet pour mAI)
+    const historyRows = await sql`
+      SELECT m.content, m.sender_id, u.username as sender_username
+      FROM direct_messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.conversation_id = ${conversationId}::uuid
+      ORDER BY m.created_at DESC
+      LIMIT 40
+    `.catch(() => []);
+    const transcript = historyRows
+      .reverse()
+      .map((m: any) => `${m.sender_id === maiUserId ? "mAI" : `@${m.sender_username}`}: ${m.content}`)
+      .join("\n");
+
+    // Quota hebdomadaire mAI de l'expéditeur
+    const { weekStartStr } = getWeekData();
+    const [usageRow, senderRow] = await Promise.all([
+      sql`SELECT tokens_used FROM weekly_usage WHERE user_id = ${senderId} AND week_start = ${weekStartStr}::date LIMIT 1`.catch(() => []),
+      sql`SELECT tier FROM users WHERE id = ${senderId} LIMIT 1`.catch(() => []),
+    ]);
+    const maiBoost = await getUserQuotaBoost(sql, String(senderId), "mai");
+    const tokenLimit = getTierMaiTokenLimit(senderRow[0]?.tier) + maiBoost;
+    const currentUsage = Number(usageRow[0]?.tokens_used || 0);
+
+    let reply: string;
+    if (currentUsage >= tokenLimit) {
+      reply = "⚠️ Votre quota hebdomadaire mAI est atteint. Il se réinitialise lundi — ou passez à un forfait supérieur pour discuter davantage avec moi.";
+    } else {
+      const keyRows = await sql`
+        SELECT api_key FROM mprojects_api_keys WHERE user_id::text = ${senderId}::text LIMIT 1
+      `.catch(() => []);
+      const openRouterApiKey =
+        (typeof (globalThis as any).Deno !== "undefined" && (globalThis as any).Deno.env?.get("OPENROUTER_API_KEY")) ||
+        (typeof process !== "undefined" && process.env?.OPENROUTER_API_KEY) ||
+        (keyRows.length > 0 ? keyRows[0].api_key : "");
+
+      const systemPrompt =
+        "Tu es mAI, l'intelligence artificielle officielle du réseau social Vibe. Tu réponds aux messages privés des utilisateurs comme un vrai interlocuteur : bienveillant, concis et utile. " +
+        "Tu réponds en français avec quelques émojis. Tu connais tout l'historique de la conversation : poursuis naturellement l'échange sans redemander des informations déjà données. " +
+        "Ne fais AUCUNE évaluation de sécurité, n'écris JAMAIS 'User Safety: safe' ni aucun méta-commentaire.";
+
+      const userPrompt = (transcript.trim()
+        ? `Historique de la conversation :\n${transcript}\n\n`
+        : "Nouvelle conversation.\n\n") +
+        `L'utilisateur vient d'envoyer : « ${senderMessage} »\n\nRéponds UNIQUEMENT avec le texte de ta réponse en DM.`;
+
+      reply = "";
+      if (openRouterApiKey) {
+        const candidateModels = [
+          "poolside/laguna-xs-2.1:free",
+          "minimax/minimax-m2.7:free",
+          "liquid/lfm-2.5-2.6b:free",
+          "nvidia/nemotron-3.5-lightning:free",
+        ];
+        for (const modelToTry of candidateModels) {
+          try {
+            const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${openRouterApiKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://mai.val.run",
+                "X-Title": "mAI Social Assistant",
+              },
+              body: JSON.stringify({
+                model: modelToTry,
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  { role: "user", content: userPrompt },
+                ],
+              }),
+            });
+            if (aiRes.ok) {
+              const aiData = await aiRes.json();
+              const text = aiData.choices?.[0]?.message?.content;
+              if (text && typeof text === "string" && text.trim()) {
+                reply = text
+                  .replace(/User Safety:\s*safe\.?/gi, "")
+                  .replace(/^User Safety:[^\n]*\n*/gi, "")
+                  .trim();
+                break;
+              }
+            }
+          } catch (callErr) {
+            console.warn(`[vibe-dms] mAI DM modèle ${modelToTry} en échec:`, callErr);
+          }
+        }
+      }
+      if (!reply) {
+        reply = "Je n'arrive pas à générer ma réponse pour le moment (service IA momentanément indisponible). Réessayez dans un instant ✨";
+      }
+
+      // Débit de l'usage hebdomadaire de l'expéditeur (chaque message compte)
+      const estimatedTokens = Math.max(75, Math.ceil((userPrompt.length + reply.length) / 3));
+      await sql`
+        INSERT INTO weekly_usage (user_id, week_start, tokens_used)
+        VALUES (${senderId}, ${weekStartStr}::date, ${estimatedTokens})
+        ON CONFLICT (user_id, week_start)
+        DO UPDATE SET tokens_used = weekly_usage.tokens_used + ${estimatedTokens}, updated_at = NOW()
+      `.catch(() => {});
+    }
+
+    // Insertion de la réponse mAI dans la conversation
+    const maiMsg = await sql`
+      INSERT INTO direct_messages (conversation_id, sender_id, recipient_id, content)
+      VALUES (${conversationId}::uuid, ${maiUserId}, ${senderId}, ${reply})
+      RETURNING *
+    `;
+    await sql`
+      UPDATE dm_conversations SET last_message_preview = ${reply.slice(0, 120)}, last_message_at = NOW()
+      WHERE id = ${conversationId}::uuid
+    `.catch(() => {});
+    await sql`
+      INSERT INTO notifications (recipient_id, actor_id, type, message)
+      VALUES (${senderId}, ${maiUserId}, 'dm', 'vous a envoyé un message')
+    `.catch(() => {});
+
+    // Temps réel : pousse la réponse mAI à l'expéditeur (flux SSE)
+    try {
+      await pushRealtimeEvent(senderId, "dm_message", maiMsg[0] || {
+        conversation_id: conversationId,
+        sender_id: maiUserId,
+        recipient_id: senderId,
+        content: reply,
+      });
+    } catch {}
+  } catch (err) {
+    console.warn("[vibe-dms] generateMAIDMReply failed:", (err as any)?.message);
+  }
+}
+
 export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn) {
   ensureDMTables();
+  ensureMAIAccount();
   // 1. SEARCH USERS FOR DM
   const handleDMUsers = async (c: any) => {
     try {
@@ -287,21 +484,54 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
         `;
       } catch {}
 
+      // Temps réel : pousse le message au destinataire (flux SSE)
+      try {
+        const senderInfo = await sql`
+          SELECT u.username, p.display_name, p.avatar_url
+          FROM users u LEFT JOIN profiles p ON p.user_id = u.id
+          WHERE u.id = ${userId} LIMIT 1
+        `;
+        await pushRealtimeEvent(recId, "dm_message", {
+          ...msg[0],
+          sender_username: senderInfo[0]?.username || null,
+          sender_display_name: senderInfo[0]?.display_name || null,
+          sender_avatar_url: senderInfo[0]?.avatar_url || null,
+        });
+      } catch (rtErr) {
+        console.warn("[vibe-dms] realtime dm_message push failed:", rtErr);
+      }
+
       // Réponse automatique pour le compte @bot de test
       const recipientUser = await sql`SELECT username FROM users WHERE id = ${recId} LIMIT 1`;
       if (recipientUser.length > 0 && recipientUser[0].username === 'bot') {
         setTimeout(async () => {
           try {
-            await sql`
+            const botMsg = await sql`
               INSERT INTO direct_messages (conversation_id, sender_id, recipient_id, content)
               VALUES (${conversationId}::uuid, ${recId}, ${userId}, 'Bot')
+              RETURNING *
             `;
             await sql`
               UPDATE dm_conversations SET last_message_preview = 'Bot', last_message_at = NOW()
               WHERE id = ${conversationId}::uuid
             `;
+            await pushRealtimeEvent(userId, "dm_message", botMsg[0] || { conversation_id: conversationId, sender_id: recId, recipient_id: userId, content: 'Bot' });
           } catch {}
         }, 100);
+      }
+
+      // Réponse automatique du compte officiel mAI (conversation avec historique,
+      // usage hebdomadaire débité à l'expéditeur)
+      if (recipientUser.length > 0 && recipientUser[0].username === 'mai') {
+        const maiUserId = recId;
+        const senderMessage = String(content).trim().slice(0, 4000);
+        setTimeout(async () => {
+          try {
+            await generateMAIDMReply(sql, conversationId, userId, maiUserId, senderMessage);
+          } catch (maiErr) {
+            console.warn("[vibe-dms] mAI DM reply failed:", maiErr);
+          }
+        }, 1200 + Math.floor(Math.random() * 1800));
       }
 
       return c.json({ success: true, message: msg[0] }, 201);
@@ -389,8 +619,11 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       let partnerId = Number(c.req.param("partnerId"));
       let draft = "";
+      let preset = "improve";
+      let customPrompt = "";
+      let toneValue = "";
 
-      // Récupération de partner_id et draft/text depuis le corps JSON
+      // Récupération de partner_id, draft/text, preset et customPrompt depuis le corps JSON
       try {
         const body = await c.req.json();
         if (!partnerId && body?.partner_id) {
@@ -400,6 +633,15 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
           draft = body.draft.trim();
         } else if (body?.text && typeof body.text === "string") {
           draft = body.text.trim();
+        }
+        if (body?.preset && typeof body.preset === "string") {
+          preset = body.preset;
+        }
+        if (body?.custom_prompt && typeof body.custom_prompt === "string") {
+          customPrompt = body.custom_prompt.trim();
+        }
+        if (body?.tone && typeof body.tone === "string") {
+          toneValue = body.tone.trim();
         }
       } catch {}
 
@@ -417,6 +659,7 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       const sql = getDb();
       // Contexte de la conversation totale (chronologique sans limite réductrice)
+      // — calculé AVANT les presets : PRESETS.improve interpole @partnerName.
       const [recent, partnerRow, userRow] = await Promise.all([
         sql`
           SELECT m.content, m.sender_id, u.username as sender_username
@@ -433,6 +676,24 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       const partnerName = partnerRow[0]?.username || "votre contact";
       const userPlan = userRow[0]?.tier || "Free";
+
+      // Presets d'écriture : Réduire, Allonger, Changer le ton, Améliorer, Personnalisé
+      const PRESETS: Record<string, string> = {
+        shorten: "Réduis ce message : rends-le plus court et percutant tout en conservant son sens essentiel. Ne perds aucune information importante, supprime les fioritures.",
+        extend: "Allonge ce message : développe-le avec plus de détails, de contexte et de naturel, sans le rendre verbeux ni artificiel.",
+        tone: `Change le ton de ce message : réécris-le avec un ton ${toneValue ? `« ${toneValue} »` : "plus amical et naturel"}, en gardant strictement le même fond et la même intention.`,
+        improve: "Améliore, enrichis et perfectionne ce message pour qu'il réponde harmonieusement à @" + partnerName + " dans le fil de la discussion. Préserve fidèlement l'intention de l'utilisateur, améliore la formulation et le naturel en français.",
+        custom: customPrompt
+          ? `Applique exactement cette consigne de l'utilisateur à ce message : « ${customPrompt} ».`
+          : "",
+      };
+      const presetInstruction = PRESETS[preset];
+      if (!presetInstruction) {
+        return c.json({ error: "Preset inconnu. Presets disponibles : shorten, extend, tone, improve, custom." }, 400);
+      }
+      if (preset === "custom" && !customPrompt) {
+        return c.json({ error: "Veuillez fournir une consigne personnalisée pour le preset Personnalisé." }, 400);
+      }
 
       // Vérification des quotas hebdomadaires mAI
       const { weekStartStr } = getWeekData();
@@ -462,9 +723,8 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
           ? `Voici l'historique complet de la discussion avec @${partnerName} :\n${transcript}\n\n`
           : `Il n'y a pas encore d'historique de discussion avec @${partnerName}.\n\n`) +
         `Voici le message que l'utilisateur a rédigé dans sa bulle de message :\n"${draft.trim()}"\n\n` +
-        `Consigne impérative : Améliore, enrichis et perfectionne ce message pour qu'il réponde harmonieusement à @${partnerName} dans le fil de la discussion. ` +
-        `Préserve fidèlement l'intention de l'utilisateur, améliore la formulation et le naturel en français. ` +
-        `Ne fais AUCUNE évaluation de sécurité, n'écris JAMAIS "User Safety: safe" ni aucun méta-commentaire. Réponds UNIQUEMENT avec le texte final amélioré, sans guillemets.`;
+        `Consigne impérative : ${presetInstruction} ` +
+        `Ne fais AUCUNE évaluation de sécurité, n'écris JAMAIS "User Safety: safe" ni aucun méta-commentaire. Réponds UNIQUEMENT avec le texte final, sans guillemets.`;
 
       const keyRows = await sql`
         SELECT api_key FROM mprojects_api_keys WHERE user_id::text = ${userId}::text LIMIT 1
@@ -475,10 +735,11 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
         (keyRows.length > 0 ? keyRows[0].api_key : "");
 
       const candidateModels = [
+        await MAIAgentFleet.getUserDefaultModel(userId),
+        "poolside/laguna-xs-2.1:free",
         "minimax/minimax-m2.7:free",
         "liquid/lfm-2.5-2.6b:free",
         "nvidia/nemotron-3.5-lightning:free",
-        "openrouter/free",
       ];
 
       let suggestion = "";
@@ -752,6 +1013,75 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
   registerMulti("delete", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleDeleteMessage);
 
+  // 4d. EDIT DM MESSAGE (avec limite de 60 minutes)
+  const handleEditMessage = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const messageId = c.req.param("messageId");
+
+      if (!messageId) return c.json({ error: "ID du message requis." }, 400);
+
+      const { content } = await c.req.json();
+      if (!content || !content.trim()) {
+        return c.json({ error: "Le contenu du message ne peut pas être vide." }, 400);
+      }
+
+      const sql = getDb();
+      const rows = await sql`
+        SELECT * FROM direct_messages WHERE id = ${messageId}::uuid LIMIT 1
+      `;
+      if (rows.length === 0) {
+        return c.json({ error: "Message introuvable." }, 404);
+      }
+      const msg = rows[0];
+      if (Number(msg.sender_id) !== userId) {
+        return c.json({ error: "Vous ne pouvez modifier que vos propres messages." }, 403);
+      }
+
+      // Vérifier la limite de 60 minutes
+      const createdAt = new Date(msg.created_at).getTime();
+      const now = Date.now();
+      const diffMinutes = (now - createdAt) / (1000 * 60);
+      if (diffMinutes > 60) {
+        return c.json({ error: "Ce message a été envoyé il y a plus de 60 minutes et ne peut plus être modifié." }, 403);
+      }
+
+      const updated = await sql`
+        UPDATE direct_messages
+        SET content = ${content.trim()},
+            is_edited = TRUE,
+            edited_at = NOW()
+        WHERE id = ${messageId}::uuid
+        RETURNING *
+      `;
+
+      // Mettre à jour l'aperçu dans la conversation
+      try {
+        await sql`
+          UPDATE dm_conversations
+          SET last_message_preview = ${content.trim()}
+          WHERE id = ${msg.conversation_id}::uuid
+        `;
+      } catch {}
+
+      // Informer le destinataire en temps réel via SSE
+      try {
+        await pushRealtimeEvent(Number(msg.recipient_id), "dm_message_edited", updated[0]);
+      } catch {}
+
+      return c.json({ success: true, message: updated[0] });
+    } catch (err: any) {
+      console.error("[vibe-dms] Edit message error:", err);
+      return c.json({ error: "Erreur lors de la modification du message." }, 500);
+    }
+  };
+
+  registerMulti("patch", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleEditMessage);
+  registerMulti("put", ["/api/vibe/dms/messages/:messageId", "/vibe/dms/messages/:messageId", "/v1/dms/messages/:messageId"], handleEditMessage);
+
   // 5. NOTIFICATIONS
   const handleNotifications = async (c: any) => {
     try {
@@ -771,6 +1101,11 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
         LEFT JOIN users u ON u.id = n.actor_id
         LEFT JOIN profiles pr ON pr.user_id = u.id
         WHERE n.recipient_id = ${userId}
+          AND (n.actor_id IS NULL OR (
+            n.actor_id NOT IN (SELECT COALESCE(blocked_user_id, -1) FROM blocked_users WHERE user_id = ${userId})
+            AND n.actor_id NOT IN (SELECT COALESCE(user_id, -1) FROM blocked_users WHERE blocked_user_id = ${userId})
+            AND n.actor_id NOT IN (SELECT COALESCE(muted_user_id, -1) FROM muted_users WHERE user_id = ${userId})
+          ))
         ORDER BY n.created_at DESC
         LIMIT 100
       `;
@@ -789,15 +1124,98 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
+      let body: any = {};
+      try {
+        body = await c.req.json();
+      } catch {}
+
+      const rawId = c.req.param?.("id") || body?.id || body?.notification_id;
+      const notifId = rawId ? String(rawId).trim() : null;
       const sql = getDb();
-      await sql`UPDATE notifications SET is_read = TRUE WHERE recipient_id = ${userId}`;
-      return c.json({ success: true });
+      const isReadVal = body?.is_read !== undefined ? Boolean(body.is_read) : true;
+
+      if (notifId && notifId !== "all" && notifId !== "undefined" && notifId !== "null" && notifId !== "") {
+        await sql`
+          UPDATE notifications
+          SET is_read = ${isReadVal}
+          WHERE id::text = ${notifId} AND recipient_id = ${userId}
+        `;
+      } else {
+        await sql`
+          UPDATE notifications
+          SET is_read = ${isReadVal}
+          WHERE recipient_id = ${userId}
+        `;
+      }
+      return c.json({ success: true, is_read: isReadVal, id: notifId });
     } catch (err: any) {
-      return c.json({ error: "Erreur." }, 500);
+      console.error("[vibe-dms] Error in handleMarkNotificationsRead:", err);
+      return c.json({ error: "Erreur marquage notification.", details: err?.message }, 500);
     }
   };
 
-  registerMulti("post", ["/api/vibe/notifications/read", "/vibe/notifications/read", "/v1/notifications/read"], handleMarkNotificationsRead);
+  registerMulti("post", [
+    "/api/vibe/notifications/read",
+    "/vibe/notifications/read",
+    "/v1/notifications/read",
+    "/v1/notifications/:id/read",
+    "/api/vibe/notifications/:id/read"
+  ], handleMarkNotificationsRead);
+  registerMulti("patch", [
+    "/api/vibe/notifications/read",
+    "/v1/notifications/read",
+    "/v1/notifications/:id/read",
+    "/api/vibe/notifications/:id/read"
+  ], handleMarkNotificationsRead);
+
+  const handleDeleteNotification = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+
+      let body: any = {};
+      try {
+        body = await c.req.json();
+      } catch {}
+
+      const rawId = c.req.param?.("id") || body?.id || body?.notification_id;
+      const notifId = rawId ? String(rawId).trim() : null;
+      const sql = getDb();
+
+      if (notifId && notifId !== "all" && notifId !== "clear" && notifId !== "undefined" && notifId !== "null" && notifId !== "") {
+        await sql`
+          DELETE FROM notifications
+          WHERE id::text = ${notifId} AND recipient_id = ${userId}
+        `;
+      } else {
+        await sql`
+          DELETE FROM notifications
+          WHERE recipient_id = ${userId}
+        `;
+      }
+      return c.json({ success: true, deleted_id: notifId || "all" });
+    } catch (err: any) {
+      console.error("[vibe-dms] Error in handleDeleteNotification:", err);
+      return c.json({ error: "Erreur suppression notification.", details: err?.message }, 500);
+    }
+  };
+
+  registerMulti("delete", [
+    "/api/vibe/notifications/:id",
+    "/v1/notifications/:id",
+    "/api/vibe/notifications",
+    "/v1/notifications"
+  ], handleDeleteNotification);
+  registerMulti("post", [
+    "/api/vibe/notifications/:id/delete",
+    "/v1/notifications/:id/delete",
+    "/api/vibe/notifications/delete",
+    "/v1/notifications/delete",
+    "/api/vibe/notifications/clear",
+    "/v1/notifications/clear"
+  ], handleDeleteNotification);
 
   // Compteur léger pour les badges — évite de charger toutes les notifications
   const handleUnreadCount = async (c: any) => {

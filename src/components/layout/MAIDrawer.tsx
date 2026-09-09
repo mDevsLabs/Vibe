@@ -15,6 +15,9 @@ import {
   CheckCircle2,
   Mic,
   MicOff,
+  FileText,
+  Search,
+  Loader2,
 } from 'lucide-react';
 import { ApiService } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -22,11 +25,21 @@ import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ToolAutocomplete } from './ToolAutocomplete';
 import { AVAILABLE_MAI_TOOLS, MAITool } from '../../data/maiTools';
 import { ModelDropdown, AIModel } from '../common/ModelDropdown';
+import type { Post } from '../../types/vibe';
 
 interface MAIDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   onPostCreated?: () => void;
+  /** Post pré-attaché (bouton « Mentionner dans mAI » depuis une publication). */
+  attachedPostId?: string | null;
+  onClearAttachedPost?: () => void;
+}
+
+interface AttachedPostInfo {
+  id: string;
+  username: string;
+  excerpt: string;
 }
 
 interface MessageItem {
@@ -34,6 +47,7 @@ interface MessageItem {
   sender: 'user' | 'assistant';
   content: string;
   toolResult?: any;
+  attachment?: AttachedPostInfo;
   timestamp: string;
 }
 
@@ -48,10 +62,15 @@ const DEFAULT_MODELS: AIModel[] = [
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', description: 'Performances logiques et mathématiques', provider: 'DeepSeek' },
 ];
 
+const generateMessageId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+const formatCurrentTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
 export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   isOpen,
   onClose,
   onPostCreated,
+  attachedPostId,
+  onClearAttachedPost,
 }) => {
   const { user, quotas, refreshQuotas } = useAuth();
   const [selectedModel, setSelectedModel] = useState<string>('poolside/laguna-xs-2.1:free');
@@ -59,26 +78,118 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Publication mentionnée jointe à la conversation
+  const [attachedPost, setAttachedPost] = useState<AttachedPostInfo | null>(null);
+  // Sélecteur de posts (« Mentionner un post »)
+  const [showPostPicker, setShowPostPicker] = useState(false);
+  const [postPickerQuery, setPostPickerQuery] = useState('');
+  const [postPickerResults, setPostPickerResults] = useState<Post[]>([]);
+  const [postPickerLoading, setPostPickerLoading] = useState(false);
 
   useEffect(() => {
     const loadModels = async () => {
       try {
         const res = await ApiService.getModels();
         if (res?.models && res.models.length > 0) {
-          const list = [...res.models];
+          const list = res.models.filter((m: any) => m && m.id !== 'openrouter/free' && !m.id.startsWith('openrouter/'));
           const lagunaIdx = list.findIndex((m) => m.id === 'poolside/laguna-xs-2.1:free');
           if (lagunaIdx > 0) {
             const [laguna] = list.splice(lagunaIdx, 1);
             list.unshift(laguna);
           }
-          setAvailableModels(list);
+          if (list.length > 0) {
+            setAvailableModels(list);
+          }
         }
       } catch {}
     };
+    // Le modèle par défaut choisi ici est persisté (user_settings.mai_default_model)
+    ApiService.getSettings()
+      .then((res: any) => {
+        const saved = res?.settings?.mai_default_model;
+        if (saved && saved !== 'openrouter/free' && !saved.startsWith('openrouter/')) {
+          setSelectedModel(String(saved));
+        }
+      })
+      .catch(() => {});
     if (isOpen) {
       loadModels();
     }
   }, [isOpen]);
+
+  /** Changement de modèle depuis le picker mAI : appliqué et enregistré en base. */
+  const handleSelectModel = (modelId: string) => {
+    setSelectedModel(modelId);
+    ApiService.updateSettings({ mai_default_model: modelId }).catch(() => {});
+  };
+
+  // Historique persisté : chargé à la première ouverture du panneau
+  const historyLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen || historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+    ApiService.getMAIHistory()
+      .then((res) => {
+        if (res.messages && res.messages.length > 0) {
+          setMessages(
+            res.messages.map((m) => ({
+              id: m.id,
+              sender: (m.role === 'assistant' ? 'assistant' : 'user') as MessageItem['sender'],
+              content: m.content,
+              timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+  }, [isOpen]);
+
+  // Post pré-attaché depuis l'extérieur (bouton « Mentionner dans mAI »)
+  useEffect(() => {
+    if (!isOpen || !attachedPostId) return;
+    if (attachedPost?.id === attachedPostId) return;
+    let cancelled = false;
+    ApiService.getPost(attachedPostId)
+      .then((data) => {
+        if (cancelled || !data?.post) return;
+        setAttachedPost({
+          id: data.post.id,
+          username: data.post.username || 'utilisateur',
+          excerpt: (data.post.content || '').slice(0, 90),
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, attachedPostId, attachedPost?.id]);
+
+  // Recherche de publications pour le sélecteur (debounce 300 ms)
+  useEffect(() => {
+    if (!showPostPicker) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      setPostPickerLoading(true);
+      try {
+        if (postPickerQuery.trim()) {
+          const res = await ApiService.searchPosts(postPickerQuery.trim(), 12);
+          if (!cancelled) setPostPickerResults(res.posts || []);
+        } else {
+          const feed = await ApiService.getFeed('for_you');
+          if (!cancelled) setPostPickerResults(feed.posts?.slice(0, 12) || []);
+        }
+      } catch {
+        if (!cancelled) setPostPickerResults([]);
+      } finally {
+        if (!cancelled) setPostPickerLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [showPostPicker, postPickerQuery]);
 
   // Autocomplete state
   const [autocompleteTrigger, setAutocompleteTrigger] = useState<'/' | '@' | null>(null);
@@ -89,7 +200,6 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
 
   const {
     isListening,
-    transcript,
     isSupported,
     startListening,
     stopListening,
@@ -149,26 +259,36 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
       resetTranscript();
     }
 
+    const currentAttachment = attachedPost;
     const userMsg: MessageItem = {
-      id: Date.now().toString(),
+      id: generateMessageId(),
       sender: 'user',
       content: textToSend,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      attachment: currentAttachment
+        ? { id: currentAttachment.id, username: currentAttachment.username, excerpt: currentAttachment.excerpt }
+        : undefined,
+      timestamp: formatCurrentTime(),
     };
 
     setMessages((prev) => [...prev, userMsg]);
     setInputValue('');
     setAutocompleteTrigger(null);
+    setShowPostPicker(false);
     setIsLoading(true);
 
     try {
-      const response = await ApiService.chatMAI(textToSend, undefined, selectedModel);
+      const response = await ApiService.chatMAI(
+        textToSend,
+        undefined,
+        selectedModel,
+        currentAttachment ? { post_id: currentAttachment.id } : undefined
+      );
       const assistantMsg: MessageItem = {
-        id: (Date.now() + 1).toString(),
+        id: generateMessageId(),
         sender: 'assistant',
         content: response.reply,
         toolResult: response.toolExecuted,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: formatCurrentTime(),
       };
       setMessages((prev) => [...prev, assistantMsg]);
       refreshQuotas();
@@ -178,10 +298,10 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
       }
     } catch (err: any) {
       const errorMsg: MessageItem = {
-        id: (Date.now() + 1).toString(),
+        id: generateMessageId(),
         sender: 'assistant',
         content: `⚠️ Une erreur est survenue : ${err.message || 'Impossible de joindre mAI'}`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: formatCurrentTime(),
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -210,7 +330,7 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
             <ModelDropdown
               models={availableModels}
               selectedModelId={selectedModel}
-              onSelectModel={setSelectedModel}
+              onSelectModel={handleSelectModel}
             />
 
             <button
@@ -234,20 +354,22 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
           </div>
         </div>
 
-        {/* Bannière utilisateur */}
-        <div className="mx-3 mt-3 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center gap-3 animate-fadeIn">
-          <div className="w-8 h-8 rounded-xl bg-white text-black flex items-center justify-center font-black shrink-0">
-            <Sparkles className="w-4 h-4 text-black" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-white truncate">
-              Bienvenue, @{user?.username || 'utilisateur'} !
+        {/* Bannière utilisateur (affichée uniquement avant le début de la conversation) */}
+        {messages.length === 0 && (
+          <div className="mx-3 mt-3 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center gap-3 animate-fadeIn">
+            <div className="w-8 h-8 rounded-xl bg-white text-black flex items-center justify-center font-black shrink-0">
+              <Sparkles className="w-4 h-4 text-black" />
             </div>
-            <div className="text-[10px] text-zinc-400 truncate">
-              Laguna XS 2.1 sélectionné par défaut.
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate">
+                Bienvenue, @{user?.username || 'utilisateur'} !
+              </div>
+              <div className="text-[10px] text-zinc-400 truncate">
+                Posez vos questions ou utilisez les commandes @ ou /.
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Messages Container */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -265,14 +387,26 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
               key={msg.id}
               className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
             >
-              <div
-                className={`max-w-[85%] rounded-2xl p-3.5 text-sm leading-relaxed ${
+              <div className={`max-w-[85%] rounded-2xl p-3.5 text-sm leading-relaxed ${
                   msg.sender === 'user'
                     ? 'bg-white text-black font-medium'
                     : 'bg-zinc-900 border border-zinc-800 text-zinc-200'
                 }`}
               >
                 <div className="whitespace-pre-wrap">{msg.content}</div>
+
+                {/* Publication mentionnée jointe au message */}
+                {msg.attachment && (
+                  <div className="mt-2.5 p-2 rounded-xl bg-zinc-100 text-zinc-600 border border-zinc-200 flex items-start gap-2">
+                    <FileText className="w-3.5 h-3.5 mt-0.5 shrink-0 text-zinc-500" />
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold text-zinc-800 truncate">
+                        Publication de @{msg.attachment.username}
+                      </div>
+                      <p className="text-[10px] leading-snug line-clamp-2">{msg.attachment.excerpt}…</p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Tool Execution Visual Card if applicable */}
                 {msg.toolResult && msg.toolResult.result?.result && (
@@ -342,13 +476,121 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
 
         {/* Input Bar */}
         <div className="p-3 border-t border-zinc-800 bg-black/90 relative">
-          {autocompleteTrigger && (
+          {autocompleteTrigger && !showPostPicker && (
             <ToolAutocomplete
               trigger={autocompleteTrigger}
               query={autocompleteQuery}
               onSelect={handleSelectTool}
               onClose={() => setAutocompleteTrigger(null)}
+              specialAction={
+                attachedPost
+                  ? undefined
+                  : {
+                      label: autocompleteTrigger === '/' ? '/post' : '@post',
+                      description:
+                        'Joindre une publication Vibe (contenu, médias, stats, commentaires) et poser une question dessus',
+                      onSelect: () => {
+                        const words = inputValue.split(/\s+/);
+                        words.pop();
+                        setInputValue(words.length > 0 ? `${words.join(' ')} ` : '');
+                        setAutocompleteTrigger(null);
+                        setAutocompleteQuery('');
+                        setPostPickerQuery('');
+                        setPostPickerResults([]);
+                        setShowPostPicker(true);
+                      },
+                    }
+              }
             />
+          )}
+
+          {/* Sélecteur de publications à mentionner */}
+          {showPostPicker && (
+            <div className="absolute bottom-full left-0 mb-2 w-full bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
+              <div className="p-2 border-b border-zinc-900 bg-zinc-900/50 flex items-center gap-2">
+                <Search className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <input
+                  autoFocus
+                  type="text"
+                  value={postPickerQuery}
+                  onChange={(e) => setPostPickerQuery(e.target.value)}
+                  placeholder="Rechercher une publication à mentionner…"
+                  className="flex-1 bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPostPicker(false)}
+                  className="p-1 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors"
+                  title="Fermer le sélecteur"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="max-h-56 overflow-y-auto divide-y divide-zinc-900">
+                {postPickerLoading && (
+                  <div className="p-3 flex items-center justify-center gap-2 text-[11px] text-zinc-500 font-mono">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Recherche…
+                  </div>
+                )}
+                {!postPickerLoading && postPickerResults.length === 0 && (
+                  <div className="p-3 text-center text-[11px] text-zinc-500">
+                    Aucune publication trouvée.
+                  </div>
+                )}
+                {!postPickerLoading &&
+                  postPickerResults.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setAttachedPost({
+                          id: p.id,
+                          username: p.username || 'utilisateur',
+                          excerpt: (p.content || '').slice(0, 90),
+                        });
+                        setShowPostPicker(false);
+                        inputRef.current?.focus();
+                      }}
+                      className="w-full p-2.5 flex items-start gap-2.5 text-left hover:bg-zinc-900 transition-colors"
+                    >
+                      <FileText className="w-4 h-4 mt-0.5 text-zinc-500 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-bold text-white truncate">
+                          @{p.username} · {p.display_name || p.username}
+                        </div>
+                        <p className="text-[11px] text-zinc-500 line-clamp-2 leading-snug">
+                          {p.content || '—'}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Chip de la publication mentionnée */}
+          {attachedPost && (
+            <div className="mb-2 flex items-center gap-2 p-2 rounded-xl bg-zinc-900 border border-zinc-800 animate-fadeIn">
+              <FileText className="w-4 h-4 text-white shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-bold text-white truncate">
+                  Publication de @{attachedPost.username}
+                </div>
+                <div className="text-[10px] text-zinc-500 truncate">{attachedPost.excerpt}…</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAttachedPost(null);
+                  onClearAttachedPost?.();
+                }}
+                className="p-1 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors"
+                title="Retirer la publication jointe"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )}
 
           <form

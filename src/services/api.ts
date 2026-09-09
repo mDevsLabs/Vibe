@@ -16,7 +16,9 @@ import type {
   MAIQuotas,
   UserSettings,
   User,
+  VibeBook,
 } from '../types/vibe';
+import { AppStorage } from './storageAdapter';
 
 export const API_BASE =
   (import.meta as any).env?.VITE_API_URL ||
@@ -27,6 +29,72 @@ export const API_BASE =
    !(import.meta as any).env?.VITE_API_BASE
     ? ''
     : 'https://mai.val.run');
+
+// ─────────────────────────────────────────────
+// TRADUCTION (DeepL) — langues cibles & résolution de la langue utilisateur
+// ─────────────────────────────────────────────
+/** Résultat de POST /v1/translate (DeepL, repli mAI côté serveur). */
+export interface TranslateResult {
+  success: boolean;
+  detected_language: string;
+  translation: string;
+  target_lang?: string;
+  /** Moteur réellement utilisé : 'deepl' ou 'mai' (repli). */
+  provider?: 'deepl' | 'mai';
+  /** true si le contenu source est déjà dans la langue cible. */
+  same_language?: boolean;
+  cached?: boolean;
+}
+
+/** Langues cibles supportées par DeepL (libellés français). */
+export const TRANSLATION_LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: 'AR', label: 'Arabe' },
+  { code: 'BG', label: 'Bulgare' },
+  { code: 'CS', label: 'Tchèque' },
+  { code: 'DA', label: 'Danois' },
+  { code: 'DE', label: 'Allemand' },
+  { code: 'EL', label: 'Grec' },
+  { code: 'EN-US', label: 'Anglais (États-Unis)' },
+  { code: 'EN-GB', label: 'Anglais (Royaume-Uni)' },
+  { code: 'ES', label: 'Espagnol' },
+  { code: 'ET', label: 'Estonien' },
+  { code: 'FI', label: 'Finnois' },
+  { code: 'FR', label: 'Français' },
+  { code: 'HE', label: 'Hébreu' },
+  { code: 'HU', label: 'Hongrois' },
+  { code: 'ID', label: 'Indonésien' },
+  { code: 'IT', label: 'Italien' },
+  { code: 'JA', label: 'Japonais' },
+  { code: 'KO', label: 'Coréen' },
+  { code: 'LT', label: 'Lituanien' },
+  { code: 'LV', label: 'Letton' },
+  { code: 'NB', label: 'Norvégien' },
+  { code: 'NL', label: 'Néerlandais' },
+  { code: 'PL', label: 'Polonais' },
+  { code: 'PT-BR', label: 'Portugais (Brésil)' },
+  { code: 'PT-PT', label: 'Portugais (Portugal)' },
+  { code: 'RO', label: 'Roumain' },
+  { code: 'RU', label: 'Russe' },
+  { code: 'SK', label: 'Slovaque' },
+  { code: 'SL', label: 'Slovène' },
+  { code: 'SV', label: 'Suédois' },
+  { code: 'TR', label: 'Turc' },
+  { code: 'UK', label: 'Ukrainien' },
+  { code: 'VI', label: 'Vietnamien' },
+  { code: 'ZH', label: 'Chinois' },
+];
+
+/** Convertit une langue de navigateur (« fr-FR ») en code DeepL (« FR »). */
+export function browserToDeepLCode(tag: string): string {
+  const lower = String(tag || '').trim().toLowerCase();
+  if (!lower) return 'EN-US';
+  const region = (lower.split('-')[1] || '').toUpperCase();
+  const base = lower.slice(0, 2);
+  if (base === 'en') return region === 'GB' ? 'EN-GB' : 'EN-US';
+  if (base === 'pt') return region === 'BR' ? 'PT-BR' : 'PT-PT';
+  const generic = TRANSLATION_LANGUAGES.find((l) => l.code.toLowerCase() === base);
+  return generic ? generic.code : 'EN-US';
+}
 
 // ─────────────────────────────────────────────
 // CACHE GET (TTL court) + dédoublonnage des requêtes en vol.
@@ -90,16 +158,28 @@ export class ApiService {
     this.cachedRequest(endpoint, 60000).catch(() => {});
   }
   public static getToken(): string | null {
-    return localStorage.getItem('vibe_jwt_token');
+    return AppStorage.getItem('vibe_jwt_token');
   }
 
   public static setToken(token: string) {
-    localStorage.setItem('vibe_jwt_token', token);
+    AppStorage.setItem('vibe_jwt_token', token);
   }
 
   public static removeToken() {
-    localStorage.removeItem('vibe_jwt_token');
-    localStorage.removeItem('vibe_user_data');
+    AppStorage.removeItem('vibe_jwt_token');
+    AppStorage.removeItem('vibe_user_data');
+  }
+
+  /** Langue cible de traduction : réglage utilisateur (miroir local), sinon langue du navigateur. */
+  public static resolveTargetLanguage(): string {
+    const stored = String(AppStorage.getItem('vibe_ui_language') || '').trim().toUpperCase();
+    if (stored && TRANSLATION_LANGUAGES.some((l) => l.code === stored)) return stored;
+    return browserToDeepLCode(typeof navigator !== 'undefined' ? navigator.language : '');
+  }
+
+  /** Miroir local de la langue de traduction (évite un appel settings à chaque traduction). */
+  public static setUiLanguageMirror(lang: string) {
+    AppStorage.setItem('vibe_ui_language', lang);
   }
 
   private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -147,6 +227,9 @@ export class ApiService {
       const errJson = await response.json().catch(() => ({}));
       const err = new Error(errJson.error || `Erreur (${response.status})`) as any;
       err.status = response.status;
+      // Code machine optionnel renvoyé par le backend (ex. 'PIN_LIMIT')
+      if (errJson.code) err.code = errJson.code;
+      err.body = errJson;
       throw err;
     }
 
@@ -241,9 +324,29 @@ export class ApiService {
     if (cursor) queryParams.append('cursor', cursor);
 
     try {
-      return await this.request(`/v1/feed?${queryParams.toString()}`);
-    } catch {
-      return await this.request(`/api/vibe/feed?${queryParams.toString()}`);
+      let res: { posts: Post[]; mode: string; title: string; nextCursor?: string | null };
+      try {
+        res = await this.request(`/v1/feed?${queryParams.toString()}`);
+      } catch {
+        res = await this.request(`/api/vibe/feed?${queryParams.toString()}`);
+      }
+
+      // Mettre en cache localement le flux principal pour consultation hors-ligne
+      if (!cursor && !tag && res?.posts && res.posts.length > 0) {
+        AppStorage.setJSON(`vibe_offline_feed_${type}`, res);
+      }
+      return res;
+    } catch (networkErr) {
+      // Fallback gracieux en mode hors-ligne : récupérer le dernier flux en cache local
+      const cached = AppStorage.getJSON<{ posts: Post[]; mode: string; title: string } | null>(`vibe_offline_feed_${type}`, null);
+      if (cached && cached.posts && cached.posts.length > 0) {
+        return {
+          ...cached,
+          title: `${cached.title || 'Flux'} (Hors-ligne)`,
+          nextCursor: null,
+        };
+      }
+      throw networkErr;
     }
   }
 
@@ -304,17 +407,53 @@ export class ApiService {
   public static async createPost(
     content: string,
     media_url?: string,
-    media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>
+    media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
+    options?: { aiGenerated?: boolean; quotedPostId?: string; scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
   ): Promise<{ success: boolean; post: Post }> {
+    const payload = {
+      content,
+      media_url,
+      media_assets,
+      ai_generated: options?.aiGenerated,
+      quoted_post_id: options?.quotedPostId,
+      scheduled_at: options?.scheduledAt || undefined,
+      visibility: options?.visibility || 'public',
+    };
     try {
       return await this.request('/v1/posts', {
         method: 'POST',
-        body: JSON.stringify({ content, media_url, media_assets }),
+        body: JSON.stringify(payload),
       });
     } catch {
       return await this.request('/api/vibe/posts', {
         method: 'POST',
-        body: JSON.stringify({ content, media_url, media_assets }),
+        body: JSON.stringify(payload),
+      });
+    }
+  }
+
+  /** Met à jour une Vibe existante (auteur uniquement). */
+  public static async updatePost(
+    id: string,
+    content: string,
+    media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
+    options?: { scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
+  ): Promise<{ success: boolean; post: Post }> {
+    const payload = {
+      content,
+      media_assets,
+      scheduled_at: options?.scheduledAt,
+      visibility: options?.visibility,
+    };
+    try {
+      return await this.request(`/v1/posts/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return await this.request(`/api/vibe/posts/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
       });
     }
   }
@@ -360,6 +499,115 @@ export class ApiService {
   }
 
   // ─────────────────────────────────────────────
+  // LIVRES — collections de « Vibe préférées » (max 5 par compte)
+  // ─────────────────────────────────────────────
+  public static async getBooks(postId?: string): Promise<{ success: boolean; books: VibeBook[]; maxBooks: number }> {
+    const qs = postId ? `?post_id=${encodeURIComponent(postId)}` : '';
+    try {
+      return await this.request(`/v1/books${qs}`);
+    } catch {
+      return await this.request(`/api/vibe/books${qs}`);
+    }
+  }
+
+  public static async createBook(title: string, icon: string): Promise<{ success: boolean; book: VibeBook }> {
+    const body = JSON.stringify({ title, icon });
+    try {
+      return await this.request('/v1/books', { method: 'POST', body });
+    } catch {
+      return await this.request('/api/vibe/books', { method: 'POST', body });
+    }
+  }
+
+  public static async updateBook(bookId: string, data: { title?: string; icon?: string }): Promise<{ success: boolean; book: VibeBook }> {
+    const body = JSON.stringify(data);
+    try {
+      return await this.request(`/v1/books/${bookId}/update`, { method: 'POST', body });
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/update`, { method: 'POST', body });
+    }
+  }
+
+  public static async deleteBook(bookId: string): Promise<{ success: boolean }> {
+    try {
+      return await this.request(`/v1/books/${bookId}`, { method: 'DELETE' });
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}`, { method: 'DELETE' });
+    }
+  }
+
+  /** Enregistre / retire une Vibe d'un Livre (toggle). */
+  public static async toggleBookItem(bookId: string, postId: string): Promise<{ success: boolean; saved: boolean }> {
+    try {
+      return await this.request(`/v1/books/${bookId}/posts/${postId}`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/posts/${postId}`, { method: 'POST' });
+    }
+  }
+
+  public static async getBookPosts(bookId: string): Promise<{ success: boolean; book: VibeBook; posts: Post[] }> {
+    try {
+      return await this.request(`/v1/books/${bookId}/posts`);
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/posts`);
+    }
+  }
+
+  /** Livres (du compte courant) contenant un post donné — badge PostCard. */
+  public static async getBooksForPost(postId: string): Promise<{ success: boolean; book_ids: string[] }> {
+    try {
+      return await this.request(`/v1/books/for-post/${postId}`);
+    } catch {
+      return await this.request(`/api/vibe/books/for-post/${postId}`);
+    }
+  }
+
+  /** Retour d'algorithme sur un post : 'more' | 'less' | null (désactive). */
+  public static async sendPostFeedback(id: string, value: 'more' | 'less' | null): Promise<{ success: boolean; my_feedback: 'more' | 'less' | null }> {
+    try {
+      return await this.request(`/v1/posts/${id}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/posts/${id}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      });
+    }
+  }
+
+  /**
+   * Incrémente le compteur d'impressions d'un post. Appelé fire-and-forget
+   * par le tracking de vues (IntersectionObserver), sans invalidation de
+   * cache : le compteur est volontairement approximatif côté affichage.
+   */
+  public static async viewPost(id: string): Promise<{ success: boolean; views_count: number | null }> {
+    try {
+      return await this.request(`/v1/posts/${id}/view`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/posts/${id}/view`, { method: 'POST' });
+    }
+  }
+
+  /** Épingler / désépingler un post sur son profil (max 3, contrôlé serveur). */
+  public static async setPostPinned(id: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean; pinned_count?: number; code?: string; error?: string }> {
+    try {
+      return await this.request(`/v1/posts/${id}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ pinned }),
+      });
+    } catch (err: any) {
+      // Limite d'épinglage atteinte : pas de fallback, on propage le code
+      if (err?.code === 'PIN_LIMIT') throw err;
+      return await this.request(`/api/vibe/posts/${id}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ pinned }),
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────
   // COMMENTS
   // ─────────────────────────────────────────────
   public static async getComments(postId: string): Promise<{ comments: Comment[]; aiDigest: string | null; count: number }> {
@@ -370,16 +618,22 @@ export class ApiService {
     }
   }
 
-  public static async addComment(postId: string, content: string, parent_comment_id?: string): Promise<{ success: boolean; comment: Comment }> {
+  public static async addComment(
+    postId: string,
+    content: string,
+    parent_comment_id?: string,
+    media_assets?: Array<{ url: string; media_type: string; alt_text?: string }>
+  ): Promise<{ success: boolean; comment: Comment }> {
+    const payload = { content, parent_comment_id, media_assets };
     try {
       return await this.request(`/v1/posts/${postId}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content, parent_comment_id }),
+        body: JSON.stringify(payload),
       });
     } catch {
       return await this.request(`/api/vibe/posts/${postId}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content, parent_comment_id }),
+        body: JSON.stringify(payload),
       });
     }
   }
@@ -441,8 +695,16 @@ export class ApiService {
     }
   }
 
-  public static async generateDMReply(partnerId: string | number, draft?: string): Promise<{ success: boolean; suggestion: string }> {
-    const payload = { partner_id: partnerId, draft: draft || '' };
+  public static async generateDMReply(
+    partnerId: string | number,
+    draft?: string,
+    preset: 'improve' | 'shorten' | 'extend' | 'tone' | 'custom' = 'improve',
+    customPrompt?: string,
+    tone?: string
+  ): Promise<{ success: boolean; suggestion: string }> {
+    const payload: Record<string, unknown> = { partner_id: partnerId, draft: draft || '', preset };
+    if (preset === 'custom' && customPrompt) payload.custom_prompt = customPrompt;
+    if (preset === 'tone' && tone) payload.tone = tone;
     try {
       return await this.request('/v1/dms/suggest-reply', {
         method: 'POST',
@@ -488,6 +750,32 @@ export class ApiService {
     }
   }
 
+  // ─────────────────────────────────────────────
+  // MUTE — masquage silencieux (posts + notifications, invisible pour l'autre)
+  // ─────────────────────────────────────────────
+  public static async muteUser(username: string, muted: boolean): Promise<{ success: boolean; muted: boolean }> {
+    const clean = username.trim().replace(/^@/, '');
+    try {
+      return await this.request(`/v1/users/${encodeURIComponent(clean)}/mute`, {
+        method: 'POST',
+        body: JSON.stringify({ muted }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/users/${encodeURIComponent(clean)}/mute`, {
+        method: 'POST',
+        body: JSON.stringify({ muted }),
+      });
+    }
+  }
+
+  public static async getMutedUsers(): Promise<{ muted: Array<{ id: string; muted_user_id: string; muted_username?: string; muted_display_name?: string; muted_avatar_url?: string; created_at: string }> }> {
+    try {
+      return await this.request('/v1/users/muted');
+    } catch {
+      return await this.request('/api/vibe/users/muted');
+    }
+  }
+
   public static async reportConversation(
     partnerId: string | number,
     reason: string,
@@ -513,6 +801,139 @@ export class ApiService {
 
   public static async deleteMessage(messageId: string): Promise<{ success: boolean }> {
     return this.request(`/v1/dms/messages/${messageId}`, { method: 'DELETE' });
+  }
+
+  public static async editMessage(messageId: string, content: string): Promise<{ success: boolean; message: DirectMessage }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ content }),
+    });
+  }
+
+  /** Heartbeat « en train d'écrire » d'un DM (throttlé côté appelant). */
+  public static async sendTyping(partnerId: string | number, typing: boolean = true): Promise<void> {
+    const payload = JSON.stringify({ partner_id: partnerId, typing });
+    try {
+      await this.request('/v1/dms/typing', { method: 'POST', body: payload });
+    } catch {
+      await this.request('/api/vibe/dms/typing', { method: 'POST', body: payload });
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // AUDIENCE — CERCLE PRIVÉ (visibilité des posts)
+  // ─────────────────────────────────────────────
+  public static async getCircle(): Promise<{ members: Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; added_at?: string }> }> {
+    try {
+      return await this.cachedRequest('/v1/circle', 20000);
+    } catch {
+      return await this.cachedRequest('/api/vibe/circle', 20000);
+    }
+  }
+
+  public static async addToCircle(username: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/circle');
+    try {
+      return await this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/circle/${encodeURIComponent(username)}`, { method: 'POST' });
+    }
+  }
+
+  public static async removeFromCircle(username: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/circle');
+    try {
+      return await this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    } catch {
+      return await this.request(`/api/vibe/circle/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    }
+  }
+
+  /** @username est-il dans mon cercle ? (état du bouton sur les profils) */
+  public static async checkCircle(username: string): Promise<{ in_circle: boolean }> {
+    try {
+      return await this.request(`/v1/circle/check/${encodeURIComponent(username)}`);
+    } catch {
+      return await this.request(`/api/vibe/circle/check/${encodeURIComponent(username)}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // AI TEXT TOOLS (composer : continuation Tab, orthographe, allonger, ton)
+  // ─────────────────────────────────────────────
+  public static async aiTransformText(
+    text: string,
+    action: 'complete' | 'fix_spelling' | 'lengthen' | 'shorten' | 'tone',
+    tone?: string
+  ): Promise<{ success: boolean; text: string }> {
+    const payload = JSON.stringify({ text, action, tone });
+    try {
+      return await this.request('/v1/ai/text', { method: 'POST', body: payload });
+    } catch {
+      return await this.request('/api/vibe/ai/text', { method: 'POST', body: payload });
+    }
+  }
+
+  /** Traduction d'une publication (DeepL, repli mAI côté serveur, cache inclus). */
+  public static async translatePost(postId: string, targetLang: string): Promise<TranslateResult> {
+    const payload = JSON.stringify({ post_id: postId, target_lang: targetLang });
+    try {
+      return await this.request('/v1/translate', { method: 'POST', body: payload });
+    } catch {
+      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
+    }
+  }
+
+  /** Traduction d'un commentaire/réponse (DeepL, repli mAI côté serveur). */
+  public static async translateComment(commentId: string, targetLang: string): Promise<TranslateResult> {
+    const payload = JSON.stringify({ comment_id: commentId, target_lang: targetLang });
+    try {
+      return await this.request('/v1/translate', { method: 'POST', body: payload });
+    } catch {
+      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // SPEECH — lecture vocale des posts/fils (mini-lecteur audio flottant)
+  // ─────────────────────────────────────────────
+  public static async getSpeechVoices(): Promise<{ voices: Array<{ id: string; name: string; gender?: string; languages?: string[] }> }> {
+    const extract = (res: any) => ({ voices: res?.voices || res?.data || (Array.isArray(res) ? res : []) });
+    try {
+      return extract(await this.request('/v1/speech/voices'));
+    } catch {
+      return extract(await this.request('/api/vibe/speech/voices'));
+    }
+  }
+
+  /** Synthèse vocale d'un texte → URL de lecture (data URL audio). */
+  public static async textToSpeech(text: string, voice?: string): Promise<{ url: string }> {
+    const payload = JSON.stringify({
+      input: text,
+      model: 'deepgram/flux-tts:free',
+      voice: voice || undefined,
+      return_json: true,
+    });
+
+    const endpoints = ['/v1/speech', '/speech', '/v1/audio/speech', '/api/vibe/speech'];
+    let lastError: any = null;
+
+    for (const ep of endpoints) {
+      try {
+        const json = await this.request<any>(ep, {
+          method: 'POST',
+          body: payload,
+        });
+        const audioUrl = json?.audio_url || json?.audioContent;
+        if (audioUrl) {
+          return { url: audioUrl };
+        }
+      } catch (err: any) {
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('Réponse audio invalide.');
   }
 
   // ─────────────────────────────────────────────
@@ -579,18 +1000,38 @@ export class ApiService {
   public static async chatMAI(
     message: string,
     execute_tool?: { name: string; args: any },
-    model?: string
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any } }> {
+    model?: string,
+    context?: { post_id?: string }
+  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any }; conversation_id?: string }> {
+    const payload = { message, execute_tool, model, context };
     try {
       return await this.request('/v1/mai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, execute_tool, model }),
+        body: JSON.stringify(payload),
       });
     } catch {
       return await this.request('/api/vibe/mai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, execute_tool, model }),
+        body: JSON.stringify(payload),
       });
+    }
+  }
+
+  /** Historique de la conversation mAI active (persistance serveur). */
+  public static async getMAIHistory(): Promise<{ conversation_id: string | null; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; created_at: string }> }> {
+    try {
+      return await this.request('/v1/mai/history');
+    } catch {
+      return await this.request('/api/vibe/mai/history');
+    }
+  }
+
+  /** Démarre une nouvelle conversation mAI (vide l'historique actif). */
+  public static async newMAIConversation(): Promise<{ success: boolean; conversation_id: string }> {
+    try {
+      return await this.request('/v1/mai/history/new', { method: 'POST' });
+    } catch {
+      return await this.request('/api/vibe/mai/history/new', { method: 'POST' });
     }
   }
 
@@ -743,6 +1184,26 @@ export class ApiService {
     }
   }
 
+  /** Statut de l'abonnement aux notifications de posts d'un compte. */
+  public static async getPostSubscription(username: string): Promise<{ success: boolean; subscribed: boolean }> {
+    const cleanUser = username.trim().replace(/^@/, '');
+    try {
+      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`);
+    } catch {
+      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/subscribe`);
+    }
+  }
+
+  /** S'abonner / se désabonner aux notifications de posts d'un compte (toggle). */
+  public static async togglePostSubscription(username: string): Promise<{ success: boolean; subscribed: boolean }> {
+    const cleanUser = username.trim().replace(/^@/, '');
+    try {
+      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/subscribe`, { method: 'POST' });
+    }
+  }
+
   // ─────────────────────────────────────────────
   // NOTIFICATIONS & SETTINGS
   // ─────────────────────────────────────────────
@@ -768,6 +1229,59 @@ export class ApiService {
       return await this.request('/v1/notifications/read', { method: 'POST' });
     } catch {
       return await this.request('/api/vibe/notifications/read', { method: 'POST' });
+    }
+  }
+
+  public static async markNotificationRead(id: string, isRead = true): Promise<{ success: boolean }> {
+    const payload = JSON.stringify({ id, is_read: isRead });
+    try {
+      return await this.request(`/v1/notifications/${encodeURIComponent(id)}/read`, {
+        method: 'POST',
+        body: payload,
+      });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/read', {
+          method: 'POST',
+          body: payload,
+        });
+      } catch {
+        return await this.request('/api/vibe/notifications/read', {
+          method: 'POST',
+          body: payload,
+        });
+      }
+    }
+  }
+
+  public static async deleteNotification(id: string): Promise<{ success: boolean }> {
+    const payload = JSON.stringify({ id });
+    try {
+      return await this.request(`/v1/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/delete', {
+          method: 'POST',
+          body: payload,
+        });
+      } catch {
+        return await this.request(`/api/vibe/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      }
+    }
+  }
+
+  public static async clearAllNotifications(): Promise<{ success: boolean }> {
+    try {
+      return await this.request('/v1/notifications', { method: 'DELETE' });
+    } catch {
+      try {
+        return await this.request('/v1/notifications/delete', {
+          method: 'POST',
+          body: JSON.stringify({ all: true }),
+        });
+      } catch {
+        return await this.request('/api/vibe/notifications/clear', { method: 'POST' });
+      }
     }
   }
 

@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Calendar,
   Edit3,
@@ -13,10 +14,18 @@ import {
   X,
   Camera,
   LogOut,
+  Settings as SettingsIcon,
   Upload,
   Loader2,
   BadgeCheck,
-  AlertCircle
+  AlertCircle,
+  Share2,
+  MoreHorizontal,
+  EyeOff,
+  Ban,
+  Users,
+  Bell,
+  BellRing
 } from 'lucide-react';
 import type { Profile, Post } from '../types/vibe';
 import { ApiService } from '../services/api';
@@ -24,7 +33,9 @@ import { useAuth } from '../context/AuthContext';
 import { PostCard } from '../components/feed/PostCard';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
-import { FormattedText } from '../components/common/FormattedText';
+import { RichContent } from '../components/common/RichContent';
+import { ProfileShareModal } from '../components/profile/ProfileShareModal';
+import { NotificationService } from '../services/notificationService';
 
 interface ProfilePageProps {
   username?: string;
@@ -39,6 +50,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   onOpenThread,
   onOpenProfile,
 }) => {
+  const navigate = useNavigate();
   const { user, profile: authProfile, updateUserAvatar, updateUser, refreshProfile, logout, isLoadingSession } = useAuth();
   const rawTarget = username || user?.username || 'utilisateur';
   const targetUsername = rawTarget.replace(/^@/, '');
@@ -52,8 +64,17 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [profileError, setProfileError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
   const [isFollowing, setIsFollowing] = useState(false);
+  const [isPostNotifOn, setIsPostNotifOn] = useState(false);
+  // Cercle Privé : ce membre fait-il partie de MON cercle ?
+  const [isInCircle, setIsInCircle] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
+  const [isShareOpen, setIsShareOpen] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  // Modération sur les profils d'autrui : mute (silencieux) / block (visible)
+  const [showModMenu, setShowModMenu] = useState(false);
+  const [blockedByMe, setBlockedByMe] = useState(false);
+  const [blockedMe, setBlockedMe] = useState(false);
+  const [mutedByMe, setMutedByMe] = useState(false);
 
   // Edit fields
   const [editUsername, setEditUsername] = useState('');
@@ -77,6 +98,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       setProfile(data.profile);
       setPosts(data.posts || []);
       setIsFollowing(Boolean((data.profile as any).isFollowing));
+      setBlockedByMe(Boolean((data.profile as any).blocked_by_me));
+      setBlockedMe(Boolean((data.profile as any).blocked_me));
+      setMutedByMe(Boolean((data.profile as any).muted_by_me));
       setEditUsername(data.profile.username || targetUsername);
       setEditName(data.profile.displayName || '');
       setEditBio(data.profile.bio || '');
@@ -101,6 +125,18 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   useEffect(() => {
     if (!username && isLoadingSession) return;
     fetchProfile();
+    // État du bouton « Cercle Privé » (profils d'autrui uniquement)
+    if (!isSelf && targetUsername) {
+      ApiService.checkCircle(targetUsername)
+        .then((res) => setIsInCircle(Boolean(res?.in_circle)))
+        .catch(() => {});
+      ApiService.getPostSubscription(targetUsername)
+        .then((res) => setIsPostNotifOn(Boolean(res?.subscribed)))
+        .catch(() => setIsPostNotifOn(false));
+    } else {
+      setIsInCircle(false);
+      setIsPostNotifOn(false);
+    }
     const handlePostUpdated = () => {
       fetchProfile();
     };
@@ -108,7 +144,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     return () => {
       window.removeEventListener('vibe:post_updated', handlePostUpdated);
     };
-  }, [fetchProfile, username, isLoadingSession]);
+  }, [fetchProfile, username, isLoadingSession, isSelf, targetUsername]);
 
   // Charger les publications aimées au clic sur l'onglet 'likes'
   useEffect(() => {
@@ -137,6 +173,102 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         ...prev,
         followersCount: Math.max(0, (prev.followersCount || 0) + (next ? -1 : 1)),
       } : prev);
+    }
+  };
+
+  /** Active/désactive les notifications de nouveaux posts de ce compte. */
+  const handlePostNotifToggle = async () => {
+    const next = !isPostNotifOn;
+    setIsPostNotifOn(next);
+    try {
+      const res = await ApiService.togglePostSubscription(targetUsername);
+      setIsPostNotifOn(Boolean(res?.subscribed));
+      NotificationService.showInAppToast(
+        res?.subscribed ? 'Notifications activées' : 'Notifications désactivées',
+        res?.subscribed
+          ? `Vous serez notifié des nouvelles Vibe de @${targetUsername}.`
+          : `Vous ne serez plus notifié des nouvelles Vibe de @${targetUsername}.`,
+        'info'
+      );
+    } catch (err: any) {
+      setIsPostNotifOn(!next);
+      NotificationService.showInAppToast('Erreur', err?.message || "L'abonnement aux posts a échoué.", 'error');
+    }
+  };
+
+  /** Mute : masque silencieusement les publications/notifications de ce compte. */
+  const handleToggleMute = async () => {
+    setShowModMenu(false);
+    try {
+      const res = await ApiService.muteUser(targetUsername, !mutedByMe);
+      const nowMuted = Boolean(res?.muted);
+      setMutedByMe(nowMuted);
+      NotificationService.showInAppToast(
+        nowMuted ? 'Compte masqué' : 'Compte réactivé',
+        nowMuted
+          ? `Les publications de @${targetUsername} n'apparaîtront plus dans votre fil.`
+          : `Les publications de @${targetUsername} réapparaissent dans votre fil.`,
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le masquage a échoué.', 'error');
+    }
+  };
+
+  /** Ajoute ou retire ce profil de mon Cercle Privé (audience des posts « Cercle Privé »). */
+  const handleCircleToggle = async () => {
+    if (!targetUsername) return;
+    const next = !isInCircle;
+    setIsInCircle(next);
+    try {
+      if (next) {
+        await ApiService.addToCircle(targetUsername);
+        NotificationService.showInAppToast('Cercle Privé', `@${targetUsername} verra vos publications « Cercle Privé ».`, 'success');
+      } else {
+        await ApiService.removeFromCircle(targetUsername);
+        NotificationService.showInAppToast('Cercle Privé', `@${targetUsername} a été retiré de votre cercle.`, 'info');
+      }
+    } catch (err: any) {
+      setIsInCircle(!next);
+      NotificationService.showInAppToast('Erreur', err?.message || 'La modification du cercle a échoué.', 'error');
+    }
+  };
+
+  /** Block : coupe tout contact de manière visible (DM, follow, notifications). */
+  const handleToggleBlock = async () => {
+    setShowModMenu(false);
+    if (!blockedByMe) {
+      const ok = window.confirm(
+        `Bloquer @${targetUsername} ?\n\nCette action coupe tout contact de manière visible : messages, abonnement et notifications. @${targetUsername} ne pourra plus interagir avec vous.`
+      );
+      if (!ok) return;
+    }
+    const targetId = String(profile?.id || '');
+    if (!targetId) return;
+    try {
+      if (blockedByMe) {
+        await ApiService.unblockUser(targetId);
+      } else {
+        await ApiService.blockUser(targetId);
+        // Le blocage coupe l'abonnement existant
+        if (isFollowing) {
+          try { await ApiService.toggleFollow(targetUsername); } catch {}
+          setIsFollowing(false);
+        }
+      }
+      setBlockedByMe(!blockedByMe);
+      setMutedByMe(false);
+      NotificationService.showInAppToast(
+        blockedByMe ? 'Compte débloqué' : 'Compte bloqué',
+        blockedByMe
+          ? `@${targetUsername} peut de nouveau interagir avec vous.`
+          : `@${targetUsername} ne pourra plus interagir avec vous.`,
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:feed_refresh'));
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Le blocage a échoué.', 'error');
     }
   };
 
@@ -261,7 +393,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       />
 
       {/* Top Bar */}
-      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
           {onBack && (
             <button onClick={onBack} className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900">
@@ -279,16 +411,69 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
 
-        {isSelf && (
+        <div className="flex items-center gap-2">
+          {isSelf && (
+            <button
+              onClick={() => navigate('/settings')}
+              className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+              title="Paramètres & Personnalisation"
+            >
+              <SettingsIcon className="w-4 h-4" />
+            </button>
+          )}
           <button
-            onClick={logout}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-900/50 bg-red-950/20 text-red-400 text-xs font-medium hover:bg-red-950/40 transition-colors"
-            title="Se déconnecter"
+            onClick={() => setIsShareOpen(true)}
+            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+            title="Partager le profil (Carte, QR Code, Lien)"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Déconnexion</span>
+            <Share2 className="w-4 h-4" />
           </button>
-        )}
+
+          {isSelf && (
+            <button
+              onClick={logout}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-900/50 bg-red-950/20 text-red-400 text-xs font-medium hover:bg-red-950/40 transition-colors"
+              title="Se déconnecter"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Déconnexion</span>
+            </button>
+          )}
+
+          {/* Menu de modération (profil d'autrui) : Masquer / Bloquer */}
+          {!isSelf && (
+            <div className="relative">
+              {showModMenu && (
+                <div className="fixed inset-0 z-20" onClick={() => setShowModMenu(false)} />
+              )}
+              <button
+                onClick={() => setShowModMenu(!showModMenu)}
+                className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+                title="Plus d'options"
+              >
+                <MoreHorizontal className="w-4 h-4" />
+              </button>
+              {showModMenu && (
+                <div className="absolute right-0 top-9 z-30 w-56 vibe-menu rounded-2xl p-1.5 space-y-1">
+                  <button
+                    onClick={handleToggleMute}
+                    className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                  >
+                    <EyeOff className="w-3.5 h-3.5 text-white" />
+                    <span>{mutedByMe ? `Réactiver @${targetUsername}` : `Masquer @${targetUsername}`}</span>
+                  </button>
+                  <button
+                    onClick={handleToggleBlock}
+                    className="w-full text-left px-3 py-2 rounded-xl text-xs text-red-400 hover:text-red-300 hover:bg-red-950/40 flex items-center gap-2"
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>{blockedByMe ? `Débloquer @${targetUsername}` : `Bloquer @${targetUsername}`}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Banner */}
@@ -347,27 +532,70 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             )}
           </div>
 
-          {isSelf ? (
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setIsEditOpen(true)}
-              className="py-2 px-5 rounded-full border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
+              onClick={() => setIsShareOpen(true)}
+              className="py-2 px-4 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900/80 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-black dark:text-white font-semibold text-xs transition-all flex items-center gap-1.5 shadow-sm hover:border-zinc-400 dark:hover:border-zinc-500"
+              title="Partager le compte Vibe (Carte HD, QR Code, Lien)"
             >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Modifier le profil</span>
+              <Share2 className="w-3.5 h-3.5 text-black dark:text-white" />
+              <span className="text-black dark:text-white">Partager</span>
             </button>
-          ) : (
-            <button
-              onClick={handleFollowToggle}
-              style={!isFollowing ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
-              className={`py-2 px-6 rounded-full font-bold text-xs transition-all ${
-                isFollowing
-                  ? 'border border-zinc-700 bg-transparent text-white hover:bg-zinc-900'
-                  : 'bg-white text-black hover:brightness-90'
-              }`}
-            >
-              {isFollowing ? 'Abonné' : 'Suivre'}
-            </button>
-          )}
+
+            {isSelf ? (
+              <button
+                onClick={() => setIsEditOpen(true)}
+                className="py-2 px-5 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-black dark:text-white font-semibold text-xs transition-colors flex items-center gap-1.5"
+              >
+                <Edit3 className="w-3.5 h-3.5 text-black dark:text-white" />
+                <span className="text-black dark:text-white">Modifier le profil</span>
+              </button>
+            ) : blockedByMe ? (
+              <button
+                onClick={handleToggleBlock}
+                className="py-2 px-6 rounded-full font-bold text-xs transition-all border border-red-900/60 bg-red-950/20 text-red-400 hover:bg-red-950/40"
+              >
+                Débloquer
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleFollowToggle}
+                  style={!isFollowing ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
+                  className={`py-2 px-6 rounded-full font-bold text-xs transition-all ${
+                    isFollowing
+                      ? 'border border-zinc-700 bg-transparent text-white hover:bg-zinc-900'
+                      : 'bg-white text-black hover:brightness-90'
+                  }`}
+                >
+                  {isFollowing ? 'Abonné' : 'Suivre'}
+                </button>
+                <button
+                  onClick={handlePostNotifToggle}
+                  className={`p-2.5 rounded-full font-semibold text-xs transition-all border ${
+                    isPostNotifOn
+                      ? 'border-sky-500/50 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
+                      : 'border-zinc-700 bg-transparent text-zinc-400 hover:text-white hover:bg-zinc-900'
+                  }`}
+                  title={isPostNotifOn ? `Ne plus être notifié des posts de @${targetUsername}` : `Me notifier des nouvelles Vibe de @${targetUsername}`}
+                >
+                  {isPostNotifOn ? <BellRing className="w-3.5 h-3.5" /> : <Bell className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  onClick={handleCircleToggle}
+                  className={`py-2 px-4 rounded-full font-semibold text-xs transition-all border flex items-center gap-1.5 ${
+                    isInCircle
+                      ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                      : 'border-zinc-700 bg-transparent text-zinc-400 hover:text-white hover:bg-zinc-900'
+                  }`}
+                  title={isInCircle ? `Retirer @${targetUsername} de votre Cercle Privé` : `Autoriser @${targetUsername} à voir vos publications « Cercle Privé »`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>{isInCircle ? 'Dans le cercle' : 'Ajouter au cercle'}</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* User Info */}
@@ -380,9 +608,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             <span className="text-xs text-zinc-500 font-mono">@{targetUsername}</span>
           </div>
 
-          <div className="text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap">
-            <FormattedText
-              text={profile?.bio || 'Membre actif de la communauté Vibe.'}
+          <div className="text-sm text-zinc-200 leading-relaxed">
+            <RichContent
+              content={profile?.bio || 'Membre actif de la communauté Vibe.'}
               onOpenProfile={onOpenProfile}
             />
           </div>
@@ -431,6 +659,31 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Bannières d'état de modération */}
+      {!isSelf && blockedByMe && (
+        <div className="mx-4 mb-2 p-3 rounded-2xl bg-red-950/30 border border-red-900/50 text-xs text-red-300 flex items-center gap-2">
+          <Ban className="w-4 h-4 shrink-0" />
+          <span>
+            Vous avez bloqué @{targetUsername}. Ses publications et interactions n'apparaissent plus,
+            et il ne peut plus vous contacter.
+          </span>
+        </div>
+      )}
+      {!isSelf && mutedByMe && !blockedByMe && (
+        <div className="mx-4 mb-2 p-3 rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 flex items-center gap-2">
+          <EyeOff className="w-4 h-4 shrink-0" />
+          <span>
+            Vous avez masqué @{targetUsername} : ses publications n'apparaissent plus dans votre fil
+            (il ne peut pas le savoir).
+          </span>
+        </div>
+      )}
+      {!isSelf && blockedMe && !blockedByMe && (
+        <div className="mx-4 mb-2 p-3 rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400">
+          @{targetUsername} vous a bloqué. Vous ne pouvez pas interagir avec ce compte.
+        </div>
+      )}
 
       {/* Sub-Tabs */}
       <div className="flex border-b border-zinc-800 bg-zinc-950">
@@ -621,6 +874,16 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Profile Share Modal (Carte HD, QR Code Amélioré, Liens) */}
+      <ProfileShareModal
+        isOpen={isShareOpen}
+        onClose={() => setIsShareOpen(false)}
+        profile={profile}
+        targetUsername={targetUsername}
+        isVerified={isVerified}
+        tier={isSelf ? user?.tier : (profile as any)?.tier}
+      />
     </div>
   );
 };

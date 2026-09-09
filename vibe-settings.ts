@@ -19,6 +19,21 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS accent_color TEXT`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS font_size TEXT`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_auto_approve_tools BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS posts_ai_generated_by_default BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_default_model TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_tts_voice TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS ui_language TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_theme TEXT DEFAULT 'monochrome'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS chat_background_theme TEXT DEFAULT 'default'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_shape TEXT DEFAULT 'pill'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS default_vibe_audience VARCHAR(32) DEFAULT 'public'`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS vibe_audience_preferences (
+          user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          default_audience VARCHAR(32) NOT NULL DEFAULT 'public',
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
       personalizationColumnsReady = true;
     } catch (err) {
       console.warn("[vibe-settings] ensurePersonalizationColumns skipped:", (err as any)?.message);
@@ -70,8 +85,19 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       const userId = Number(payload.sub || (payload as any).id);
 
       const sql = getDb();
-      const rows = await sql`SELECT * FROM user_settings WHERE user_id = ${userId} LIMIT 1`;
-      return c.json({ settings: rows[0] || {} });
+      await ensurePersonalizationColumns();
+      const [rows, prefRows] = await Promise.all([
+        sql`SELECT * FROM user_settings WHERE user_id = ${userId} LIMIT 1`,
+        sql`SELECT default_audience FROM vibe_audience_preferences WHERE user_id = ${userId} LIMIT 1`.catch(() => []),
+      ]);
+      const settings = rows[0] || {};
+      if (!settings.default_vibe_audience && prefRows.length > 0) {
+        settings.default_vibe_audience = prefRows[0].default_audience;
+      }
+      if (!settings.default_vibe_audience) {
+        settings.default_vibe_audience = 'public';
+      }
+      return c.json({ settings });
     } catch (err: any) {
       return c.json({ error: "Erreur paramètres." }, 500);
     }
@@ -97,7 +123,9 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           notify_on_repost, notify_on_reply, notify_on_dm, content_filter_level,
           blur_sensitive_content, age_restriction_enabled, allow_dms, dms_enabled,
           feed_default_mode, hide_reposts, blocked_keywords, two_factor_auth, allow_mentions,
-          theme_preference, accent_color, font_size, mai_auto_approve_tools
+          theme_preference, accent_color, font_size, mai_auto_approve_tools,
+          posts_ai_generated_by_default, mai_default_model, mai_tts_voice, ui_language,
+          message_bubble_theme, chat_background_theme, message_bubble_shape, default_vibe_audience
         )
         VALUES (
           ${userId},
@@ -120,7 +148,15 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.theme_preference || 'light'},
           ${body.accent_color || null},
           ${body.font_size || null},
-          ${body.mai_auto_approve_tools ?? false}
+          ${body.mai_auto_approve_tools ?? false},
+          ${body.posts_ai_generated_by_default ?? false},
+          ${body.mai_default_model || null},
+          ${body.mai_tts_voice || null},
+          ${body.ui_language || null},
+          ${body.message_bubble_theme || 'monochrome'},
+          ${body.chat_background_theme || 'default'},
+          ${body.message_bubble_shape || 'pill'},
+          ${body.default_vibe_audience || 'public'}
         )
         ON CONFLICT (user_id)
         DO UPDATE SET
@@ -144,8 +180,25 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           accent_color = CASE WHEN ${body.accent_color !== undefined} THEN EXCLUDED.accent_color ELSE user_settings.accent_color END,
           font_size = CASE WHEN ${body.font_size !== undefined} THEN EXCLUDED.font_size ELSE user_settings.font_size END,
           mai_auto_approve_tools = CASE WHEN ${body.mai_auto_approve_tools !== undefined} THEN EXCLUDED.mai_auto_approve_tools ELSE user_settings.mai_auto_approve_tools END,
+          posts_ai_generated_by_default = CASE WHEN ${body.posts_ai_generated_by_default !== undefined} THEN EXCLUDED.posts_ai_generated_by_default ELSE user_settings.posts_ai_generated_by_default END,
+          mai_default_model = CASE WHEN ${body.mai_default_model !== undefined} THEN EXCLUDED.mai_default_model ELSE user_settings.mai_default_model END,
+          mai_tts_voice = CASE WHEN ${body.mai_tts_voice !== undefined} THEN EXCLUDED.mai_tts_voice ELSE user_settings.mai_tts_voice END,
+          ui_language = CASE WHEN ${body.ui_language !== undefined} THEN EXCLUDED.ui_language ELSE user_settings.ui_language END,
+          message_bubble_theme = CASE WHEN ${body.message_bubble_theme !== undefined} THEN EXCLUDED.message_bubble_theme ELSE user_settings.message_bubble_theme END,
+          chat_background_theme = CASE WHEN ${body.chat_background_theme !== undefined} THEN EXCLUDED.chat_background_theme ELSE user_settings.chat_background_theme END,
+          message_bubble_shape = CASE WHEN ${body.message_bubble_shape !== undefined} THEN EXCLUDED.message_bubble_shape ELSE user_settings.message_bubble_shape END,
+          default_vibe_audience = CASE WHEN ${body.default_vibe_audience !== undefined} THEN EXCLUDED.default_vibe_audience ELSE user_settings.default_vibe_audience END,
           updated_at = NOW()
       `;
+
+      if (body.default_vibe_audience !== undefined) {
+        await sql`
+          INSERT INTO vibe_audience_preferences (user_id, default_audience, updated_at)
+          VALUES (${userId}, ${body.default_vibe_audience || 'public'}, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET default_audience = EXCLUDED.default_audience, updated_at = NOW()
+        `.catch((err: any) => console.warn('[vibe-settings] error updating vibe_audience_preferences:', err?.message));
+      }
 
       return c.json({ success: true, message: "Paramètres mis à jour avec succès." });
     } catch (err: any) {

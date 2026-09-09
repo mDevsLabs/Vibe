@@ -166,7 +166,7 @@ export function registerAudioRoutes(app: Hono) {
         freeSpeechModels.length > 0 ? freeSpeechModels : FALLBACK_SPEECH_MODELS;
 
       return c.json({ data: finalModels, object: "list" });
-    } catch (_err) {
+    } catch {
       return c.json({ data: FALLBACK_SPEECH_MODELS, object: "list" });
     }
   };
@@ -235,6 +235,10 @@ export function registerAudioRoutes(app: Hono) {
   app.get("/speech/voices", handleGetSpeechVoices);
   app.get("/v1/audio/voices", handleGetSpeechVoices);
   app.get("/audio/voices", handleGetSpeechVoices);
+  app.get("/api/vibe/speech/voices", handleGetSpeechVoices);
+  app.get("/vibe/speech/voices", handleGetSpeechVoices);
+  app.get("/api/speech/voices", handleGetSpeechVoices);
+  app.get("/api/v1/speech/voices", handleGetSpeechVoices);
 
   // ─────────────────────────────────────────────
   // GET /v1/speech/usage, /speech/usage, /v1/audio/usage & /usage/speech
@@ -790,9 +794,9 @@ export function registerAudioRoutes(app: Hono) {
       }
 
       // Format binaire standard pour OpenAI SDK & requêtes natives
+      // (CORS géré par le middleware global dans main.ts)
       return new Response(bytes, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
           "Content-Type": mimeType,
           "x-audio-id": String(savedId),
           "x-speech-limit": String(weeklyLimit),
@@ -822,6 +826,12 @@ export function registerAudioRoutes(app: Hono) {
   app.post("/v1/audio/generations", handleAudioSpeech);
   app.post("/audio/speech", handleAudioSpeech);
   app.post("/audio/generations", handleAudioSpeech);
+  app.post("/api/vibe/speech", handleAudioSpeech);
+  app.post("/vibe/speech", handleAudioSpeech);
+  app.post("/api/speech", handleAudioSpeech);
+  app.post("/api/v1/speech", handleAudioSpeech);
+  app.post("/api/v1/audio/speech", handleAudioSpeech);
+  app.post("/api/vibe/audio/speech", handleAudioSpeech);
 
   // Routes Google Cloud TTS / Gemini SDK
   app.post("/v1beta/models/*:synthesizeSpeech", handleAudioSpeech);

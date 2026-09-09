@@ -19,24 +19,33 @@
     <meta name="twitter:image" content="/logo.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&display=swap" rel="stylesheet" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#ffffff" />
     <script>
       (function() {
         try {
           var saved = localStorage.getItem('vibe_theme_preference') || 'light';
-          var isDark = saved === 'dark' || (saved === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var isDark = saved === 'dark' || (saved === 'system' && prefersDark);
           if (isDark) {
             document.documentElement.classList.add('dark');
             document.documentElement.classList.remove('light');
             document.documentElement.setAttribute('data-theme', 'dark');
             var meta = document.querySelector('meta[name="theme-color"]');
             if (meta) meta.setAttribute('content', '#000000');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-bg', '#18181b');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-color', '#ffffff');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-border', '1px solid #3f3f46');
           } else {
             document.documentElement.classList.add('light');
             document.documentElement.classList.remove('dark');
             document.documentElement.setAttribute('data-theme', 'light');
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', '#ffffff');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-bg', '#ffffff');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-color', '#000000');
+            document.documentElement.style.setProperty('--vibe-sent-bubble-border', '1.5px solid #000000');
           }
         } catch (e) {}
       })();
@@ -48,7 +57,7 @@
     <meta name="description" content="Vibe — Réseau Social nouvelle génération avec IA mAI" />
     <title>Vibe — Réseau Social avec IA mAI</title>
   </head>
-  <body class="bg-white text-zinc-900 dark:bg-black dark:text-white antialiased selection:bg-black selection:text-white dark:selection:bg-white dark:selection:text-black overscroll-none">
+  <body class="bg-white text-black antialiased selection:bg-zinc-900 selection:text-white overscroll-none">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>

@@ -4,6 +4,12 @@ import { extractTierFromApiKey, getDb, getTierRequestLimit, getUserQuotaBoost, g
 export function registerMiddleware(app: Hono) {
   // Middleware global pour Auth, Rate limiting & Logging sur toutes les routes d'API
   app.use("*", async (c, next) => {
+    // Preflight CORS : laisser passer sans auth (géré par le middleware CORS de main.ts)
+    if (c.req.method === "OPTIONS") {
+      await next();
+      return;
+    }
+
     const path = c.req.path;
 
     // Détection des routes d'API
@@ -106,7 +112,10 @@ export function registerMiddleware(app: Hono) {
       c.req.header("X-Goog-Api-Key");
     const queryApiKey =
       c.req.query("api_key") ||
-      c.req.query("key");
+      c.req.query("key") ||
+      // JWT de session en query : requis pour le flux SSE (EventSource ne
+      // peut pas définir d'en-têtes) — cf. realtime.ts /v1/realtime/stream
+      c.req.query("token");
 
     let rawApiKey =
       (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : authHeader) ||

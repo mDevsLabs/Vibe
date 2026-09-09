@@ -1,7 +1,11 @@
 @import "tailwindcss";
 
+/* Dark variant pilotée par les classes html.dark / body.dark (alignée sur le ThemeProvider,
+   plus fiable que prefers-color-scheme car l'app pilote le thème manuellement). */
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
 @theme {
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
@@ -17,24 +21,38 @@
     --bg-secondary: #f8fafc;
     --bg-card: #ffffff;
     --border-subtle: #e2e8f0;
-    --text-primary: #09090b;
-    --text-secondary: #334155;
-    --text-muted: #64748b;
+    --text-primary: #000000;
+    --text-secondary: #09090b;
+    --text-muted: #27272a;
 
     /* Tailwind Palette Mapping for LIGHT THEME */
     --color-black: #ffffff;
-    --color-white: #09090b;
-    --color-zinc-50: #09090b;
-    --color-zinc-100: #0f172a;
-    --color-zinc-200: #1e293b;
-    --color-zinc-300: #334155;
-    --color-zinc-400: #475569;
-    --color-zinc-500: #64748b;
-    --color-zinc-600: #94a3b8;
+    --color-white: #000000;
+
+    /* Chat semantic tokens (Messages page) */
+    --chat-border: #e2e8f0;
+    --chat-border-soft: #f1f5f9;
+    --chat-surface: #ffffff;
+    --chat-surface-raised: #f8fafc;
+    --chat-surface-muted: rgba(0, 0, 0, 0.03);
+    --chat-hover: #f4f4f5;
+    --chat-active: #f1f5f9;
+    --color-zinc-50: #000000;
+    --color-zinc-100: #000000;
+    --color-zinc-200: #09090b;
+    --color-zinc-300: #18181b;
+    --color-zinc-400: #27272a;
+    --color-zinc-500: #3f3f46;
+    --color-zinc-600: #52525b;
     --color-zinc-700: #cbd5e1;
     --color-zinc-800: #e2e8f0;
     --color-zinc-900: #f1f5f9;
     --color-zinc-950: #f8fafc;
+
+    /* Sent Bubble Variables for LIGHT THEME */
+    --vibe-sent-bubble-bg: #ffffff;
+    --vibe-sent-bubble-color: #000000;
+    --vibe-sent-bubble-border: 1.5px solid #000000;
   }
 
   /* DARK THEME */
@@ -50,6 +68,20 @@
     --text-primary: #ffffff;
     --text-secondary: #a1a1aa;
     --text-muted: #71717a;
+
+    /* Chat semantic tokens (Messages page) */
+    --chat-border: #27272a;
+    --chat-border-soft: #18181b;
+    --chat-surface: #09090b;
+    --chat-surface-raised: #18181b;
+    --chat-surface-muted: rgba(255, 255, 255, 0.05);
+    --chat-hover: #18181b;
+    --chat-active: #27272a;
+
+    /* Sent Bubble Variables for DARK THEME */
+    --vibe-sent-bubble-bg: #18181b;
+    --vibe-sent-bubble-color: #ffffff;
+    --vibe-sent-bubble-border: 1px solid #3f3f46;
 
     /* Tailwind Palette Mapping for DARK THEME */
     --color-black: #000000;
@@ -80,30 +112,190 @@
 }
 
 /* ─────────────────────────────────────────────────────────────
- * HIGH-CONTRAST ACTION BUTTONS (White in Dark, Dark in Light)
+ * POLICE NOIRE ET ICÔNES NOIRES EN THÈME CLAIR
  * ───────────────────────────────────────────────────────────── */
-html.light button.bg-white,
-[data-theme="light"] button.bg-white {
+html.light,
+[data-theme="light"],
+html.light body,
+[data-theme="light"] body {
+  color: #000000;
+  background-color: #ffffff;
+}
+
+/* Police noire partout pour toutes les classes textuelles en thème clair */
+html.light .text-white,
+[data-theme="light"] .text-white,
+html.light .text-black,
+[data-theme="light"] .text-black,
+html.light .text-zinc-900,
+[data-theme="light"] .text-zinc-900,
+html.light .text-zinc-950,
+[data-theme="light"] .text-zinc-950,
+html.light .text-zinc-800,
+[data-theme="light"] .text-zinc-800 {
+  color: #000000 !important;
+}
+
+/* Exemptions et gestion adaptative pour les bulles de messages */
+.vibe-msg-text-adaptive,
+html.light .vibe-msg-text-adaptive,
+[data-theme="light"] .vibe-msg-text-adaptive {
+  color: #000000 !important;
+}
+
+html.dark .vibe-msg-text-adaptive,
+[data-theme="dark"] .vibe-msg-text-adaptive {
+  color: #ffffff !important;
+}
+
+.vibe-msg-text-adaptive .rich-content,
+html.light .vibe-msg-text-adaptive .rich-content,
+[data-theme="light"] .vibe-msg-text-adaptive .rich-content,
+.vibe-msg-text-adaptive .rich-content *,
+html.light .vibe-msg-text-adaptive .rich-content * {
+  color: #000000 !important;
+}
+
+html.dark .vibe-msg-text-adaptive .rich-content,
+[data-theme="dark"] .vibe-msg-text-adaptive .rich-content,
+.vibe-msg-text-adaptive .rich-content *,
+html.dark .vibe-msg-text-adaptive .rich-content * {
+  color: #ffffff !important;
+}
+
+.vibe-msg-text-light,
+html.light .vibe-msg-text-light,
+[data-theme="light"] .vibe-msg-text-light,
+html.dark .vibe-msg-text-light,
+[data-theme="dark"] .vibe-msg-text-light {
+  color: #ffffff !important;
+}
+
+.vibe-msg-text-light .rich-content,
+html.light .vibe-msg-text-light .rich-content,
+[data-theme="light"] .vibe-msg-text-light .rich-content,
+html.dark .vibe-msg-text-light .rich-content,
+[data-theme="dark"] .vibe-msg-text-light .rich-content,
+.vibe-msg-text-light .rich-content *,
+html.light .vibe-msg-text-light .rich-content *,
+[data-theme="light"] .vibe-msg-text-light .rich-content *,
+html.dark .vibe-msg-text-light .rich-content *,
+[data-theme="dark"] .vibe-msg-text-light .rich-content * {
+  color: #ffffff !important;
+}
+
+.vibe-msg-text-dark,
+html.light .vibe-msg-text-dark,
+[data-theme="light"] .vibe-msg-text-dark,
+html.dark .vibe-msg-text-dark,
+[data-theme="dark"] .vibe-msg-text-dark {
+  color: #09090b !important;
+}
+
+.vibe-msg-text-dark .rich-content,
+html.light .vibe-msg-text-dark .rich-content,
+[data-theme="light"] .vibe-msg-text-dark .rich-content,
+html.dark .vibe-msg-text-dark .rich-content,
+[data-theme="dark"] .vibe-msg-text-dark .rich-content,
+.vibe-msg-text-dark .rich-content *,
+html.light .vibe-msg-text-dark .rich-content *,
+[data-theme="light"] .vibe-msg-text-dark .rich-content *,
+html.dark .vibe-msg-text-dark .rich-content *,
+[data-theme="dark"] .vibe-msg-text-dark .rich-content * {
+  color: #09090b !important;
+}
+
+/* Fonds clairs et blancs garantis en thème clair */
+html.light .bg-white,
+[data-theme="light"] .bg-white {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-zinc-50,
+[data-theme="light"] .bg-zinc-50,
+html.light .hover\:bg-zinc-50:hover,
+[data-theme="light"] .hover\:bg-zinc-50:hover {
+  background-color: #f8fafc !important;
+}
+
+html.light .bg-zinc-100,
+[data-theme="light"] .bg-zinc-100,
+html.light .hover\:bg-zinc-100:hover,
+[data-theme="light"] .hover\:bg-zinc-100:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Modales, popovers et menus déroulants (vibe-menu) */
+html.light .vibe-menu,
+[data-theme="light"] .vibe-menu {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+html.dark .vibe-menu,
+[data-theme="dark"] .vibe-menu {
   background-color: #09090b !important;
   color: #ffffff !important;
+  border: 1px solid #27272a !important;
+}
+
+/* Thème sombre garanti : fond noir et texte blanc */
+html.dark,
+[data-theme="dark"],
+html.dark body,
+[data-theme="dark"] body {
+  color: #ffffff;
+  background-color: #000000;
+}
+
+html.dark .bg-black,
+[data-theme="dark"] .bg-black {
+  background-color: #000000 !important;
+}
+
+html.dark .bg-zinc-950,
+[data-theme="dark"] .bg-zinc-950 {
+  background-color: #09090b !important;
+}
+
+html.dark .bg-zinc-900,
+[data-theme="dark"] .bg-zinc-900 {
+  background-color: #18181b !important;
+}
+
+/* Boutons en mode clair : surface claire, bordure nette, texte noir */
+html.light button.bg-white,
+[data-theme="light"] button.bg-white {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border: 1px solid #e2e8f0 !important;
 }
 
 html.light button.bg-white:hover,
 [data-theme="light"] button.bg-white:hover {
-  background-color: #1e293b !important;
+  background-color: #f1f5f9 !important;
+  color: #000000 !important;
 }
 
 html.light button.bg-white:disabled,
 [data-theme="light"] button.bg-white:disabled {
   opacity: 0.45 !important;
-  background-color: #09090b !important;
-  color: #ffffff !important;
+  background-color: #ffffff !important;
+  color: #000000 !important;
 }
 
-html.light button.bg-white svg,
-[data-theme="light"] button.bg-white svg {
-  color: #ffffff !important;
-  stroke: #ffffff !important;
+/* Tous les boutons en mode clair : texte noir (sauf boutons sombres explicites) */
+html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950),
+[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) {
+  color: #000000 !important;
+}
+
+/* Icônes de boutons en mode clair : police et trait noirs (sauf boutons sombres ou icônes spécifiques) */
+html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400),
+[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400) {
+  color: #000000 !important;
+  stroke: #000000 !important;
 }
 
 /* Text Selection Contrast */
@@ -125,8 +317,12 @@ html.light input:not([type="checkbox"]):not([type="radio"]),
 html.light textarea,
 [data-theme="light"] textarea,
 html.light select,
-[data-theme="light"] select {
-  color: #09090b !important;
+[data-theme="light"] select,
+html.light [contenteditable="true"],
+[data-theme="light"] [contenteditable="true"],
+html.light [role="textbox"],
+[data-theme="light"] [role="textbox"] {
+  color: #000000 !important;
 }
 
 html.light input::placeholder,
@@ -253,6 +449,66 @@ html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
 }
 
 /* ─────────────────────────────────────────────────────────────
+ * SAFE AREAS & MOBILE (encoches iOS, barre d'onglets, clavier)
+ * ───────────────────────────────────────────────────────────── */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-safe {
+  bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Header sticky : statut-bar iOS + hauteur de contenu standard */
+.header-safe {
+  padding-top: max(env(safe-area-inset-top, 0px), 0.25rem);
+}
+
+/* Focus ring harmonisé sur toute l'app (clavier & a11y) */
+:where(button, a, input:not(.vibe-chat-input):not(.no-ring), textarea:not(.no-ring), select, [tabindex]):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--vibe-accent, #7c8cff) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 0.75rem;
+}
+
+/* Cartes & menus : élévation plus douce (liquid-glass raffiné) */
+html.dark .vibe-menu,
+[data-theme="dark"] .vibe-menu {
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+html.light .vibe-menu,
+[data-theme="light"] .vibe-menu {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+html.light .vibe-menu button,
+[data-theme="light"] .vibe-menu button {
+  color: #000000 !important;
+}
+html.light .vibe-menu button:hover,
+[data-theme="light"] .vibe-menu button:hover {
+  background: rgba(0, 0, 0, 0.06) !important;
+  color: #000000 !important;
+}
+html.light .vibe-menu svg,
+[data-theme="light"] .vibe-menu svg {
+  color: #000000 !important;
+  stroke: #000000 !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
  * ANIMATIONS UI/UX (likes, médias, transitions, pull-to-refresh)
  * ───────────────────────────────────────────────────────────── */
 @keyframes vibe-fadeIn {
@@ -304,3 +560,436 @@ html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
 /* Sur-scroll du pull-to-refresh */
 @keyframes vibe-spinning { to { transform: rotate(360deg); } }
 .pull-spinner { animation: vibe-spinning 0.8s linear infinite; }
+
+/* ─────────────────────────────────────────────────────────────
+ * ÉDITEUR RICHE (RichTextEditor) & CONTENU RICHE (RichContent)
+ * Styles partagés des listes, citations, code et liens générés.
+ * ───────────────────────────────────────────────────────────── */
+.rte-content,
+.rich-content {
+  color: #000000;
+}
+
+html.dark .rte-content,
+[data-theme="dark"] .rte-content,
+html.dark .rich-content,
+[data-theme="dark"] .rich-content {
+  color: #ffffff !important;
+}
+
+html.light .rte-content,
+[data-theme="light"] .rte-content,
+html.light .rich-content,
+[data-theme="light"] .rich-content {
+  color: #000000 !important;
+}
+
+html.light .rte-content *:not(a):not(code),
+[data-theme="light"] .rte-content *:not(a):not(code) {
+  color: #000000 !important;
+}
+
+html.dark .rte-content *:not(a):not(code),
+[data-theme="dark"] .rte-content *:not(a):not(code) {
+  color: #ffffff !important;
+}
+
+.rte-content:empty::before,
+.rte-content[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: #64748b !important;
+  pointer-events: none;
+  display: block;
+}
+
+html.dark .rte-content:empty::before,
+html.dark .rte-content[data-empty="true"]::before,
+[data-theme="dark"] .rte-content:empty::before,
+[data-theme="dark"] .rte-content[data-empty="true"]::before {
+  color: #71717a !important;
+}
+
+.rte-content:focus { outline: none; }
+
+.rte-content ul,
+.rich-content ul {
+  list-style: disc;
+  padding-left: 1.4rem;
+  margin: 0.25rem 0;
+}
+.rte-content ol,
+.rich-content ol {
+  list-style: decimal;
+  padding-left: 1.4rem;
+  margin: 0.25rem 0;
+}
+.rte-content li,
+.rich-content li { margin: 0.15rem 0; }
+.rte-content blockquote,
+.rich-content blockquote {
+  border-left: 3px solid var(--color-zinc-600);
+  padding-left: 0.75rem;
+  margin: 0.35rem 0;
+  color: var(--color-zinc-400);
+  font-style: italic;
+}
+.rte-content code,
+.rich-content code {
+  background: var(--color-zinc-900);
+  border: 1px solid var(--color-zinc-800);
+  border-radius: 0.375rem;
+  padding: 0.05rem 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  color: var(--color-zinc-200);
+}
+.rte-content a,
+.rich-content a.rich-link {
+  color: #38bdf8;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.rte-content a:hover,
+.rich-content a.rich-link:hover { text-decoration: underline; }
+.rich-content b, .rich-content strong { font-weight: 700; color: inherit; }
+.rte-content b, .rte-content strong { font-weight: 700; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   VIBE MESSAGES & CHAT SYSTEM — Built from the app-wide global theme
+   Uses the same semantic tokens as the rest of the app (--bg-primary,
+   --bg-secondary, --bg-card, --border-subtle, --text-*) so Messages now
+   follows the global theme instead of being a one-off.
+   Garantit :
+   - Fond blanc & texte noir partout en mode clair (#ffffff / #000000)
+   - Fond noir & texte blanc partout en mode sombre (#000000 / #ffffff)
+   - AUCUNE bulle bleue / contour parasite sur le champ de saisie
+   - Bulles de messages nettes, sans contrastes inversés
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Page principale de messages (mêmes tokens que le layout global) */
+.vibe-chat-page {
+  background-color: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Colonne de gauche (liste des conversations) */
+.vibe-chat-sidebar {
+  background-color: var(--bg-primary) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* En-tête de la colonne des conversations */
+.vibe-chat-sidebar-header {
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+
+/* Champ de recherche de membres */
+.vibe-chat-search-bar {
+  background-color: var(--bg-primary) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+
+.vibe-chat-search-input {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+.vibe-chat-search-input::placeholder {
+  color: var(--text-muted) !important;
+}
+
+/* Résultats de recherche & panneaux internes de la sidebar */
+.vibe-chat-search-bar [class*="bg-white"] {
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Élément de la liste des conversations */
+.vibe-chat-conv-item {
+  background-color: transparent;
+  color: var(--text-primary) !important;
+  transition: background-color 0.15s ease;
+}
+.vibe-chat-conv-item:hover {
+  background-color: var(--chat-hover) !important;
+}
+.vibe-chat-conv-item.active {
+  background-color: var(--chat-active) !important;
+  border-left: 2px solid var(--text-primary) !important;
+}
+
+/* Badge de messages non lus */
+.vibe-chat-badge-unread {
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
+}
+
+/* Colonne droite (chat actif) */
+.vibe-chat-main {
+  background-color: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+}
+
+/* En-tête supérieur du chat (léger flou glassé, tokens globaux) */
+.vibe-chat-header {
+  background-color: color-mix(in srgb, var(--bg-primary) 94%, transparent) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Zone centrale des messages */
+.vibe-chat-thread {
+  background-color: var(--bg-primary);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * BULLES DE MESSAGES
+ * ───────────────────────────────────────────────────────────── */
+
+/* Bulle reçue (partenaire) — surface secondaire globale */
+.vibe-msg-bubble-partner {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+.vibe-msg-bubble-partner,
+.vibe-msg-bubble-partner *,
+.vibe-msg-bubble-partner .rich-content,
+.vibe-msg-bubble-partner .rich-content * {
+  color: var(--text-primary) !important;
+}
+
+/* Bulle envoyée (monochrome) — inverse net, tokens globaux */
+.vibe-msg-bubble-me-mono {
+  background-color: var(--vibe-sent-bubble-bg) !important;
+  border: var(--vibe-sent-bubble-border) !important;
+  color: var(--vibe-sent-bubble-color) !important;
+}
+.vibe-msg-bubble-me-mono,
+.vibe-msg-bubble-me-mono *,
+.vibe-msg-bubble-me-mono .rich-content,
+.vibe-msg-bubble-me-mono .rich-content * {
+  color: var(--vibe-sent-bubble-color) !important;
+}
+
+/* Bulle média seul (aucune bordure ni padding parasite) */
+.vibe-msg-media-bubble {
+  padding: 0 !important;
+  background: transparent !important;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Citation de message auquel on répond */
+.vibe-msg-quote-partner {
+  background-color: var(--chat-surface-muted) !important;
+  border-left: 3px solid #0284c7 !important;
+  color: var(--text-primary) !important;
+}
+.vibe-msg-quote-partner * {
+  color: var(--text-primary) !important;
+}
+
+.vibe-msg-quote-me-mono {
+  background-color: var(--chat-surface-muted) !important;
+  border-left: 3px solid var(--text-primary) !important;
+  color: var(--vibe-sent-bubble-color) !important;
+}
+.vibe-msg-quote-me-mono * {
+  color: var(--vibe-sent-bubble-color) !important;
+}
+
+.vibe-msg-quote-gradient {
+  background-color: rgba(0, 0, 0, 0.25) !important;
+  border-left: 3px solid #ffffff !important;
+  color: #ffffff !important;
+}
+.vibe-msg-quote-gradient * {
+  color: #ffffff !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * BARRE DE SAISIE INFÉRIEURE (tokens globaux, focus net sans halo bleu)
+ * ───────────────────────────────────────────────────────────── */
+
+.vibe-chat-bottom-bar {
+  background-color: var(--bg-primary) !important;
+  border-top: 1px solid var(--border-subtle) !important;
+}
+
+/* Bulle ronde externe de saisie */
+.vibe-chat-input-pill {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 9999px !important;
+  transition: border-color 0.15s ease;
+}
+.vibe-chat-input-pill:focus-within {
+  border-color: var(--text-muted) !important;
+}
+
+/* CHAMP DE TEXTE : AUCUN CONTOUR BLEU, FOCUS PUR ET NET */
+.vibe-chat-input,
+.vibe-chat-input:focus,
+.vibe-chat-input:focus-visible,
+input.vibe-chat-input,
+input.vibe-chat-input:focus,
+input.vibe-chat-input:focus-visible {
+  outline: none !important;
+  outline-style: none !important;
+  outline-width: 0 !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background-color: transparent !important;
+  -webkit-tap-highlight-color: transparent !important;
+}
+
+.vibe-chat-input {
+  color: var(--text-primary) !important;
+}
+.vibe-chat-input::placeholder {
+  color: var(--text-muted) !important;
+}
+
+/* Bouton + */
+.vibe-chat-plus-btn {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  border-radius: 9999px !important;
+  transition: all 0.15s ease;
+}
+.vibe-chat-plus-btn:hover {
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Bouton d'envoi — inverse net, tokens globaux */
+.vibe-chat-send-btn {
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
+  border-radius: 9999px !important;
+  transition: all 0.15s ease;
+}
+.vibe-chat-send-btn:hover:not(:disabled) {
+  filter: brightness(0.85);
+}
+html.dark .vibe-chat-send-btn:hover:not(:disabled),
+[data-theme="dark"] .vibe-chat-send-btn:hover:not(:disabled) {
+  filter: brightness(0.85);
+}
+.vibe-chat-send-btn:disabled {
+  opacity: 0.35 !important;
+  filter: none;
+}
+
+/* Boutons ronds utilitaires de la page messages (retour, X, options) */
+.vibe-chat-icon-btn {
+  color: var(--text-secondary) !important;
+  border-radius: 9999px !important;
+  transition: all 0.15s ease;
+}
+.vibe-chat-icon-btn:hover {
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Puces de réactions sous les bulles (état neutre, tokens globaux) */
+.vibe-chat-reaction-chip {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-secondary) !important;
+}
+.vibe-chat-reaction-chip:hover {
+  border-color: var(--text-muted) !important;
+}
+
+/* Indicateur « en train d'écrire » */
+.vibe-chat-typing {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+}
+
+/* Bouton de suppression d'un média en aperçu */
+.vibe-chat-remove-media {
+  background-color: var(--text-primary) !important;
+  color: var(--bg-primary) !important;
+  transition: filter 0.15s ease;
+}
+.vibe-chat-remove-media:hover {
+  filter: brightness(0.85);
+}
+
+/* Bouton secondaire des modales (Annuler) */
+.vibe-chat-modal-btn {
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 9999px !important;
+  transition: background-color 0.15s ease;
+}
+.vibe-chat-modal-btn:hover {
+  background-color: var(--chat-hover) !important;
+}
+
+/* Bouton d'action coloré des modales (accent mAI, Signaler) */
+.vibe-chat-accent-btn {
+  color: #000000 !important;
+  border-radius: 9999px !important;
+  transition: filter 0.15s ease;
+}
+.vibe-chat-accent-btn:hover:not(:disabled) {
+  filter: brightness(0.9);
+}
+
+/* Bandeaux de modification et réponse */
+.vibe-chat-banner {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  border-radius: 1rem !important;
+}
+.vibe-chat-banner * {
+  color: var(--text-primary) !important;
+}
+
+/* Boutons internes des menus vibe-menu de la page messages */
+.vibe-menu .vibe-chat-menu-item {
+  color: var(--text-secondary) !important;
+}
+.vibe-menu .vibe-chat-menu-item:hover {
+  background-color: var(--chat-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Modales de personnalisation du chat (fond et cartes) */
+.vibe-chat-modal-content {
+  background-color: var(--bg-card) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+
+.vibe-chat-modal-card {
+  background-color: var(--bg-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  transition: all 0.15s ease;
+}
+.vibe-chat-modal-card:hover {
+  background-color: var(--chat-hover) !important;
+  border-color: var(--text-muted) !important;
+}
+.vibe-chat-modal-card.selected {
+  background-color: var(--chat-hover) !important;
+  border: 1.5px solid var(--text-primary) !important;
+  color: var(--text-primary) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.vibe-chat-modal-card * {
+  color: var(--text-primary) !important;
+}
+
