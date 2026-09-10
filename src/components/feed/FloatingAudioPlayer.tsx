@@ -8,6 +8,7 @@
 import React from 'react';
 import { Play, Pause, SkipBack, SkipForward, X, Loader2, Volume2 } from 'lucide-react';
 import { useAudioPlayer } from '../../context/AudioPlayerContext';
+import { haptics } from '../../services/haptics';
 
 const formatTime = (s: number): string => {
   if (!Number.isFinite(s) || s < 0) return '0:00';
@@ -40,7 +41,7 @@ export const FloatingAudioPlayer: React.FC = () => {
 
   return (
     <div
-      className="fixed bottom-16 sm:bottom-4 left-1/2 -translate-x-1/2 z-40 w-[min(94vw,420px)]"
+      className="fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 left-1/2 -translate-x-1/2 z-40 w-[min(94vw,420px)]"
       onClick={(e) => e.stopPropagation()}
     >
       <div className="rounded-2xl bg-zinc-950/95 border border-zinc-800 shadow-2xl backdrop-blur-md p-3 animate-fadeIn">
@@ -63,7 +64,10 @@ export const FloatingAudioPlayer: React.FC = () => {
             </p>
           </div>
           <button
-            onClick={close}
+            onClick={() => {
+              haptics.light();
+              close();
+            }}
             className="p-1 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors shrink-0"
             title="Fermer le lecteur"
           >
@@ -88,14 +92,20 @@ export const FloatingAudioPlayer: React.FC = () => {
         {/* Contrôles */}
         <div className="mt-2 flex items-center justify-center gap-4">
           <button
-            onClick={prev}
+            onClick={() => {
+              haptics.light();
+              prev();
+            }}
             className="p-1.5 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
             title="Revenir en arrière"
           >
             <SkipBack className="w-4 h-4" />
           </button>
           <button
-            onClick={toggle}
+            onClick={() => {
+              haptics.light();
+              toggle();
+            }}
             disabled={isLoading}
             style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
             className="p-2.5 rounded-full bg-white text-black hover:brightness-90 transition-all disabled:opacity-40"
@@ -104,14 +114,20 @@ export const FloatingAudioPlayer: React.FC = () => {
             {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
           </button>
           <button
-            onClick={next}
+            onClick={() => {
+              haptics.light();
+              next();
+            }}
             className="p-1.5 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
             title="Segment suivant"
           >
             <SkipForward className="w-4 h-4" />
           </button>
           <button
-            onClick={cycleSpeed}
+            onClick={() => {
+              haptics.light();
+              cycleSpeed();
+            }}
             className="px-2 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-300 hover:text-white transition-colors font-mono"
             title="Vitesse de lecture"
           >

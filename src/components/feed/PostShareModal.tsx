@@ -29,6 +29,7 @@ import { ApiService } from '../../services/api';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { VerifiedBadge } from '../common/VerifiedBadge';
+import { haptics } from '../../services/haptics';
 
 interface PostShareModalProps {
   post: Post;
@@ -73,13 +74,13 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
   useEffect(() => {
     if (tab !== 'message' || selectedUser) return;
     const q = recipientQuery.trim();
-    if (!q) {
-      setResults([]);
-      setIsSearching(false);
-      return;
-    }
-    setIsSearching(true);
     const timer = setTimeout(async () => {
+      if (!q) {
+        setResults([]);
+        setIsSearching(false);
+        return;
+      }
+      setIsSearching(true);
       try {
         const res = await ApiService.searchUsers(q.replace(/^@/, ''));
         setResults((res?.users || []).filter((u) => String(u.username).toLowerCase() !== String(post.username).toLowerCase()));
@@ -88,7 +89,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
       } finally {
         setIsSearching(false);
       }
-    }, 300);
+    }, q ? 300 : 0);
     return () => clearTimeout(timer);
   }, [recipientQuery, tab, selectedUser, post.username]);
 
@@ -98,6 +99,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
     try {
       const res = await ApiService.sendMessage(selectedUser.id, dmMessage.trim());
       if (res?.success) {
+        haptics.success();
         setSentTo(selectedUser.username);
         NotificationService.showInAppToast(
           'Publication partagée',
@@ -105,6 +107,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
           'success'
         );
       } else {
+        haptics.error();
         NotificationService.showInAppToast('Envoi impossible', "Le message n'a pas pu être envoyé.", 'error');
       }
     } catch (err: any) {

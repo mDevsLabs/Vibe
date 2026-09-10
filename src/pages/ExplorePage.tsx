@@ -16,6 +16,7 @@ import { ApiService } from '../services/api';
 import { PostCard } from '../components/feed/PostCard';
 import { Post } from '../types/vibe';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { haptics } from '../services/haptics';
 
 interface ExplorePageProps {
   onOpenProfile: (username: string) => void;
@@ -175,6 +176,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   }, [query, performSearch]);
 
   const handleClear = () => {
+    haptics.light();
     setQuery('');
     setHasSearched(false);
     setPostResults([]);
@@ -184,9 +186,18 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
   };
 
   const handleTrendClick = (tag: string) => {
+    haptics.light();
     const formattedTag = tag.startsWith('#') ? tag : `#${tag}`;
     setQuery(formattedTag);
     performSearch(formattedTag, 'hashtags');
+  };
+
+  const handleInputChange = (val: string) => {
+    setQuery(val);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') performSearch(query);
   };
 
   // ─── Onglets de résultats ─────────────────────────────────────────────────
@@ -209,10 +220,10 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && performSearch(query)}
-            placeholder="Rechercher des publications, @comptes ou #hashtags..."
-            className="w-full pl-10 pr-9 py-2.5 rounded-full bg-zinc-900 border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-600 focus:bg-zinc-800/60 transition-all"
+            onChange={(e) => handleInputChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Rechercher sur Vibe..."
+            className="w-full pl-10 pr-9 py-2.5 rounded-full bg-zinc-900 border border-zinc-800 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-white transition-colors"
           />
           {query && (
             <button
@@ -230,7 +241,10 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({ onOpenProfile, onOpenT
             {tabs.map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => {
+                  haptics.light();
+                  setActiveTab(tab.id);
+                }}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all ${
                   activeTab === tab.id
                     ? 'bg-white text-black'

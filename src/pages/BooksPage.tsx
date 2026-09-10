@@ -26,6 +26,12 @@ import { ApiService } from '../services/api';
 import { NotificationService } from '../services/notificationService';
 import { BOOK_ICON_OPTIONS, getBookIcon } from '../components/common/bookIcons';
 import { PostCard } from '../components/feed/PostCard';
+import { haptics } from '../services/haptics';
+
+function RenderBookIcon({ icon, className }: { icon?: string; className?: string }) {
+  const IconComponent = getBookIcon(icon || 'BookHeart');
+  return React.createElement(IconComponent, { className });
+}
 
 export const BooksPage: React.FC = () => {
   const navigate = useNavigate();
@@ -68,9 +74,6 @@ export const BooksPage: React.FC = () => {
   useEffect(() => {
     if (!bookId) return;
     let cancelled = false;
-    setIsLoadingPosts(true);
-    setPosts([]);
-    setBook(null);
     ApiService.getBookPosts(bookId)
       .then((res) => {
         if (cancelled) return;
@@ -89,6 +92,7 @@ export const BooksPage: React.FC = () => {
   }, [bookId]);
 
   const openCreate = () => {
+    haptics.light();
     setEditingBook(null);
     setFormTitle('');
     setFormIcon('BookHeart');
@@ -96,6 +100,7 @@ export const BooksPage: React.FC = () => {
   };
 
   const openEdit = (b: VibeBook) => {
+    haptics.light();
     setEditingBook(b);
     setFormTitle(b.title);
     setFormIcon(b.icon || 'BookHeart');
@@ -110,14 +115,17 @@ export const BooksPage: React.FC = () => {
       if (editingBook) {
         const res = await ApiService.updateBook(editingBook.id, { title: formTitle.trim(), icon: formIcon });
         setBooks((list) => list.map((b) => (b.id === editingBook.id ? { ...b, ...res.book } : b)));
+        haptics.success();
         NotificationService.showInAppToast('Livre modifié', `« ${res.book.title} » a été mis à jour.`, 'success');
       } else {
         const res = await ApiService.createBook(formTitle.trim(), formIcon);
         setBooks((list) => [...list, res.book]);
+        haptics.success();
         NotificationService.showInAppToast('Livre créé', `« ${res.book.title} » est prêt à recevoir vos Vibe préférées.`, 'success');
       }
       setShowCreate(false);
     } catch (err: any) {
+      haptics.error();
       setError(err?.message || "La sauvegarde du Livre a échoué.");
     } finally {
       setIsSaving(false);
@@ -125,18 +133,22 @@ export const BooksPage: React.FC = () => {
   };
 
   const handleDeleteBook = async (b: VibeBook) => {
+    haptics.warning();
     if (!window.confirm(`Supprimer le Livre « ${b.title} » ? Les Vibe enregistrées ne seront pas supprimées.`)) return;
     try {
       await ApiService.deleteBook(b.id);
       setBooks((list) => list.filter((x) => x.id !== b.id));
+      haptics.medium();
       NotificationService.showInAppToast('Livre supprimé', `« ${b.title} » a été supprimé.`, 'info');
     } catch (err: any) {
+      haptics.error();
       NotificationService.showInAppToast('Erreur', err?.message || 'La suppression a échoué.', 'error');
     }
   };
 
   const handleRemoveFromBook = async (postId: string) => {
     if (!bookId || !book) return;
+    haptics.medium();
     // Optimiste
     const prev = posts;
     setPosts((list) => list.filter((p) => p.id !== postId));
@@ -145,13 +157,13 @@ export const BooksPage: React.FC = () => {
       NotificationService.showInAppToast('Retiré', `Cette Vibe a été retirée du Livre « ${book.title} ».`, 'info');
     } catch {
       setPosts(prev);
+      haptics.error();
       NotificationService.showInAppToast('Erreur', 'Le retrait a échoué.', 'error');
     }
   };
 
   // ─────────────── Vue d'un Livre ───────────────
   if (bookId) {
-    const BookIcon = getBookIcon(book?.icon || 'BookHeart');
     return (
       <div className="flex-1 border-r border-zinc-800 min-h-screen bg-black pb-16 md:pb-0">
         <header className="sticky top-0 z-10 backdrop-blur-md bg-black/70 border-b border-zinc-800 p-4 flex items-center gap-3">
@@ -160,7 +172,7 @@ export const BooksPage: React.FC = () => {
           </button>
           {book && (
             <span className="p-2 rounded-xl text-sky-300 bg-sky-500/10 border border-sky-500/30">
-              <BookIcon className="w-4 h-4" />
+              <RenderBookIcon icon={book.icon} className="w-4 h-4" />
             </span>
           )}
           <div className="min-w-0">
@@ -259,7 +271,6 @@ export const BooksPage: React.FC = () => {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
           {books.map((b) => {
-            const IconComponent = getBookIcon(b.icon);
             return (
               <div
                 key={b.id}
@@ -268,7 +279,7 @@ export const BooksPage: React.FC = () => {
               >
                 <div className="flex items-start justify-between">
                   <span className="p-2.5 rounded-2xl text-sky-300 bg-sky-500/10 border border-sky-500/20">
-                    <IconComponent className="w-5 h-5" />
+                    <RenderBookIcon icon={b.icon} className="w-5 h-5" />
                   </span>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
@@ -344,7 +355,10 @@ export const BooksPage: React.FC = () => {
                   <button
                     key={opt.name}
                     type="button"
-                    onClick={() => setFormIcon(opt.name)}
+                    onClick={() => {
+                      haptics.light();
+                      setFormIcon(opt.name);
+                    }}
                     title={opt.name}
                     className={`p-1.5 rounded-lg flex items-center justify-center transition-colors ${
                       formIcon === opt.name

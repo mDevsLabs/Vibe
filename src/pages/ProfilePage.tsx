@@ -30,12 +30,13 @@ import {
 import type { Profile, Post } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { NotificationService } from '../services/notificationService';
+import { haptics } from '../services/haptics';
 import { PostCard } from '../components/feed/PostCard';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { RichContent } from '../components/common/RichContent';
 import { ProfileShareModal } from '../components/profile/ProfileShareModal';
-import { NotificationService } from '../services/notificationService';
 
 interface ProfilePageProps {
   username?: string;
@@ -124,7 +125,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   useEffect(() => {
     if (!username && isLoadingSession) return;
-    fetchProfile();
+    queueMicrotask(() => {
+      fetchProfile();
+    });
     // État du bouton « Cercle Privé » (profils d'autrui uniquement)
     if (!isSelf && targetUsername) {
       ApiService.checkCircle(targetUsername)
@@ -149,15 +152,18 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   // Charger les publications aimées au clic sur l'onglet 'likes'
   useEffect(() => {
     if (activeTab === 'likes' && likedPosts.length === 0) {
-      setIsLoadingLiked(true);
-      ApiService.getUserLikedPosts(targetUsername)
-        .then((res) => setLikedPosts(res.posts || []))
-        .catch(() => setLikedPosts([]))
-        .finally(() => setIsLoadingLiked(false));
+      queueMicrotask(() => {
+        setIsLoadingLiked(true);
+        ApiService.getUserLikedPosts(targetUsername)
+          .then((res) => setLikedPosts(res.posts || []))
+          .catch(() => setLikedPosts([]))
+          .finally(() => setIsLoadingLiked(false));
+      });
     }
   }, [activeTab, targetUsername, likedPosts.length]);
 
   const handleFollowToggle = async () => {
+    haptics.medium();
     const next = !isFollowing;
     setIsFollowing(next);
     // Mise à jour immédiate des compteurs affichés
@@ -690,7 +696,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         {(['posts', 'replies', 'media', 'likes'] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => {
+              haptics.light();
+              setActiveTab(tab);
+            }}
             className="flex-1 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
           >
             <span className={activeTab === tab ? 'text-white' : 'text-zinc-500'}>

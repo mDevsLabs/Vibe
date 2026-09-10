@@ -26,6 +26,7 @@ import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { RichContent, htmlToPlainText } from '../common/RichContent';
 import { RichTextEditor, RichTextEditorHandle } from '../common/RichTextEditor';
+import { haptics } from '../../services/haptics';
 
 const nextToastId = () => Date.now();
 
@@ -100,7 +101,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   }, [postId]);
 
   useEffect(() => {
-    fetchComments();
+    queueMicrotask(() => {
+      fetchComments();
+    });
   }, [fetchComments]);
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -183,8 +186,10 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
       setContentText('');
       setMediaList([]);
       setReplyingTo(null);
+      haptics.success();
       fetchComments();
     } catch (err: any) {
+      haptics.error();
       setComposerError(err.message || 'Erreur lors de l’envoi de la réponse.');
     } finally {
       setIsSubmitting(false);
@@ -195,6 +200,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     if (!user) {
       // Bouton "mort" si déconnecté : on prévient au lieu d'un update optimiste
       // qui serait annulé par un 401.
+      haptics.warning();
       window.dispatchEvent(
         new CustomEvent('vibe:in_app_toast', {
           detail: {
@@ -208,6 +214,11 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
     const id = String(cm.id);
     const wasLiked = likedIds.has(id);
+    if (!wasLiked) {
+      haptics.like();
+    } else {
+      haptics.unlike();
+    }
     // Mise à jour optimiste
     setLikedIds((prev) => {
       const next = new Set(prev);
@@ -395,11 +406,11 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
         <div className="flex items-center gap-4 pl-8 pt-0.5">
           <button
             onClick={() => handleLikeComment(cm)}
-            className={`flex items-center gap-1 text-[11px] transition-colors ${
-              liked ? 'text-rose-500' : 'text-zinc-500 hover:text-rose-400'
+            className={`flex items-center gap-1 text-[11px] transition-all active:scale-90 ${
+              liked ? 'text-rose-500 font-bold' : 'text-zinc-500 hover:text-rose-400'
             }`}
           >
-            <Heart className={`w-3.5 h-3.5 ${liked ? 'fill-rose-500' : ''}`} />
+            <Heart className={`w-3.5 h-3.5 transition-transform ${liked ? 'fill-rose-500 scale-110' : 'hover:scale-110'}`} />
             <span>{cm.likes_count || 0}</span>
           </button>
           {!commentTranslations[String(cm.id)] && translatingId !== String(cm.id) && (

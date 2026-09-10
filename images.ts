@@ -838,7 +838,7 @@ export function registerImageRoutes(app: Hono) {
       }
 
       return c.json({ data: models, object: "list" });
-    } catch (_err) {
+    } catch {
       let fallback = FALLBACK_IMAGE_MODELS;
       if (shouldFilterFreeOnly) {
         fallback = fallback.filter((m) => m.id.toLowerCase().includes("flux"));

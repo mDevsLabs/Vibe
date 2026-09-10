@@ -5,7 +5,7 @@
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Heart,
   Repeat,
@@ -46,6 +46,7 @@ import { ProfileAvatar } from '../common/ProfileAvatar';
 import { RichContent } from '../common/RichContent';
 import { usePostViewTracking } from '../../hooks/usePostViewTracking';
 import { formatCompactCount } from '../../algorithms';
+import { haptics } from '../../services/haptics';
 import { PostShareModal } from './PostShareModal';
 import { BookPickerModal } from './BookPickerModal';
 
@@ -104,6 +105,10 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const [showBookPicker, setShowBookPicker] = useState(false);
   const [isInABook, setIsInABook] = useState(Boolean((post as any).in_books > 0));
 
+  // État du cœur flottant pour double-tap mobile
+  const [heartFloatPos, setHeartFloatPos] = useState<{ x: number; y: number } | null>(null);
+  const lastTapRef = useRef<number>(0);
+
   // Temps réel (SSE) : compteurs like/repost/réponses poussés par le serveur
   useEffect(() => {
     return RealtimeService.on((type, payload) => {
@@ -114,15 +119,19 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     });
   }, [post.id]);
 
-  // Resynchronise les compteurs quand le parent recharge le post
+  // Resynchronise les compteurs quand le parent recharge le post (avec garde d'égalité)
   useEffect(() => {
-    setLikesCount(post.likes_count || 0);
-    setRepostsCount(post.reposts_count || 0);
-    setRepliesCount(post.replies_count || 0);
+    const targetLikes = post.likes_count || 0;
+    const targetReposts = post.reposts_count || 0;
+    const targetReplies = post.replies_count || 0;
+    setLikesCount((prev) => (prev !== targetLikes ? targetLikes : prev));
+    setRepostsCount((prev) => (prev !== targetReposts ? targetReposts : prev));
+    setRepliesCount((prev) => (prev !== targetReplies ? targetReplies : prev));
   }, [post.id, post.likes_count, post.reposts_count, post.replies_count]);
 
   useEffect(() => {
-    setIsPinned(post.is_pinned || false);
+    const targetPinned = post.is_pinned || false;
+    setIsPinned((prev) => (prev !== targetPinned ? targetPinned : prev));
   }, [post.id, post.is_pinned]);
 
   const isAuthor = user && (user.id === post.author_id || user.username === post.username);
@@ -230,15 +239,17 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     ]);
   };
 
-  const handleLike = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleLike = async (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     const newLikedState = !isLiked;
     setIsLiked(newLikedState);
     setLikesCount((prev) => (newLikedState ? prev + 1 : Math.max(0, prev - 1)));
     if (newLikedState) {
       setLikeBurst(true);
       setTimeout(() => setLikeBurst(false), 450);
-      navigator.vibrate?.(10);
+      haptics.like();
+    } else {
+      haptics.unlike();
     }
 
     try {
@@ -249,11 +260,49 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     }
   };
 
+  /** Double tap mobile sur le post / média : déclenche un like et une animation de cœur */
+  const handleTouchDoubleTap = (e: React.MouseEvent | React.TouchEvent) => {
+    const now = Date.now();
+    const DOUBLE_TAP_DELAY = 320;
+    if (now - lastTapRef.current < DOUBLE_TAP_DELAY) {
+      e.stopPropagation();
+      const target = e.currentTarget as HTMLElement;
+      const rect = target.getBoundingClientRect();
+      let clientX = rect.left + rect.width / 2;
+      let clientY = rect.top + rect.height / 2;
+      if ('clientX' in e && typeof (e as any).clientX === 'number') {
+        clientX = (e as React.MouseEvent).clientX;
+        clientY = (e as React.MouseEvent).clientY;
+      } else if ('touches' in e && e.touches[0]) {
+        clientX = e.touches[0].clientX;
+        clientY = e.touches[0].clientY;
+      }
+      setHeartFloatPos({ x: clientX - rect.left, y: clientY - rect.top });
+      setTimeout(() => setHeartFloatPos(null), 780);
+
+      haptics.like();
+      if (!isLiked) {
+        setIsLiked(true);
+        setLikesCount((prev) => prev + 1);
+        setLikeBurst(true);
+        setTimeout(() => setLikeBurst(false), 450);
+        ApiService.toggleLike(post.id).catch(() => {
+          setIsLiked(false);
+          setLikesCount((prev) => Math.max(0, prev - 1));
+        });
+      }
+      lastTapRef.current = 0;
+    } else {
+      lastTapRef.current = now;
+    }
+  };
+
   const handleRepost = async (e: React.MouseEvent) => {
     e.stopPropagation();
     const newRepostState = !isReposted;
     setIsReposted(newRepostState);
     setRepostsCount((prev) => (newRepostState ? prev + 1 : Math.max(0, prev - 1)));
+    haptics.medium();
 
     try {
       await ApiService.toggleRepost(post.id);
@@ -266,6 +315,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const handleBookmark = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsBookmarked(!isBookmarked);
+    haptics.medium();
     try {
       await ApiService.toggleBookmark(post.id);
     } catch {
@@ -275,6 +325,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    haptics.warning();
     if (!window.confirm('Voulez-vous vraiment supprimer cette publication ?')) return;
     setIsDeleting(true);
     try {
@@ -380,8 +431,20 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     <article
       ref={viewRef}
       onClick={() => onOpenThread && onOpenThread(post)}
-      className="p-4 border-b border-zinc-800/90 bg-black hover:bg-zinc-950/70 transition-colors cursor-pointer relative select-none"
+      onDoubleClick={handleTouchDoubleTap}
+      className="p-4 border-b border-zinc-800/90 bg-black hover:bg-zinc-950/70 transition-colors cursor-pointer relative select-none overflow-hidden"
     >
+      {/* Cœur animé flottant lors d'un double-tap mobile */}
+      {heartFloatPos && (
+        <div
+          className="absolute z-30 pointer-events-none animate-heartFloat"
+          style={{ left: `${heartFloatPos.x}px`, top: `${heartFloatPos.y}px` }}
+        >
+          <div className="p-3 rounded-full bg-black/70 backdrop-blur-md shadow-2xl border border-rose-500/40 flex items-center justify-center">
+            <Heart className="w-10 h-10 fill-rose-500 text-rose-500 drop-shadow-[0_0_12px_rgba(244,63,94,0.7)]" />
+          </div>
+        </div>
+      )}
       <div className="flex gap-3">
         {/* Avatar */}
         <div
@@ -876,23 +939,25 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             {/* Like */}
             <button
               onClick={handleLike}
-              className={`flex items-center gap-1.5 transition-colors group ${
-                isLiked ? 'text-white font-bold' : 'hover:text-white'
+              className={`flex items-center gap-1.5 transition-all group active:scale-90 ${
+                isLiked ? 'text-rose-500 font-bold' : 'hover:text-rose-400'
               }`}
+              title={isLiked ? 'Ne plus aimer' : "J'aime"}
             >
-              <div className={`p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors ${likeBurst ? 'animate-likeBurst' : ''}`}>
-                <Heart className={`w-4 h-4 ${isLiked ? 'fill-white text-white' : ''}`} />
+              <div className={`p-1.5 rounded-full group-hover:bg-rose-500/10 transition-colors ${likeBurst ? 'animate-likeBurst' : ''}`}>
+                <Heart className={`w-4 h-4 transition-transform ${isLiked ? 'fill-rose-500 text-rose-500 scale-110' : 'group-hover:scale-110'}`} />
               </div>
-              <span>{likesCount}</span>
+              <span className={isLiked ? 'text-rose-500' : ''}>{likesCount}</span>
             </button>
 
             {/* Livre : enregistrer la Vibe dans un Livre (Vibe préférées) */}
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                haptics.light();
                 setShowBookPicker(true);
               }}
-              className={`flex items-center gap-1.5 transition-colors group ${
+              className={`flex items-center gap-1.5 transition-all active:scale-90 group ${
                 isInABook ? 'text-sky-300 font-bold' : 'hover:text-white'
               }`}
               title={isInABook ? 'Enregistrée dans un Livre — gérer' : 'Enregistrer dans un Livre (Vibe préférées)'}
@@ -905,12 +970,13 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             {/* Bookmark */}
             <button
               onClick={handleBookmark}
-              className={`flex items-center gap-1.5 transition-colors group ${
-                isBookmarked ? 'text-white font-bold' : 'hover:text-white'
+              className={`flex items-center gap-1.5 transition-all active:scale-90 group ${
+                isBookmarked ? 'text-amber-400 font-bold' : 'hover:text-white'
               }`}
+              title={isBookmarked ? 'Retirer des signets' : 'Enregistrer dans les signets'}
             >
-              <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
-                <Bookmark className={`w-4 h-4 ${isBookmarked ? 'fill-white text-white' : ''}`} />
+              <div className={`p-1.5 rounded-full group-hover:bg-amber-400/10 transition-colors`}>
+                <Bookmark className={`w-4 h-4 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
               </div>
             </button>
 

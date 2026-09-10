@@ -12,6 +12,7 @@ import type { VibeBook } from '../../types/vibe';
 import { ApiService } from '../../services/api';
 import { NotificationService } from '../../services/notificationService';
 import { BOOK_ICON_OPTIONS, getBookIcon } from '../common/bookIcons';
+import { haptics } from '../../services/haptics';
 
 interface BookPickerModalProps {
   postId: string;
@@ -33,7 +34,6 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
     ApiService.getBooks(postId)
       .then((res) => {
         if (cancelled) return;
@@ -68,10 +68,16 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
       const res = await ApiService.toggleBookItem(book.id, postId);
       const nextList = books.map((b) => (b.id === book.id ? { ...b, contains_post: Boolean(res?.saved) } : b));
       setBooks((list) => list.map((b) => (b.id === book.id ? { ...b, contains_post: Boolean(res?.saved) } : b)));
-      if (res?.saved) NotificationService.showInAppToast('Enregistré', `Cette Vibe rejoint votre Livre « ${book.title} ».`, 'success');
-      else NotificationService.showInAppToast('Retiré', `Cette Vibe a été retirée du Livre « ${book.title} ».`, 'info');
+      if (res?.saved) {
+        haptics.like();
+        NotificationService.showInAppToast('Enregistré', `Cette Vibe rejoint votre Livre « ${book.title} ».`, 'success');
+      } else {
+        haptics.unlike();
+        NotificationService.showInAppToast('Retiré', `Cette Vibe a été retirée du Livre « ${book.title} ».`, 'info');
+      }
       notifyParent(nextList);
     } catch (err: any) {
+      haptics.error();
       setBooks(prev);
       setError(err?.message || "L'enregistrement a échoué.");
     } finally {
@@ -89,8 +95,10 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
       setShowCreate(false);
       setNewTitle('');
       setNewIcon('BookHeart');
+      haptics.success();
       NotificationService.showInAppToast('Livre créé', `« ${res.book.title} » est prêt à recevoir vos Vibe.`, 'success');
     } catch (err: any) {
+      haptics.error();
       setError(err?.message || 'La création du Livre a échoué.');
     } finally {
       setIsCreating(false);

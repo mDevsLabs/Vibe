@@ -490,7 +490,7 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
       const postResult = { ...rows[0], media_assets: media };
       await attachQuotedPosts([postResult]);
       return c.json({ post: postResult });
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur lors de la récupération." }, 500);
     }
   };
@@ -517,7 +517,7 @@ export function registerVibePostsRoutes(app: Hono, registerMulti: RegisterMultiF
 
       await sql`UPDATE profiles SET posts_count = GREATEST(0, posts_count - 1) WHERE user_id = ${userId}`;
       return c.json({ success: true, message: "Publication supprimée." });
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur suppression." }, 500);
     }
   };

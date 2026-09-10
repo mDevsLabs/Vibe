@@ -41,7 +41,8 @@ export function usePostViewTracking(
   );
 
   useEffect(() => {
-    setViewsCount(Number(initialViews) || 0);
+    const next = Number(initialViews) || 0;
+    setViewsCount((prev) => (prev !== next ? next : prev));
   }, [postId, initialViews]);
 
   useEffect(() => {

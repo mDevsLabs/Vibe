@@ -12,6 +12,7 @@ import QRCode from 'qrcode';
 import { X, Copy, Check, Download, Loader2, AlertCircle } from 'lucide-react';
 import type { Profile } from '../../types/vibe';
 import { VerifiedBadge } from '../common/VerifiedBadge';
+import { haptics } from '../../services/haptics';
 
 interface ProfileShareModalProps {
   isOpen: boolean;
@@ -117,7 +118,7 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setIsCopied(false);
+      setIsCopied((prev) => (prev ? false : prev));
       drawQR();
     }
   }, [isOpen, drawQR]);
@@ -125,6 +126,7 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
   const handleCopyLink = async () => {
     try {
       await navigator.clipboard.writeText(profileUrl);
+      haptics.success();
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2200);
     } catch {

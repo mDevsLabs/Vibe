@@ -33,8 +33,10 @@ import {
   UserPlus,
   Globe,
   Lock,
+  Smartphone,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { haptics } from '../services/haptics';
 import {
   useTheme,
   ACCENT_COLORS,
@@ -113,6 +115,7 @@ export const SettingsPage: React.FC = () => {
   const [blurSensitive, setBlurSensitive] = useState(true);
   const [emailNotifs, setEmailNotifs] = useState(true);
   const [pushNotifs, setPushNotifs] = useState(true);
+  const [hapticsEnabled, setHapticsEnabled] = useState(() => haptics.isEnabled());
   const [maiAutoApproveTools, setMaiAutoApproveTools] = useState(false);
   const [postsAIGeneratedByDefault, setPostsAIGeneratedByDefault] = useState(false);
   // mAI : modèle par défaut (toutes les requêtes mAI) + voix de lecture
@@ -290,12 +293,12 @@ export const SettingsPage: React.FC = () => {
   // Recherche en direct d'utilisateurs pour le Cercle Privé
   useEffect(() => {
     const q = circleSearchQuery.trim().replace(/^@/, '');
-    if (!q) {
-      setCircleSearchResults((prev) => (prev.length > 0 ? [] : prev));
-      setIsSearchingCircleUsers(false);
-      return;
-    }
     const timer = setTimeout(async () => {
+      if (!q) {
+        setCircleSearchResults([]);
+        setIsSearchingCircleUsers(false);
+        return;
+      }
       setIsSearchingCircleUsers(true);
       try {
         const res = await ApiService.searchUsers(q);
@@ -308,7 +311,7 @@ export const SettingsPage: React.FC = () => {
       } finally {
         setIsSearchingCircleUsers(false);
       }
-    }, 250);
+    }, q ? 250 : 0);
     return () => clearTimeout(timer);
   }, [circleSearchQuery, user?.username]);
 
@@ -968,6 +971,51 @@ export const SettingsPage: React.FC = () => {
                 </div>
 
                 <DevicePermissionHint />
+
+                {/* Section Retour Haptique & Vibrations Tactiles */}
+                <div className="pt-3 border-t border-zinc-900 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-1.5 font-semibold text-white">
+                        <Smartphone className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>Vibrations & retour haptique mobile</span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-0.5">
+                        Sensations tactiles lors des likes (battement de cœur), publications, signets et navigation
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={hapticsEnabled}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setHapticsEnabled(val);
+                        haptics.setEnabled(val);
+                        if (val) haptics.like();
+                      }}
+                      className="w-4 h-4 accent-white cursor-pointer"
+                    />
+                  </div>
+
+                  {hapticsEnabled && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => haptics.like()}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-rose-400 text-xs font-medium transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        ❤️ Tester le Like (Heartbeat)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => haptics.success()}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-emerald-400 text-xs font-medium transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        🚀 Tester le Succès
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

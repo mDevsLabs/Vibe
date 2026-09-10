@@ -6,7 +6,8 @@
  * ============================================================================
  */
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { haptics } from '../../services/haptics';
 import {
   Image as ImageIcon,
   Mic,
@@ -281,8 +282,8 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   useEffect(() => {
     const text = contentText.trimEnd();
     if (!aiCompletionEnabled || isSubmitting || aiBusy || text.length < 8 || text.length > 4000) {
-      setGhostSuggestion(null);
-      return;
+      const t = setTimeout(() => setGhostSuggestion(null), 0);
+      return () => clearTimeout(t);
     }
     const timer = setTimeout(async () => {
       try {
@@ -432,11 +433,23 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     setMediaList((prev) => prev.map((m, i) => (i === index ? { ...m, alt_text: caption } : m)));
   };
 
+  const [scheduleBaseTime] = useState(() => Date.now());
+
+  const minScheduleTime = useMemo(() => {
+    return new Date(scheduleBaseTime + 5 * 60_000).toISOString().slice(0, 16);
+  }, [scheduleBaseTime]);
+
+  const isScheduleValid = useMemo(() => {
+    if (!scheduledAt) return true;
+    const ts = Date.parse(scheduledAt);
+    return !Number.isNaN(ts) && ts > scheduleBaseTime;
+  }, [scheduledAt, scheduleBaseTime]);
+
   const validateSchedule = (): string | null => {
     if (!scheduledAt) return null;
     const ts = Date.parse(scheduledAt);
     if (Number.isNaN(ts)) return 'Date de planification invalide.';
-    if (ts <= Date.now()) return 'La date de planification doit être dans le futur.';
+    if (ts <= scheduleBaseTime) return 'La date de planification doit être dans le futur.';
     return null;
   };
 
@@ -527,11 +540,13 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       setAiMenuOpen(false);
       setAiSnapshot(null);
       setAiError(null);
+      haptics.success();
       onPostCreated();
       if (isModal && onClose) {
         onClose();
       }
     } catch (err: any) {
+      haptics.error();
       setError(err.message || 'Erreur lors de la publication.');
     } finally {
       setIsSubmitting(false);
@@ -762,7 +777,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                   <CalendarClock className="w-3.5 h-3.5" />
                   Planifier la publication
                 </span>
-                {canSchedule && scheduledAt && validateSchedule() === null && (
+                {canSchedule && scheduledAt && isScheduleValid && (
                   <span className="text-[11px] text-zinc-400 flex items-center gap-1">
                     <Check className="w-3 h-3 text-white" />
                     {formatScheduleLabel(scheduledAt)}
@@ -773,7 +788,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                 <input
                   type="datetime-local"
                   value={scheduledAt}
-                  min={new Date(Date.now() + 5 * 60_000).toISOString().slice(0, 16)}
+                  min={minScheduleTime}
                   onChange={(e) => setScheduledAt(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
                 />

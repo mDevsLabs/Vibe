@@ -243,7 +243,7 @@ function VibeApp() {
         />
 
         {/* Center Main Viewport (Pleine largeur étendue) */}
-        <main className="flex-1 w-full min-h-screen border-r border-zinc-800 pb-20 sm:pb-0">
+        <main className="flex-1 w-full min-h-screen border-r border-zinc-800 pb-[calc(5rem+env(safe-area-inset-bottom))] sm:pb-0">
           <Suspense fallback={<PageSkeleton />}>
             <Routes>
               <Route path="/" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />

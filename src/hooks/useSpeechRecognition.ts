@@ -18,17 +18,18 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [isSupported, setIsSupported] = useState(false);
+  const [isSupported, setIsSupported] = useState(() =>
+    typeof window !== 'undefined' && Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+  );
   const [error, setError] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      typeof window !== 'undefined' && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
     if (SpeechRecognition) {
-      setIsSupported(true);
       const recognition = new SpeechRecognition();
       recognition.continuous = continuous;
       recognition.interimResults = true;

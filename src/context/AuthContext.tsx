@@ -31,14 +31,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [quotas, setQuotas] = useState<MAIQuotas | null>(null);
-  const [isLoadingSession, setIsLoadingSession] = useState(true);
+  const [isLoadingSession, setIsLoadingSession] = useState(() => Boolean(ApiService.getToken()));
 
   const fetchSession = async () => {
     const currentToken = ApiService.getToken();
     if (!currentToken) {
-      setUser(null);
-      setProfile(null);
-      setQuotas(null);
       setIsLoadingSession(false);
       return;
     }

@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { haptics } from '../services/haptics';
 import {
   Send,
   ArrowUp,
@@ -139,6 +140,8 @@ export const MessagesPage: React.FC = () => {
     },
   });
 
+  const [currentTimestamp] = useState(() => Date.now());
+
   const fetchConversations = useCallback(async () => {
     try {
       const res = await ApiService.getConversations();
@@ -259,10 +262,11 @@ export const MessagesPage: React.FC = () => {
 
   // Réinitialise l'indicateur de frappe quand on change de conversation
   useEffect(() => {
-    setPartnerTyping(false);
+    setPartnerTyping((prev) => (prev ? false : prev));
   }, [activePartnerId]);
 
   const handleSelectConversation = (conv: DMConversation) => {
+    haptics.light();
     setActivePartnerId(conv.partner_id);
     setActivePartner({
       id: conv.partner_id,
@@ -393,6 +397,7 @@ export const MessagesPage: React.FC = () => {
   };
 
   const handleStartConversationWith = (u: { id: string | number; username: string; display_name?: string; avatar_url?: string }) => {
+    haptics.light();
     setActivePartnerId(u.id);
     setActivePartner(u);
     setMessages([]);
@@ -540,9 +545,11 @@ export const MessagesPage: React.FC = () => {
     try {
       await ApiService.sendMessage(activePartnerId, textToSend, replyTo && !String(replyTo.id).startsWith('temp') ? String(replyTo.id) : undefined);
       setReplyTo(null);
+      haptics.success();
       fetchMessages(activePartnerId);
       fetchConversations();
     } catch (err: any) {
+      haptics.error();
       setErrorMessage(err.message || 'Impossible d’envoyer le message.');
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
     } finally {
@@ -560,10 +567,19 @@ export const MessagesPage: React.FC = () => {
       const reactions: { emoji: string; count: number; mine: boolean }[] = [...((msg as any).reactions || [])];
       const g = reactions.find((r) => r.emoji === emoji);
       if (g) {
-        if (g.mine) { g.count -= 1; g.mine = false; if (g.count <= 0) g.count = 0; }
-        else { g.count += 1; g.mine = true; }
+        if (g.mine) {
+          g.count -= 1;
+          g.mine = false;
+          if (g.count <= 0) g.count = 0;
+          haptics.unlike();
+        } else {
+          g.count += 1;
+          g.mine = true;
+          haptics.like();
+        }
       } else {
         reactions.push({ emoji, count: 1, mine: true });
+        haptics.like();
       }
       return { ...msg, reactions: reactions.filter((r) => r.count > 0) } as any;
     }));
@@ -578,8 +594,10 @@ export const MessagesPage: React.FC = () => {
     setActionMenuFor(null);
     try {
       await navigator.clipboard.writeText(m.content);
+      haptics.success();
       alert('Message copié dans le presse-papiers.');
     } catch {
+      haptics.error();
       alert('Impossible de copier le message.');
     }
   };
@@ -927,7 +945,7 @@ export const MessagesPage: React.FC = () => {
                 const urls = m.content.match(/https?:\/\/[^\s]+/g) || [];
                 const nonUrlText = m.content.replace(/https?:\/\/[^\s]+/g, '').trim();
                 const isMediaOnly = urls.length > 0 && !nonUrlText && !(m as any).reply_to_content;
-                const canEdit = isMe && !String(m.id).startsWith('temp') && (Date.now() - new Date(m.created_at).getTime()) <= 60 * 60 * 1000;
+                const canEdit = isMe && !String(m.id).startsWith('temp') && (currentTimestamp - new Date(m.created_at).getTime()) <= 60 * 60 * 1000;
 
                 const currentThemeConfig = MESSAGE_BUBBLE_THEMES[messageBubbleTheme] || MESSAGE_BUBBLE_THEMES.monochrome;
                 const currentShapeConfig = MESSAGE_BUBBLE_SHAPES[messageBubbleShape] || MESSAGE_BUBBLE_SHAPES.pill;

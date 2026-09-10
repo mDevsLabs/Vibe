@@ -22,13 +22,13 @@ const MODEL_MAP: Record<string, string> = {
   "mai-1.5-light": "poolside/laguna-xs-2.1:free",
 };
 
-function resolveOpenRouterModel(model: string): string {
+function _resolveOpenRouterModel(model: string): string {
   if (MODEL_MAP[model]) return MODEL_MAP[model];
   return model.includes("/") ? model : "poolside/laguna-xs-2.1:free";
 }
 
 /** Formatte la réponse conversationnelle après exécution d'un outil. */
-function formatToolReply(toolName: string, result: any, username: string): string {
+function formatToolReply(toolName: string, result: any, _username: string): string {
   if (toolName === "generate_vibe_image") {
     return `🎨 Voici l'image générée avec mAI :\n\n![Image générée](${result.imageUrl})\n\n*Prompt : « ${result.prompt} »*`;
   }
@@ -608,7 +608,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       const res = await MAIAgentFleet.executeTool("check_quotas", {}, userId);
       return c.json(res.result);
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur quotas." }, 500);
     }
   };
@@ -625,7 +625,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const { text, tone = "executive" } = await c.req.json();
       const modulated = await MAIAgentFleet.modulateText({ text, tone });
       return c.json({ success: true, modulated });
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur modulation." }, 500);
     }
   };

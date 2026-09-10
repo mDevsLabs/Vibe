@@ -49,10 +49,11 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
   // Reset search and focus input when opening
   useEffect(() => {
     if (isOpen) {
-      setSearchQuery('');
-      setTimeout(() => {
+      queueMicrotask(() => setSearchQuery(''));
+      const timer = setTimeout(() => {
         searchInputRef.current?.focus();
       }, 50);
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 

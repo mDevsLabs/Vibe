@@ -134,7 +134,7 @@ export function registerAuthRoutes(app: Hono) {
     let body;
     try {
       body = await c.req.json();
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Requête JSON invalide (vérifiez les guillemets double de votre payload)." }, 400);
     }
     try {
@@ -226,7 +226,7 @@ export function registerAuthRoutes(app: Hono) {
     let body;
     try {
       body = await c.req.json();
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Requête JSON invalide (vérifiez les guillemets de votre payload)." }, 400);
     }
     
@@ -465,7 +465,7 @@ export function registerAuthRoutes(app: Hono) {
                 400
               );
             }
-          } catch (_redErr) {
+          } catch {
             // Ignorer si la table de redemptions n'est pas encore créée
           }
 

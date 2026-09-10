@@ -73,7 +73,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, []);
 
   /** Génère la voix mAI du prochain segment de la file et le joue. */
-  const playNext = useCallback(async () => {
+  const playNext = useCallback(async function advanceQueue() {
     const token = ++playTokenRef.current;
     const nextSegment = queueRef.current.shift();
     pushUpcoming(queueRef.current);
@@ -88,7 +88,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const text = nextSegment.text.trim();
     if (!text) {
       // Segment vide : passe au suivant sans bloquer la file
-      void playNext();
+      void advanceQueue();
       return;
     }
 
@@ -120,11 +120,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           setIsPlaying(true);
           utterance.onend = () => {
             setIsPlaying(false);
-            void playNext();
+            void advanceQueue();
           };
           utterance.onerror = () => {
             setIsPlaying(false);
-            void playNext();
+            void advanceQueue();
           };
           window.speechSynthesis.speak(utterance);
           return;
@@ -140,7 +140,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         'error'
       );
       // Passe au segment suivant en cas d'échec de génération
-      void playNext();
+      void advanceQueue();
     }
   }, [pushUpcoming, speed]);
 

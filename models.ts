@@ -242,7 +242,7 @@ export function registerModelRoutes(app: Hono) {
       }
 
       return c.json({ data: filtered, object: "list" });
-    } catch (_err) {
+    } catch {
       let fallback = [
         {
           architecture: {
@@ -581,7 +581,7 @@ export function registerModelRoutes(app: Hono) {
             ON CONFLICT (user_id, week_start)
             DO UPDATE SET tokens_used = weekly_usage.tokens_used + 1
           `;
-        } catch (_e) {}
+        } catch {}
       }
 
       return new Response(openRouterRes.body, {
@@ -720,7 +720,7 @@ export function registerModelRoutes(app: Hono) {
             ON CONFLICT (user_id, week_start)
             DO UPDATE SET tokens_used = weekly_usage.tokens_used + 1
           `;
-        } catch (_e) {}
+        } catch {}
       }
 
       return new Response(openRouterRes.body, {
@@ -862,7 +862,7 @@ export function registerModelRoutes(app: Hono) {
             ON CONFLICT (user_id, week_start)
             DO UPDATE SET tokens_used = weekly_usage.tokens_used + 1
           `;
-        } catch (_e) {}
+        } catch {}
       }
 
       return new Response(openRouterRes.body, {

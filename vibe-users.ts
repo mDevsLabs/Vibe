@@ -129,7 +129,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       `;
 
       return c.json({ users: rows });
-    } catch (err: any) {
+    } catch {
       return c.json({ users: [] });
     }
   };
@@ -162,7 +162,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
         LIMIT 10
       `;
       return c.json({ users });
-    } catch (err: any) {
+    } catch {
       return c.json({ users: [] });
     }
   };
@@ -297,7 +297,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
         },
         posts,
       });
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur profil." }, 500);
     }
   };
@@ -595,7 +595,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
 
         return c.json({ success: true, following: true });
       }
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Erreur follow." }, 500);
     }
   };
