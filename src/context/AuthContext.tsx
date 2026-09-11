@@ -22,6 +22,8 @@ interface AuthContextType {
   updateUserAvatar: (avatarUrl: string) => Promise<void>;
   updateUser: (partial: Partial<User>) => void;
   refreshProfile: () => Promise<void>;
+  showOnboarding: boolean;
+  dismissOnboarding: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -32,6 +34,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<Profile | null>(null);
   const [quotas, setQuotas] = useState<MAIQuotas | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(() => Boolean(ApiService.getToken()));
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  /** Après session établie : ouvre l'onboarding si jamais terminé (getSettings séparé). */
+  const checkOnboarding = async () => {
+    try {
+      const res = await ApiService.getSettings();
+      if (res?.settings && res.settings.onboarding_completed === false) {
+        setShowOnboarding(true);
+      }
+    } catch {}
+  };
+
+  const dismissOnboarding = () => setShowOnboarding(false);
 
   const fetchSession = async () => {
     const currentToken = ApiService.getToken();
@@ -45,6 +60,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(data.user);
       setProfile(data.profile);
       setQuotas(data.quotas);
+      checkOnboarding();
     } catch (err: any) {
       // On ne déconnecte que sur une vraie invalidation (401).
       // Une erreur réseau ou un 500 ponctuel ne doit pas détruire la session.
@@ -108,6 +124,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setProfile(null);
     setQuotas(null);
+    setShowOnboarding(false);
   };
 
   useEffect(() => {
@@ -129,6 +146,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateUserAvatar,
         updateUser,
         refreshProfile,
+        showOnboarding,
+        dismissOnboarding,
       }}
     >
       {children}

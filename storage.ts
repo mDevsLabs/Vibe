@@ -551,7 +551,13 @@ export function registerStorageRoutes(app: Hono) {
         file.type.startsWith("audio/") ||
         file.type.startsWith("text/") ||
         file.type === "application/pdf" ||
-        file.type === "application/json";
+        file.type === "application/json" ||
+        file.type === "application/msword" ||
+        file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        file.type === "application/vnd.ms-excel" ||
+        file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+        file.type === "application/vnd.ms-powerpoint" ||
+        file.type === "application/vnd.openxmlformats-officedocument.presentationml.presentation";
       if (file.type && !isAllowed) {
         return c.json({ error: "Type de fichier non autorisé." }, 400);
       }

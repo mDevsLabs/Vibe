@@ -6,7 +6,7 @@
  * ============================================================================
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -16,9 +16,12 @@ import {
   PenSquare,
   Bell,
   MessageCircle,
+  Search,
+  X,
 } from 'lucide-react';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { haptics } from '../../services/haptics';
+import { GlobalSearchBar } from './GlobalSearchBar';
 
 interface MobileTabBarProps {
   onOpenComposer: () => void;
@@ -71,6 +74,12 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
     onToggleMAIDrawer();
   }, [onToggleMAIDrawer]);
 
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const handleSearchClick = useCallback(() => {
+    haptics.light();
+    setIsSearchOpen(true);
+  }, []);
+
   return (
     <>
       {/* FABs d'action rapide ergonomiques : mAI + Composer */}
@@ -104,7 +113,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
         aria-label="Navigation principale mobile"
         className="sm:hidden fixed bottom-0 inset-x-0 z-50 bg-black/85 backdrop-blur-2xl border-t border-white/10 shadow-[0_-10px_35px_rgba(0,0,0,0.85)] pb-[env(safe-area-inset-bottom)] select-none"
       >
-        <div className="grid grid-cols-5 items-stretch h-14">
+        <div className="grid grid-cols-6 items-stretch h-14">
           {/* 1. Accueil */}
           <Link
             to="/"
@@ -144,6 +153,17 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
               />
             )}
           </Link>
+
+          {/* 2b. Recherche globale */}
+          <button
+            onClick={handleSearchClick}
+            aria-label="Recherche"
+            className="relative flex flex-col items-center justify-center h-full transition-colors touch-manipulation text-zinc-500 active:text-zinc-300"
+          >
+            <div className="relative p-1">
+              <Search className="w-6 h-6 stroke-[1.8]" />
+            </div>
+          </button>
 
           {/* 3. Notifications */}
           <Link
@@ -230,6 +250,24 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
           </Link>
         </div>
       </nav>
+
+      {/* Modale recherche globale plein écran (mobile) */}
+      {isSearchOpen && (
+        <div className="sm:hidden fixed inset-0 z-[60] bg-black/95 backdrop-blur-md p-4 pt-safe animate-fadeIn">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="flex-1">
+              <GlobalSearchBar autoFocus onNavigate={() => setIsSearchOpen(false)} />
+            </div>
+            <button
+              onClick={() => setIsSearchOpen(false)}
+              aria-label="Fermer la recherche"
+              className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 };

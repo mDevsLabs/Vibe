@@ -26,6 +26,7 @@ import {
   Users,
   Undo2,
   FileText,
+  BarChart2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { ApiService } from '../../services/api';
@@ -43,6 +44,12 @@ import {
   notifyDraftRestored,
   type VibeDraft,
 } from '../../services/draftCookie';
+import {
+  saveDraftToServer,
+  loadDraftsFromServer,
+  deleteDraftFromServer,
+  serverDraftToLocal,
+} from '../../services/draftSync';
 import type { Post } from '../../types/vibe';
 
 type PostVisibility = 'public' | 'followers' | 'circle' | 'private';
@@ -161,6 +168,24 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   );
   const [showVisibility, setShowVisibility] = useState(false);
 
+  // Sondage intégré (2-4 options, 1h-7j)
+  const [showPoll, setShowPoll] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
+  const [pollDuration, setPollDuration] = useState<number>(24);
+  // Galerie : grille vs carrousel + réordonnancement drag & drop
+  const [carouselMode, setCarouselMode] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  // Co-auteur (collaboration)
+  const [showCollab, setShowCollab] = useState(false);
+  const [collabQuery, setCollabQuery] = useState('');
+  const [collabResults, setCollabResults] = useState<Array<{ id: number; username: string; display_name?: string; avatar_url?: string }>>([]);
+  const [collabSelected, setCollabSelected] = useState<{ username: string; display_name?: string; avatar_url?: string } | null>(null);
+  const [collabSearching, setCollabSearching] = useState(false);
+  // Brouillon serveur (multi-appareils) : id du brouillon synchronisé
+  const [serverDraftId, setServerDraftId] = useState<string | null>(null);
+  const serverDraftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // mAI : continuation automatique (Tab) + actions rapides sur le brouillon
   const [ghostSuggestion, setGhostSuggestion] = useState<string | null>(null);
   const [aiCompletionEnabled, setAiCompletionEnabled] = useState(true);
@@ -202,6 +227,48 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     const timer = setTimeout(flushDraft, 800);
     return () => clearTimeout(timer);
   }, [flushDraft]);
+
+  // Synchronisation serveur (multi-appareils) : debounce 2 s, en parallèle du cookie local
+  useEffect(() => {
+    if (isEditing) return;
+    if (serverDraftTimer.current) clearTimeout(serverDraftTimer.current);
+    serverDraftTimer.current = setTimeout(async () => {
+      if (!dirtyRef.current || !contentText.trim()) return;
+      const id = await saveDraftToServer({
+        id: serverDraftId || undefined,
+        html: editorRef.current?.getHTML() || '',
+        text: contentText,
+        visibility,
+        scheduled_at: scheduledAt || null,
+        ai_generated: isAIGenerated,
+      });
+      if (id) setServerDraftId(id);
+    }, 2000);
+    return () => {
+      if (serverDraftTimer.current) clearTimeout(serverDraftTimer.current);
+    };
+  }, [contentText, visibility, scheduledAt, isAIGenerated, isEditing, serverDraftId]);
+
+  // Au montage : fusionne cookie local + brouillons serveur (le plus récent gagne)
+  useEffect(() => {
+    if (isEditing || initialContent || initialMediaUrl) return;
+    let cancelled = false;
+    loadDraftsFromServer()
+      .then((drafts) => {
+        if (cancelled || drafts.length === 0) return;
+        const latest = drafts[0];
+        const local = readVibeDraft(user?.username || null);
+        const serverTs = latest.updated_at ? Date.parse(latest.updated_at) : 0;
+        if (!local || serverTs > (local.ts || 0)) {
+          setServerDraftId(latest.id);
+          setRecoverableDraft(serverDraftToLocal(latest, user?.username || null));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditing, initialContent, initialMediaUrl, user?.username]);
 
   // Fermeture d'onglet, rafraîchissement ou démontage : sauvegarde immédiate
   const flushDraftRef = useRef(flushDraft);
@@ -429,6 +496,42 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     setMediaList((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Réordonnancement drag & drop (HTML5 natif) : réordonne uploadedMediaList
+  const handleMediaDrop = (targetIndex: number) => {
+    if (dragIndex === null || dragIndex === targetIndex) {
+      setDragIndex(null);
+      return;
+    }
+    setMediaList((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(dragIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+    setDragIndex(null);
+  };
+
+  // Recherche co-auteur (debounce 300 ms)
+  useEffect(() => {
+    const q = collabQuery.trim();
+    if (!showCollab || q.length < 2) {
+      setCollabResults([]);
+      return;
+    }
+    setCollabSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const res = await ApiService.searchUsers(q);
+        setCollabResults((res?.users || []).slice(0, 5));
+      } catch {
+        setCollabResults([]);
+      } finally {
+        setCollabSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [collabQuery, showCollab]);
+
   const handleCaptionChange = (index: number, caption: string) => {
     setMediaList((prev) => prev.map((m, i) => (i === index ? { ...m, alt_text: caption } : m)));
   };
@@ -503,11 +606,31 @@ export const PostComposer: React.FC<PostComposerProps> = ({
         );
         window.dispatchEvent(new CustomEvent('vibe:post_updated'));
       } else {
+        // Sondage : 2-4 libellés non vides, durée 1h-7j
+        const cleanOptions = showPoll
+          ? pollOptions.map((o) => o.trim()).filter(Boolean).slice(0, 4)
+          : [];
+        const pollPayload =
+          showPoll && cleanOptions.length >= 2
+            ? {
+                question: pollQuestion.trim().slice(0, 120) || undefined,
+                options: cleanOptions,
+                duration_hours: Math.min(168, Math.max(1, pollDuration)),
+              }
+            : undefined;
+        if (showPoll && cleanOptions.length < 2) {
+          setError('Un sondage nécessite au moins 2 options.');
+          setIsSubmitting(false);
+          return;
+        }
         const res = await ApiService.createPost(html, primaryMedia, mediaAssets, {
           aiGenerated: isAIGenerated,
           quotedPostId: quotedPost?.id,
           scheduledAt: scheduledForPublish,
           visibility,
+          poll: pollPayload,
+          collaboratorUsername: collabSelected?.username,
+          mediaPositions: mediaList.map((_, i) => i),
         });
         if (res.post?.status === 'scheduled') {
           NotificationService.showInAppToast(
@@ -529,11 +652,23 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       setContentText('');
       dirtyRef.current = false;
       // Publication réussie : le brouillon sauvegardé n'a plus de raison d'être
-      if (!isEditing) clearVibeDraft();
+      if (!isEditing) {
+        clearVibeDraft();
+        if (serverDraftId) {
+          deleteDraftFromServer(serverDraftId).catch(() => {});
+          setServerDraftId(null);
+        }
+      }
       setMediaList([]);
       setQuotedPost(null);
       setScheduledAt('');
       setShowSchedule(false);
+      setShowPoll(false);
+      setPollQuestion('');
+      setPollOptions(['', '']);
+      setShowCollab(false);
+      setCollabSelected(null);
+      setCollabQuery('');
       setVisibility('public');
       setShowVisibility(false);
       setGhostSuggestion(null);
@@ -729,14 +864,45 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           {/* Multi-Media Previews (Up to 5 images / 2 videos) + légendes */}
           {mediaList.length > 0 && (
             <div className="space-y-2 shrink-0">
-              <div className={`grid gap-2 rounded-2xl overflow-hidden ${mediaList.length === 1 ? 'grid-cols-1' : mediaList.length === 2 ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
+              {mediaList.length > 1 && (
+                <div className="flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setCarouselMode(!carouselMode)}
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded-full border transition-colors ${
+                      carouselMode
+                        ? 'bg-white text-black border-white'
+                        : 'border-zinc-700 text-zinc-400 hover:text-white'
+                    }`}
+                    title={carouselMode ? 'Afficher en grille' : 'Afficher en carrousel'}
+                  >
+                    {carouselMode ? 'Grille' : 'Carrousel'}
+                  </button>
+                </div>
+              )}
+              <div className={carouselMode && mediaList.length > 1
+                ? 'flex gap-2 overflow-x-auto rounded-2xl pb-1 snap-x'
+                : `grid gap-2 rounded-2xl overflow-hidden ${mediaList.length === 1 ? 'grid-cols-1' : mediaList.length === 2 ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
                 {mediaList.map((m, idx) => (
-                  <div key={idx} className="relative group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 aspect-video flex items-center justify-center">
+                  <div
+                    key={m.url + idx}
+                    draggable
+                    onDragStart={() => setDragIndex(idx)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => handleMediaDrop(idx)}
+                    className={`relative group rounded-xl overflow-hidden border bg-zinc-950 aspect-video flex items-center justify-center cursor-grab active:cursor-grabbing ${
+                      carouselMode && mediaList.length > 1 ? 'min-w-[75%] snap-center' : ''
+                    } ${dragIndex === idx ? 'border-white opacity-60' : 'border-zinc-800'}`}
+                    title="Glisser-déposer pour réordonner"
+                  >
                     {m.media_type === 'video' ? (
                       <video src={m.url} controls className="w-full h-full object-cover" />
                     ) : (
                       <img src={m.url} alt={m.alt_text || 'Média'} className="w-full h-full object-cover" />
                     )}
+                    <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/80 text-white text-[10px] font-mono">
+                      {idx + 1}/{mediaList.length}
+                    </span>
                     <button
                       type="button"
                       onClick={() => handleRemoveMedia(idx)}
@@ -799,6 +965,136 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                     Fonctionnalité réservée aux abonnés <strong className="text-white">Plus · Pro · Max</strong>.
                   </span>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* Panneau sondage */}
+          {showPoll && !isEditing && (
+            <div className="p-3.5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                  <BarChart2 className="w-3.5 h-3.5" />
+                  Sondage
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowPoll(false)}
+                  className="p-1 rounded-full text-zinc-500 hover:text-white transition-colors"
+                  title="Retirer le sondage"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <input
+                type="text"
+                value={pollQuestion}
+                onChange={(e) => setPollQuestion(e.target.value)}
+                placeholder="Question (optionnel, 120 car.)"
+                maxLength={120}
+                className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+              />
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={opt}
+                    onChange={(e) => setPollOptions((prev) => prev.map((o, j) => (j === i ? e.target.value : o)))}
+                    placeholder={`Option ${i + 1}`}
+                    maxLength={80}
+                    className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                  />
+                  {pollOptions.length > 2 && (
+                    <button
+                      type="button"
+                      onClick={() => setPollOptions((prev) => prev.filter((_, j) => j !== i))}
+                      className="p-1.5 rounded-full text-zinc-500 hover:text-white transition-colors"
+                      title="Retirer cette option"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <div className="flex items-center gap-2">
+                {pollOptions.length < 4 && (
+                  <button
+                    type="button"
+                    onClick={() => setPollOptions((prev) => [...prev, ''])}
+                    className="text-[11px] font-bold text-zinc-300 hover:text-white transition-colors"
+                  >
+                    + Ajouter une option ({pollOptions.length}/4)
+                  </button>
+                )}
+                <select
+                  value={pollDuration}
+                  onChange={(e) => setPollDuration(Number(e.target.value))}
+                  className="ml-auto px-2 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none"
+                  title="Durée du sondage"
+                >
+                  <option value={1}>1 heure</option>
+                  <option value={24}>24 heures</option>
+                  <option value={72}>3 jours</option>
+                  <option value={168}>7 jours</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {/* Panneau co-auteur */}
+          {showCollab && !isEditing && (
+            <div className="p-3.5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5" />
+                  Co-auteur
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setShowCollab(false); setCollabSelected(null); setCollabQuery(''); }}
+                  className="p-1 rounded-full text-zinc-500 hover:text-white transition-colors"
+                  title="Retirer le co-auteur"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {collabSelected ? (
+                <div className="flex items-center gap-2.5">
+                  <ProfileAvatar src={collabSelected.avatar_url} alt={collabSelected.username} fallbackName={collabSelected.username} size="sm" className="border border-zinc-700" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold text-white truncate">@{collabSelected.username}</p>
+                    <p className="text-[10px] text-amber-400">Invitation en attente</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCollabSelected(null)}
+                    className="text-[11px] text-zinc-400 hover:text-white"
+                  >
+                    Retirer
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={collabQuery}
+                    onChange={(e) => setCollabQuery(e.target.value)}
+                    placeholder="Rechercher un utilisateur…"
+                    className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                  />
+                  {collabSearching && <p className="text-[11px] text-zinc-500">Recherche…</p>}
+                  {collabResults.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => setCollabSelected({ username: u.username, display_name: u.display_name, avatar_url: u.avatar_url })}
+                      className="w-full flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-zinc-900 transition-colors text-left"
+                    >
+                      <ProfileAvatar src={u.avatar_url} alt={u.username} fallbackName={u.username} size="sm" className="border border-zinc-700" />
+                      <span className="text-xs text-white font-semibold truncate">@{u.username}</span>
+                    </button>
+                  ))}
+                </>
               )}
             </div>
           )}
@@ -981,6 +1277,34 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                   {!canSchedule && (
                     <Lock className="w-2 h-2 absolute top-1 right-1 text-zinc-400" />
                   )}
+                </button>
+              )}
+
+              {/* Sondage */}
+              {!isEditing && (
+                <button
+                  type="button"
+                  onClick={() => setShowPoll(!showPoll)}
+                  className={`p-2 rounded-full transition-colors ${
+                    showPoll ? 'bg-white text-black' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+                  }`}
+                  title="Ajouter un sondage (2-4 options)"
+                >
+                  <BarChart2 className="w-4 h-4" />
+                </button>
+              )}
+
+              {/* Co-auteur */}
+              {!isEditing && (
+                <button
+                  type="button"
+                  onClick={() => setShowCollab(!showCollab)}
+                  className={`p-2 rounded-full transition-colors ${
+                    showCollab || collabSelected ? 'bg-white text-black' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+                  }`}
+                  title="Inviter un co-auteur"
+                >
+                  <Users className="w-4 h-4" />
                 </button>
               )}
 

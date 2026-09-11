@@ -123,6 +123,71 @@ export interface Post {
   status?: 'published' | 'scheduled';
   scheduled_at?: string | null;
   updated_at?: string;
+  /** Sondage intégré (2-4 options, vote unique modifiable). */
+  poll?: Poll | null;
+  /** Co-auteurs invités/acceptés (co-signature). */
+  collaborators?: PostCollaborator[];
+}
+
+/** Option d'un sondage de post. */
+export interface PollOption {
+  id: string;
+  label: string;
+  votes_count: number;
+  position: number;
+}
+
+/** Sondage intégré à un post. */
+export interface Poll {
+  id: string;
+  post_id: string;
+  question: string;
+  ends_at: string;
+  total_votes: number;
+  created_at?: string;
+  options: PollOption[];
+  /** Option votée par l'utilisateur courant (null si aucun vote). */
+  my_vote?: string | null;
+  expired?: boolean;
+}
+
+/** Co-auteur d'un post collaboratif. */
+export interface PostCollaborator {
+  username: string;
+  display_name?: string;
+  avatar_url?: string;
+  status: string;
+}
+
+/** Résultat de recherche globale unifiée. */
+export interface UnifiedSearchResult {
+  posts: Post[];
+  users: Array<{
+    id: number | string;
+    username: string;
+    display_name?: string;
+    avatar_url?: string;
+    is_verified?: boolean;
+    followers_count?: number;
+    bio?: string;
+  }>;
+  books: VibeBook[];
+  messages: DirectMessage[];
+  total: number;
+}
+
+/** Brouillon de post synchronisé serveur (multi-appareils). */
+export interface ServerDraft {
+  id: string;
+  user_id?: string | number;
+  html: string;
+  text: string;
+  visibility?: string;
+  scheduled_at?: string | null;
+  ai_generated?: boolean;
+  media_assets?: Array<{ url: string; media_type?: string; size?: number; alt_text?: string }>;
+  updated_at?: string;
+  created_at?: string;
 }
 
 export interface Comment {
@@ -158,6 +223,11 @@ export interface DirectMessage {
   reply_to_username?: string | null;
   reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
   created_at: string;
+  /** Message épinglé dans la conversation (bannière). */
+  is_pinned?: boolean;
+  /** Envoi programmé : 'scheduled' jusqu'à send_at, sinon 'sent'. */
+  status?: 'scheduled' | 'sent';
+  send_at?: string | null;
 }
 
 export interface DMConversation {
@@ -251,4 +321,12 @@ export interface UserSettings {
   message_bubble_shape?: string;
   /** Audience par défaut lors de la création d'une Vibe ('public', 'followers', 'circle') */
   default_vibe_audience?: 'public' | 'followers' | 'circle';
+  /** Thème programmé (JSON sérialisé {enabled, darkStart, darkEnd}). */
+  scheduled_theme?: string | null;
+  /** Onboarding guidé terminé. */
+  onboarding_completed?: boolean;
+  /** Contexte mAI opt-in : publications / DMs / livres. */
+  mai_context_posts?: boolean;
+  mai_context_dms?: boolean;
+  mai_context_books?: boolean;
 }

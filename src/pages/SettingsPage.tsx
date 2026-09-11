@@ -98,6 +98,8 @@ export const SettingsPage: React.FC = () => {
     setChatBackgroundTheme,
     messageBubbleShape,
     setMessageBubbleShape,
+    scheduledTheme,
+    setScheduledTheme,
   } = useTheme();
 
   // Feed customization
@@ -129,6 +131,10 @@ export const SettingsPage: React.FC = () => {
   const [circleMembers, setCircleMembers] = useState<Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string }>>([]);
   // Audience par défaut des publications Vibe ('public', 'followers', 'circle')
   const [defaultVibeAudience, setDefaultVibeAudience] = useState<'public' | 'followers' | 'circle'>('public');
+  // mAI — personnalisation du contexte (opt-in granulaire)
+  const [maiContextPosts, setMaiContextPosts] = useState(false);
+  const [maiContextDms, setMaiContextDms] = useState(false);
+  const [maiContextBooks, setMaiContextBooks] = useState(false);
   // Recherche & sélection des personnes autorisées dans le Cercle Privé
   const [circleSearchQuery, setCircleSearchQuery] = useState('');
   const [circleSearchResults, setCircleSearchResults] = useState<Array<{
@@ -193,6 +199,9 @@ export const SettingsPage: React.FC = () => {
           if (s.default_vibe_audience && ['public', 'followers', 'circle'].includes(s.default_vibe_audience)) {
             setDefaultVibeAudience(s.default_vibe_audience as any);
           }
+          if (s.mai_context_posts !== undefined) setMaiContextPosts(Boolean(s.mai_context_posts));
+          if (s.mai_context_dms !== undefined) setMaiContextDms(Boolean(s.mai_context_dms));
+          if (s.mai_context_books !== undefined) setMaiContextBooks(Boolean(s.mai_context_books));
         }
       } catch {}
     };
@@ -233,6 +242,9 @@ export const SettingsPage: React.FC = () => {
         chat_background_theme: chatBackgroundTheme,
         message_bubble_shape: messageBubbleShape,
         default_vibe_audience: defaultVibeAudience,
+        mai_context_posts: maiContextPosts,
+        mai_context_dms: maiContextDms,
+        mai_context_books: maiContextBooks,
       });
 
       // Miroir local immédiat (traduction des posts sans recharger les réglages)
@@ -476,6 +488,48 @@ export const SettingsPage: React.FC = () => {
                     );
                   })}
                 </div>
+              </div>
+
+              {/* Thème programmé (bascule automatique) */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-900">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-zinc-200 font-bold text-xs flex items-center gap-1.5">
+                      <Moon className="w-3 h-3 text-zinc-400" /> Thème programmé
+                    </p>
+                    <p className="text-zinc-500 text-[11px]">
+                      Bascule automatique clair/sombre (ex. 22h–7h = sombre). Inactif en mode « Système ».
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={scheduledTheme.enabled}
+                    onChange={(e) => setScheduledTheme({ ...scheduledTheme, enabled: e.target.checked })}
+                    className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+                {scheduledTheme.enabled && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <span className="text-[10px] font-mono uppercase text-zinc-500">Sombre dès</span>
+                      <input
+                        type="time"
+                        value={scheduledTheme.darkStart}
+                        onChange={(e) => setScheduledTheme({ ...scheduledTheme, darkStart: e.target.value || '22:00' })}
+                        className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10px] font-mono uppercase text-zinc-500">Clair dès</span>
+                      <input
+                        type="time"
+                        value={scheduledTheme.darkEnd}
+                        onChange={(e) => setScheduledTheme({ ...scheduledTheme, darkEnd: e.target.value || '07:00' })}
+                        className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                      />
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* Taille du texte */}
@@ -1416,6 +1470,48 @@ export const SettingsPage: React.FC = () => {
                     checked={postsAIGeneratedByDefault}
                     onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
                     className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+              </div>
+
+              {/* mAI — personnalisation du contexte (opt-in) */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-900">
+                <p className="text-zinc-200 font-bold text-xs flex items-center gap-1.5">
+                  <Cpu className="w-3 h-3 text-zinc-400" /> mAI — Personnalisation du contexte
+                </p>
+                <p className="text-zinc-500 text-[11px]">
+                  Autorisez mAI à connaître vos contenus pour des réponses plus personnalisées.
+                </p>
+                <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                  <span className="text-xs text-zinc-300">Mes publications</span>
+                  <input
+                    type="checkbox"
+                    checked={maiContextPosts}
+                    onChange={(e) => setMaiContextPosts(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer shrink-0"
+                  />
+                </div>
+                <div className="p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-zinc-300">Mes messages privés</span>
+                    <input
+                      type="checkbox"
+                      checked={maiContextDms}
+                      onChange={(e) => setMaiContextDms(e.target.checked)}
+                      className="w-4 h-4 accent-white cursor-pointer shrink-0"
+                    />
+                  </div>
+                  <p className="text-[11px] text-amber-400/90">
+                    ⚠️ Confidentiel : seuls des extraits tronqués sont transmis à mAI, jamais cités verbatim.
+                  </p>
+                </div>
+                <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                  <span className="text-xs text-zinc-300">Mes Vibe Books</span>
+                  <input
+                    type="checkbox"
+                    checked={maiContextBooks}
+                    onChange={(e) => setMaiContextBooks(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer shrink-0"
                   />
                 </div>
               </div>

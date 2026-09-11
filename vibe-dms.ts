@@ -73,6 +73,21 @@ async function ensureDMTables() {
     await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS reply_to_id UUID`.catch(() => {});
     await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE`.catch(() => {});
     await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`.catch(() => {});
+    // Messages programmés (même mécanique que les posts planifiés)
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent'`.catch(() => {});
+    await sql`ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ`.catch(() => {});
+    await sql`UPDATE direct_messages SET status = 'sent' WHERE status IS NULL`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_dm_scheduled ON direct_messages(status, send_at) WHERE status = 'scheduled'`.catch(() => {});
+    // Messages épinglés (max 3 par conversation, visibles des deux participants)
+    await sql`
+      CREATE TABLE IF NOT EXISTS dm_pinned_messages (
+        conversation_id UUID NOT NULL,
+        message_id UUID NOT NULL REFERENCES direct_messages(id) ON DELETE CASCADE,
+        pinned_by BIGINT NOT NULL,
+        pinned_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (conversation_id, message_id)
+      )
+    `.catch(() => {});
     dmTablesReady = true;
   } catch (err) {
     console.warn("[vibe-dms] ensureDMTables skipped:", (err as any)?.message);
@@ -262,6 +277,53 @@ async function generateMAIDMReply(sql: any, conversationId: string, senderId: nu
   }
 }
 
+/**
+ * Publication paresseuse des DMs programmés arrivés à échéance (miroir
+ * publishDuePosts) : appelée en tête de handleDMMessages, throttle 30 s.
+ */
+let lastDMpublishCheck = 0;
+export async function publishScheduledDMs(): Promise<void> {
+  const now = Date.now();
+  if (now - lastDMpublishCheck < 30_000) return;
+  lastDMpublishCheck = now;
+  try {
+    const sql = getDb();
+    const due = await sql`
+      UPDATE direct_messages
+      SET status = 'sent', send_at = NULL
+      WHERE status = 'scheduled' AND send_at IS NOT NULL AND send_at <= NOW()
+      RETURNING *
+    `.catch(() => []);
+    for (const m of due || []) {
+      try {
+        await sql`
+          INSERT INTO notifications (recipient_id, actor_id, type, message)
+          VALUES (${m.recipient_id}, ${m.sender_id}, 'dm', 'vous a envoyé un message')
+        `.catch(() => {});
+        await pushRealtimeEvent(Number(m.recipient_id), "dm_message", m);
+      } catch {}
+    }
+  } catch (err) {
+    console.warn("[vibe-dms] publishScheduledDMs skipped:", (err as any)?.message);
+  }
+}
+
+/** Résout l'UUID de conversation dm_conversations depuis (userId, partnerId). */
+async function resolveConversationId(sql: any, userId: number, partnerId: number): Promise<string | null> {
+  try {
+    const p1 = userId < partnerId ? userId : partnerId;
+    const p2 = userId < partnerId ? partnerId : userId;
+    const rows = await sql`
+      SELECT id FROM dm_conversations
+      WHERE participant_one_id = ${p1} AND participant_two_id = ${p2}
+      LIMIT 1
+    `;
+    return rows[0] ? String(rows[0].id) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn) {
   ensureDMTables();
   ensureMAIAccount();
@@ -343,6 +405,8 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const partnerId = Number(c.req.param("partnerId"));
 
       const sql = getDb();
+      await ensureDMTables().catch(() => {});
+      await publishScheduledDMs().catch(() => {});
       const messages = await sql`
         SELECT m.*, u.username as sender_username,
                r.content as reply_to_content,
@@ -391,8 +455,25 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
       await sql`
         UPDATE direct_messages SET is_read = TRUE, read_at = NOW()
         WHERE recipient_id = ${userId} AND sender_id = ${partnerId} AND is_read = FALSE
+        AND (status IS NULL OR status = 'sent')
       `;
-      return c.json({ messages });
+      // Messages épinglés de la conversation (aperçus, max 3)
+      let pinned_messages: any[] = [];
+      try {
+        const conversationId = await resolveConversationId(sql, userId, partnerId);
+        if (conversationId) {
+          pinned_messages = await sql`
+            SELECT m.*, u.username as sender_username
+            FROM dm_pinned_messages pm
+            JOIN direct_messages m ON m.id = pm.message_id
+            JOIN users u ON u.id = m.sender_id
+            WHERE pm.conversation_id = ${conversationId}::uuid
+            ORDER BY pm.pinned_at ASC
+            LIMIT 3
+          `.catch(() => []);
+        }
+      } catch {}
+      return c.json({ messages, pinned_messages });
     } catch (err: any) {
       return c.json({ error: "Erreur messages." }, 500);
     }
@@ -408,14 +489,25 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
-      const { recipient_id, content, reply_to_id } = await c.req.json();
+      const { recipient_id, content, reply_to_id, send_at } = await c.req.json();
       const recId = Number(recipient_id);
 
       if (!recId || !content || !content.trim()) {
         return c.json({ error: "Destinataire et contenu requis." }, 400);
       }
 
+      // Envoi programmé : date future → status 'scheduled', pas de SSE immédiat
+      let scheduledAt: string | null = null;
+      if (send_at) {
+        const ts = Date.parse(String(send_at));
+        if (Number.isNaN(ts) || ts <= Date.now()) {
+          return c.json({ error: "Date d'envoi invalide ou passée." }, 400);
+        }
+        scheduledAt = new Date(ts).toISOString();
+      }
+
       const sql = getDb();
+      await ensureDMTables().catch(() => {});
 
       // Blocage : impossible d'envoyer si l'un des deux a bloqué l'autre
       const blockCheck = await sql`
@@ -471,11 +563,20 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
 
       const conversationId = convRows[0].id;
       const validReplyTo = typeof reply_to_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reply_to_id) ? reply_to_id : null;
-      const msg = await sql`
+      const msg = scheduledAt ? await sql`
+        INSERT INTO direct_messages (conversation_id, sender_id, recipient_id, content, reply_to_id, status, send_at)
+        VALUES (${conversationId}::uuid, ${userId}, ${recId}, ${content.trim()}, ${validReplyTo}, 'scheduled', ${scheduledAt}::timestamptz)
+        RETURNING *
+      ` : await sql`
         INSERT INTO direct_messages (conversation_id, sender_id, recipient_id, content, reply_to_id)
         VALUES (${conversationId}::uuid, ${userId}, ${recId}, ${content.trim()}, ${validReplyTo})
         RETURNING *
       `;
+
+      // Message programmé : réponse immédiate, pas de notification ni SSE
+      if (scheduledAt) {
+        return c.json({ success: true, message: msg[0], scheduled: true }, 201);
+      }
 
       try {
         await sql`
@@ -542,6 +643,139 @@ export function registerVibeDMsRoutes(app: Hono, registerMulti: RegisterMultiFn)
   };
 
   registerMulti("post", ["/api/vibe/dms/messages", "/vibe/dms/messages", "/v1/dms/messages"], handleSendDM);
+
+  // 4c. PIN / UNPIN MESSAGE (max 3 par conversation, adressage partnerId)
+  const handlePinMessage = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const partnerId = Number(c.req.param("partnerId"));
+      if (!partnerId || partnerId === userId) return c.json({ error: "Conversation invalide." }, 400);
+      const body = await c.req.json().catch(() => ({}));
+      const messageId = String(body?.message_id || "");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId)) {
+        return c.json({ error: "Message invalide." }, 400);
+      }
+      const sql = getDb();
+      await ensureDMTables().catch(() => {});
+      const conversationId = await resolveConversationId(sql, userId, partnerId);
+      if (!conversationId) return c.json({ error: "Conversation introuvable." }, 404);
+      const msgRows = await sql`SELECT id FROM direct_messages WHERE id = ${messageId}::uuid AND conversation_id = ${conversationId}::uuid LIMIT 1`;
+      if (msgRows.length === 0) return c.json({ error: "Message introuvable dans cette conversation." }, 404);
+      const countRows = await sql`SELECT COUNT(*) AS n FROM dm_pinned_messages WHERE conversation_id = ${conversationId}::uuid`;
+      if (Number(countRows[0]?.n || 0) >= 3) {
+        return c.json({ error: "Maximum 3 messages épinglés par conversation.", code: "PIN_LIMIT" }, 403);
+      }
+      await sql`
+        INSERT INTO dm_pinned_messages (conversation_id, message_id, pinned_by)
+        VALUES (${conversationId}::uuid, ${messageId}::uuid, ${userId})
+        ON CONFLICT (conversation_id, message_id) DO NOTHING
+      `;
+      try {
+        await pushRealtimeEvent(partnerId, "dm_pin_updated", { conversation_id: conversationId, message_id: messageId, pinned: true });
+        await pushRealtimeEvent(userId, "dm_pin_updated", { conversation_id: conversationId, message_id: messageId, pinned: true });
+      } catch {}
+      return c.json({ success: true, pinned: true });
+    } catch (err: any) {
+      return c.json({ error: "Erreur épinglage." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/dms/conversations/:partnerId/pin", "/vibe/dms/conversations/:partnerId/pin", "/v1/dms/conversations/:partnerId/pin", "/dms/conversations/:partnerId/pin"], handlePinMessage);
+
+  const handleUnpinMessage = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const partnerId = Number(c.req.param("partnerId"));
+      const messageId = String(c.req.param("messageId") || "");
+      if (!partnerId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId)) {
+        return c.json({ error: "Paramètres invalides." }, 400);
+      }
+      const sql = getDb();
+      const conversationId = await resolveConversationId(sql, userId, partnerId);
+      if (!conversationId) return c.json({ error: "Conversation introuvable." }, 404);
+      await sql`DELETE FROM dm_pinned_messages WHERE conversation_id = ${conversationId}::uuid AND message_id = ${messageId}::uuid`;
+      try {
+        await pushRealtimeEvent(partnerId, "dm_pin_updated", { conversation_id: conversationId, message_id: messageId, pinned: false });
+        await pushRealtimeEvent(userId, "dm_pin_updated", { conversation_id: conversationId, message_id: messageId, pinned: false });
+      } catch {}
+      return c.json({ success: true, pinned: false });
+    } catch (err: any) {
+      return c.json({ error: "Erreur désépinglage." }, 500);
+    }
+  };
+
+  registerMulti("delete", ["/api/vibe/dms/conversations/:partnerId/pin/:messageId", "/vibe/dms/conversations/:partnerId/pin/:messageId", "/v1/dms/conversations/:partnerId/pin/:messageId", "/dms/conversations/:partnerId/pin/:messageId"], handleUnpinMessage);
+
+  // 4d. SEARCH IN CONVERSATION (ILIKE sur content, paire user/partner)
+  const handleSearchDMMessages = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const partnerId = Number(c.req.param("partnerId"));
+      const q = (c.req.query("q") || "").trim();
+      if (!partnerId || !q) return c.json({ messages: [] });
+      const sql = getDb();
+      const messages = await sql`
+        SELECT m.id, m.conversation_id, m.sender_id, m.recipient_id, m.content, m.is_read, m.created_at
+        FROM direct_messages m
+        WHERE ((m.sender_id = ${userId} AND m.recipient_id = ${partnerId})
+           OR (m.sender_id = ${partnerId} AND m.recipient_id = ${userId}))
+          AND m.content ILIKE ('%' || ${q} || '%')
+          AND (m.status IS NULL OR m.status = 'sent')
+        ORDER BY m.created_at DESC
+        LIMIT 30
+      `.catch(() => []);
+      return c.json({ messages });
+    } catch (err: any) {
+      return c.json({ error: "Erreur recherche conversation." }, 500);
+    }
+  };
+
+  registerMulti("get", ["/api/vibe/dms/messages/:partnerId/search", "/vibe/dms/messages/:partnerId/search", "/v1/dms/messages/:partnerId/search", "/dms/messages/:partnerId/search"], handleSearchDMMessages);
+
+  // 4e. MARK CONVERSATION UNREAD (re-passe le dernier message reçu en non lu)
+  const handleMarkUnread = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const partnerId = Number(c.req.param("partnerId"));
+      if (!partnerId) return c.json({ error: "Conversation invalide." }, 400);
+      const sql = getDb();
+      const last = await sql`
+        SELECT id FROM direct_messages
+        WHERE recipient_id = ${userId} AND sender_id = ${partnerId}
+          AND (status IS NULL OR status = 'sent')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      if (last.length > 0) {
+        await sql`UPDATE direct_messages SET is_read = FALSE, read_at = NULL WHERE id = ${last[0].id}::uuid`;
+      } else {
+        // Aucun message reçu : marquer le dernier envoyé pour rouvrir le fil côté client
+        const own = await sql`
+          SELECT id FROM direct_messages
+          WHERE sender_id = ${userId} AND recipient_id = ${partnerId}
+          ORDER BY created_at DESC LIMIT 1
+        `;
+        if (own.length === 0) return c.json({ error: "Conversation introuvable." }, 404);
+      }
+      return c.json({ success: true, unread: true });
+    } catch (err: any) {
+      return c.json({ error: "Erreur marquage non lu." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/dms/conversations/:partnerId/mark-unread", "/vibe/dms/conversations/:partnerId/mark-unread", "/v1/dms/conversations/:partnerId/mark-unread", "/dms/conversations/:partnerId/mark-unread"], handleMarkUnread);
 
   // 4b. REACT TO A DM MESSAGE (toggle emoji)
   const handleReactDM = async (c: any) => {

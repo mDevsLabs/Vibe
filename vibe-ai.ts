@@ -174,12 +174,46 @@ export function registerVibeAIRoutes(app: Hono) {
 
       const body = await c.req.json().catch(() => ({} as any));
       const postId = String(body?.post_id || "");
+      const rawText = String(body?.text || "").trim();
       const targetLang = String(body?.target_lang || "fr").toLowerCase().slice(0, 8);
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId)) {
-        return c.json({ error: "Identifiant de post invalide." }, 400);
-      }
       if (!rateLimit(`ai-translate:${userId}`, 20, 60_000)) {
         return c.json({ error: "Trop de traductions. Patientez un instant." }, 429);
+      }
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId);
+      // Traduction de texte brut (ex : message DM) : pas de cache post_translations
+      if (!isUuid) {
+        if (!rawText) {
+          return c.json({ error: "Identifiant de post invalide." }, 400);
+        }
+        if (rawText.length > 8000) {
+          return c.json({ error: "Texte trop long (8000 caractères max)." }, 400);
+        }
+        const altTargetRaw = targetLang.slice(0, 2) === "FR" ? "EN-US" : "FR";
+        const systemRaw =
+          "Tu es le moteur de traduction du réseau social Vibe. On te donne un message privé. " +
+          "1) Détecte sa langue d'origine. " +
+          `2) Traduis-le fidèlement en ${langLabel(targetLang)} (ou en ${langLabel(altTargetRaw)} s'il est déjà rédigé en ${langLabel(targetLang)}) : sens EXACT, ton préservé. ` +
+          "Conserve les mentions @, émojis et liens tels quels. " +
+          'Réponds UNIQUEMENT par un objet JSON strict : {"detected_language": "<langue d\'origine en français>", "target_language": "<langue cible>", "translation": "<traduction>"} — sans markdown ni commentaire.';
+        const sqlRaw = getDb();
+        const raw = await MAIAgentFleet.callOpenRouter(userId, systemRaw, rawText);
+        if (!raw) return c.json({ error: "mAI est indisponible pour le moment (modèle ou clé IA)." }, 502);
+        await debitWeeklyTokens(sqlRaw, userId, rawText.length + raw.length);
+        const parsedRaw = extractJsonObject(raw);
+        let detectedRaw = "";
+        let translationRaw = "";
+        let effectiveTargetRaw = targetLang;
+        if (parsedRaw && typeof parsedRaw.translation === "string" && parsedRaw.translation.trim()) {
+          detectedRaw = String(parsedRaw.detected_language || "").trim();
+          translationRaw = cleanLlmText(parsedRaw.translation);
+          if (parsedRaw.target_language && String(parsedRaw.target_language).toLowerCase().includes("anglais")) {
+            effectiveTargetRaw = "EN-US";
+          }
+        } else {
+          translationRaw = cleanLlmText(raw);
+        }
+        if (!translationRaw) return c.json({ error: "Traduction vide." }, 502);
+        return c.json({ success: true, translation: translationRaw, detected_language: detectedRaw, target_lang: effectiveTargetRaw, cached: false });
       }
 
       const sql = getDb();

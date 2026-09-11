@@ -25,7 +25,9 @@ import {
   Ban,
   Users,
   Bell,
-  BellRing
+  BellRing,
+  BarChart2,
+  CalendarClock
 } from 'lucide-react';
 import type { Profile, Post } from '../types/vibe';
 import { ApiService } from '../services/api';
@@ -33,6 +35,7 @@ import { useAuth } from '../context/AuthContext';
 import { NotificationService } from '../services/notificationService';
 import { haptics } from '../services/haptics';
 import { PostCard } from '../components/feed/PostCard';
+import { ScheduledCalendar } from '../components/feed/ScheduledCalendar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { RichContent } from '../components/common/RichContent';
@@ -63,7 +66,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [isLoadingLiked, setIsLoadingLiked] = useState(false);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
+  const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes' | 'stats' | 'scheduled'>('posts');
+  const [creatorStats, setCreatorStats] = useState<{ total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number; top_post: Post | null; daily: Array<{ day: string; views: number; posts: number }> } | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
   const [isFollowing, setIsFollowing] = useState(false);
   const [isPostNotifOn, setIsPostNotifOn] = useState(false);
   // Cercle Privé : ce membre fait-il partie de MON cercle ?
@@ -161,6 +166,19 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       });
     }
   }, [activeTab, targetUsername, likedPosts.length]);
+
+  // Charger les stats créateur à l'ouverture de l'onglet 'stats' (soi-même)
+  useEffect(() => {
+    if (activeTab === 'stats' && isSelf && !creatorStats && !isLoadingStats) {
+      queueMicrotask(() => {
+        setIsLoadingStats(true);
+        ApiService.getCreatorStats()
+          .then((res) => setCreatorStats(res))
+          .catch(() => setCreatorStats(null))
+          .finally(() => setIsLoadingStats(false));
+      });
+    }
+  }, [activeTab, isSelf, creatorStats, isLoadingStats]);
 
   const handleFollowToggle = async () => {
     haptics.medium();
@@ -692,7 +710,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       )}
 
       {/* Sub-Tabs */}
-      <div className="flex border-b border-zinc-800 bg-zinc-950">
+      <div className="flex border-b border-zinc-800 bg-zinc-950 overflow-x-auto">
         {(['posts', 'replies', 'media', 'likes'] as const).map((tab) => (
           <button
             key={tab}
@@ -700,7 +718,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
               haptics.light();
               setActiveTab(tab);
             }}
-            className="flex-1 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+            className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
           >
             <span className={activeTab === tab ? 'text-white' : 'text-zinc-500'}>
               {tab === 'posts' ? 'Vibes' : tab === 'replies' ? 'Réponses' : tab === 'media' ? 'Médias' : 'J’aime'}
@@ -710,9 +728,113 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             )}
           </button>
         ))}
+        {isSelf && (
+          <>
+            <button
+              onClick={() => {
+                haptics.light();
+                setActiveTab('stats');
+              }}
+              className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+              title="Statistiques créateur (30 jours)"
+            >
+              <span className={`inline-flex items-center gap-1 ${activeTab === 'stats' ? 'text-white' : 'text-zinc-500'}`}>
+                <BarChart2 className="w-3.5 h-3.5" />
+                Stats
+              </span>
+              {activeTab === 'stats' && (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )}
+            </button>
+            <button
+              onClick={() => {
+                haptics.light();
+                setActiveTab('scheduled');
+              }}
+              className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+              title="Posts programmés"
+            >
+              <span className={`inline-flex items-center gap-1 ${activeTab === 'scheduled' ? 'text-white' : 'text-zinc-500'}`}>
+                <CalendarClock className="w-3.5 h-3.5" />
+                Programmés
+              </span>
+              {activeTab === 'scheduled' && (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )}
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Real Posts Stream from DB */}
+      {/* Panneau statistiques créateur (soi-même, 30 jours) */}
+      {isSelf && activeTab === 'stats' && (
+        <div className="p-4">
+          {isLoadingStats ? (
+            <div className="p-12 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
+              <Loader2 className="w-6 h-6 animate-spin text-zinc-500" />
+              <span>Chargement des statistiques…</span>
+            </div>
+          ) : !creatorStats ? (
+            <p className="p-12 text-center text-zinc-500 text-xs">Statistiques indisponibles.</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {[
+                  { label: 'Vues (30 j)', value: creatorStats.total_views },
+                  { label: 'Likes (30 j)', value: creatorStats.total_likes },
+                  { label: 'Reposts (30 j)', value: creatorStats.total_reposts },
+                  { label: 'Réponses (30 j)', value: creatorStats.total_replies },
+                  { label: 'Posts (30 j)', value: creatorStats.posts_count },
+                ].map((c) => (
+                  <div key={c.label} className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                    <p className="text-lg font-bold text-white">{c.value}</p>
+                    <p className="text-[11px] text-zinc-500">{c.label}</p>
+                  </div>
+                ))}
+              </div>
+              {creatorStats.top_post && (
+                <div className="mt-3 rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                  <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 mb-1">
+                    Post le plus engagé
+                  </p>
+                  <PostCard
+                    post={creatorStats.top_post}
+                    onOpenThread={onOpenThread}
+                    onOpenProfile={onOpenProfile}
+                  />
+                </div>
+              )}
+              {creatorStats.daily?.length > 0 && (
+                <>
+                  <p className="mt-4 mb-2 text-[11px] font-mono uppercase tracking-wider text-zinc-500">
+                    Vues quotidiennes
+                  </p>
+                  <div className="flex items-end gap-1.5 h-24 rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                    {creatorStats.daily.map((d, i) => {
+                      const max = Math.max(1, ...creatorStats.daily.map((x) => Number(x.views || 0)));
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-center justify-end h-full gap-1">
+                          <div
+                            className="w-full rounded-t-md bg-white/80"
+                            style={{ height: `${Math.max(4, (Number(d.views || 0) / max) * 100)}%` }}
+                            title={`${d.day} : ${d.views} vues`}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Panneau posts programmés (soi-même, calendrier drag & drop) */}
+      {isSelf && activeTab === 'scheduled' && <ScheduledCalendar />}
+
+      {/* Real Posts Stream from DB (masqué sur les onglets stats/programmés) */}
+      {activeTab !== 'stats' && activeTab !== 'scheduled' && (
       <div className="divide-y divide-zinc-900">
         {(isLoadingProfile || (activeTab === 'likes' && isLoadingLiked)) && (
           <div className="p-16 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
@@ -762,6 +884,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Edit Profile & Avatar Modal (File Uploads Only, No URL input) */}
       {isEditOpen && (

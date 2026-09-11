@@ -49,6 +49,7 @@ import { formatCompactCount } from '../../algorithms';
 import { haptics } from '../../services/haptics';
 import { PostShareModal } from './PostShareModal';
 import { BookPickerModal } from './BookPickerModal';
+import { PostStatsModal } from './PostStatsModal';
 
 interface PostCardProps {
   post: Post;
@@ -104,6 +105,55 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   // Livre : « Vibe préférée » enregistrée dans un Livre (favoris durables)
   const [showBookPicker, setShowBookPicker] = useState(false);
   const [isInABook, setIsInABook] = useState(Boolean((post as any).in_books > 0));
+  // Sondage intégré (vote unique modifiable)
+  const [poll, setPoll] = useState(post.poll || null);
+  const [isVoting, setIsVoting] = useState(false);
+  // Statistiques créateur (auteur uniquement)
+  const [showStats, setShowStats] = useState(false);
+  // Collaboration : réponse à une invitation en attente
+  const [collabStatus, setCollabStatus] = useState<string | null>(() => {
+    const mine = (post.collaborators || []).find((c) => c.username === user?.username);
+    return mine ? mine.status : null;
+  });
+
+  // Resynchronise le sondage quand le parent recharge le post
+  useEffect(() => {
+    setPoll(post.poll || null);
+  }, [post.id, post.poll]);
+
+  const handleVote = async (e: React.MouseEvent, optionId: string) => {
+    e.stopPropagation();
+    if (isVoting || !poll || poll.expired) return;
+    setIsVoting(true);
+    try {
+      const res = await ApiService.votePoll(post.id, optionId);
+      if (res?.poll) {
+        setPoll(res.poll);
+        haptics.success();
+      }
+    } catch (err: any) {
+      NotificationService.showInAppToast('Vote impossible', err?.message || 'Réessayez dans un instant.', 'error');
+    } finally {
+      setIsVoting(false);
+    }
+  };
+
+  const handleCollabRespond = async (e: React.MouseEvent, accept: boolean) => {
+    e.stopPropagation();
+    try {
+      const res = await ApiService.respondToCollab(post.id, accept);
+      setCollabStatus(res?.status || (accept ? 'accepted' : 'declined'));
+      haptics.success();
+      NotificationService.showInAppToast(
+        accept ? 'Co-signature acceptée' : 'Invitation déclinée',
+        accept ? 'Votre avatar apparaît désormais sur ce post.' : "L'invitation a été déclinée.",
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:post_updated'));
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Réponse impossible.', 'error');
+    }
+  };
 
   // État du cœur flottant pour double-tap mobile
   const [heartFloatPos, setHeartFloatPos] = useState<{ x: number; y: number } | null>(null);
@@ -461,6 +511,25 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             fallbackName={post.username}
             className="border border-zinc-800 hover:opacity-90 transition-opacity"
           />
+          {/* Co-auteurs : avatars empilés */}
+          {(post.collaborators || []).filter((c) => c.status === 'accepted' || c.username === user?.username).length > 0 && (
+            <div className="flex -mt-2 ml-4">
+              {(post.collaborators || [])
+                .filter((c) => c.status === 'accepted' || c.username === user?.username)
+                .slice(0, 2)
+                .map((c) => (
+                  <span key={c.username} className="-ml-2 rounded-full ring-2 ring-black" title={`Co-signé par @${c.username}`}>
+                    <ProfileAvatar
+                      src={c.avatar_url}
+                      alt={c.username}
+                      size="xs"
+                      fallbackName={c.username}
+                      className="border border-zinc-700"
+                    />
+                  </span>
+                ))}
+            </div>
+          )}
         </div>
 
         {/* Content Container */}
@@ -526,6 +595,14 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                 <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-violet-500/15 border border-violet-500/30 text-violet-500 font-semibold">
                   <Sparkles className="w-2.5 h-2.5" />
                   Créé avec l'IA
+                </span>
+              )}
+
+              {/* Badge co-signature */}
+              {(post.collaborators || []).some((c) => c.status === 'accepted') && (
+                <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300 font-semibold" title={(post.collaborators || []).filter((c) => c.status === 'accepted').map((c) => `@${c.username}`).join(', ')}>
+                  <Users className="w-2.5 h-2.5" />
+                  Co-signé
                 </span>
               )}
             </div>
@@ -682,6 +759,21 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                     </button>
                   )}
 
+                  {/* Statistiques créateur (auteur uniquement) */}
+                  {isAuthor && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowMenu(false);
+                        setShowStats(true);
+                      }}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                    >
+                      <BarChart2 className="w-3.5 h-3.5 text-white" />
+                      <span>Statistiques</span>
+                    </button>
+                  )}
+
                   {isAuthor && (
                     <button
                       onClick={handleDelete}
@@ -767,6 +859,73 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                 <Languages className="w-3.5 h-3.5" />
                 <span>Traduire</span>
               </button>
+            </div>
+          )}
+
+          {/* Invitation de co-signature en attente (invité uniquement) */}
+          {collabStatus === 'pending' && (
+            <div onClick={(e) => e.stopPropagation()} className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3 flex items-center gap-2.5">
+              <Users className="w-4 h-4 text-white shrink-0" />
+              <p className="flex-1 text-xs text-zinc-300">
+                <strong className="text-white">@{post.username}</strong> vous invite à co-signer ce post.
+              </p>
+              <button
+                onClick={(e) => handleCollabRespond(e, true)}
+                className="px-3 py-1.5 rounded-full bg-white text-black text-xs font-bold hover:brightness-90 transition-all"
+              >
+                Accepter
+              </button>
+              <button
+                onClick={(e) => handleCollabRespond(e, false)}
+                className="px-3 py-1.5 rounded-full border border-zinc-700 text-zinc-300 text-xs font-bold hover:text-white transition-all"
+              >
+                Décliner
+              </button>
+            </div>
+          )}
+
+          {/* Sondage intégré */}
+          {poll && (
+            <div onClick={(e) => e.stopPropagation()} className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3 space-y-2">
+              <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                <BarChart2 className="w-3.5 h-3.5" />
+                {poll.question}
+              </p>
+              <div className="space-y-1.5">
+                {poll.options.map((opt) => {
+                  const total = Math.max(1, Number(poll.total_votes || 0));
+                  const pct = Math.round((Number(opt.votes_count || 0) / total) * 100);
+                  const mine = poll.my_vote === String(opt.id);
+                  const voted = Boolean(poll.my_vote);
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={(e) => handleVote(e, String(opt.id))}
+                      disabled={isVoting || poll.expired}
+                      className={`relative w-full text-left px-3 py-2 rounded-xl border text-xs transition-all overflow-hidden disabled:cursor-default ${
+                        mine ? 'border-white' : 'border-zinc-800 hover:border-zinc-600'
+                      }`}
+                      title={poll.expired ? 'Sondage expiré' : voted ? 'Cliquer pour changer de vote' : 'Voter'}
+                    >
+                      {voted && (
+                        <span
+                          className={`absolute inset-y-0 left-0 ${mine ? 'bg-white/20' : 'bg-zinc-800'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      )}
+                      <span className="relative flex items-center justify-between gap-2">
+                        <span className="text-zinc-100 font-semibold truncate">{opt.label}</span>
+                        {voted && <span className="text-zinc-400 font-mono shrink-0">{pct} %</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] text-zinc-500">
+                {poll.total_votes} vote{(poll.total_votes || 0) > 1 ? 's' : ''}
+                {' · '}
+                {poll.expired ? 'Expiré' : `Expire le ${new Date(poll.ends_at).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`}
+              </p>
             </div>
           )}
 
@@ -1009,6 +1168,11 @@ export const PostCardBase: React.FC<PostCardProps> = ({
           onClose={() => setShowBookPicker(false)}
           onSavedBooksChange={(ids) => setIsInABook(ids.length > 0)}
         />
+      )}
+
+      {/* Modale statistiques créateur (auteur uniquement) */}
+      {showStats && (
+        <PostStatsModal postId={post.id} onClose={() => setShowStats(false)} />
       )}
     </article>
   );

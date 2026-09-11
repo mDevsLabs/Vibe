@@ -17,6 +17,9 @@ import type {
   UserSettings,
   User,
   VibeBook,
+  Poll,
+  UnifiedSearchResult,
+  ServerDraft,
 } from '../types/vibe';
 import { AppStorage } from './storageAdapter';
 
@@ -391,6 +394,226 @@ export class ApiService {
     }
   }
 
+  /** Recherche globale unifiée : posts + utilisateurs + livres + DMs (limit/section). */
+  public static async searchUnified(q: string, limit: number = 5): Promise<UnifiedSearchResult> {
+    try {
+      return await this.cachedRequest<UnifiedSearchResult>(`/v1/search/unified?q=${encodeURIComponent(q)}&limit=${limit}`, 15000);
+    } catch {
+      try {
+        return await this.request<UnifiedSearchResult>(`/api/vibe/search/unified?q=${encodeURIComponent(q)}&limit=${limit}`);
+      } catch {
+        return { posts: [], users: [], books: [], messages: [], total: 0 };
+      }
+    }
+  }
+
+  /** Vote (modifiable) à un sondage de post. */
+  public static async votePoll(postId: string, optionId: string): Promise<{ success: boolean; poll: Poll }> {
+    this.invalidateCache('/v1/posts/');
+    try {
+      return await this.request(`/v1/posts/${postId}/poll/vote`, {
+        method: 'POST',
+        body: JSON.stringify({ option_id: optionId }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/posts/${postId}/poll/vote`, {
+        method: 'POST',
+        body: JSON.stringify({ option_id: optionId }),
+      });
+    }
+  }
+
+  /** Statistiques créateur d'un post (auteur uniquement). */
+  public static async getPostStats(postId: string): Promise<{ views: number; likes: number; reposts: number; replies: number; bookmarks: number; engagement_rate: number; reach_7d: unknown[]; top_referrers: unknown[] }> {
+    try {
+      return await this.cachedRequest(`/v1/posts/${postId}/stats`, 30000);
+    } catch {
+      return await this.request(`/api/vibe/posts/${postId}/stats`);
+    }
+  }
+
+  /** Statistiques créateur agrégées (30 derniers jours). */
+  public static async getCreatorStats(): Promise<{ total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number; top_post: Post | null; daily: Array<{ day: string; views: number; posts: number }> }> {
+    try {
+      return await this.cachedRequest('/v1/users/me/creator-stats', 60000);
+    } catch {
+      return await this.request('/api/vibe/users/me/creator-stats');
+    }
+  }
+
+  /** Traduction d'un texte brut (ex : message DM) via /v1/ai/translate. */
+  public static async translateText(text: string, targetLang: string): Promise<TranslateResult> {
+    try {
+      return await this.request('/v1/ai/translate', {
+        method: 'POST',
+        body: JSON.stringify({ text, target_lang: targetLang }),
+      });
+    } catch {
+      return await this.request('/api/vibe/ai/translate', {
+        method: 'POST',
+        body: JSON.stringify({ text, target_lang: targetLang }),
+      });
+    }
+  }
+
+  /** Suggestions de comptes pour l'onboarding (10 populaires non suivis). */
+  public static async getOnboardingSuggestions(): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number; bio?: string }> }> {
+    try {
+      return await this.cachedRequest('/v1/onboarding/suggestions', 60000);
+    } catch {
+      try {
+        return await this.request('/api/vibe/onboarding/suggestions');
+      } catch {
+        return { users: [] };
+      }
+    }
+  }
+
+  /** Marque l'onboarding comme terminé. */
+  public static async completeOnboarding(): Promise<{ success: boolean }> {
+    try {
+      return await this.request('/v1/onboarding/complete', { method: 'POST' });
+    } catch {
+      return await this.request('/api/vibe/onboarding/complete', { method: 'POST' });
+    }
+  }
+
+  /** Épingle un message dans une conversation (max 3, adressage partnerId). */
+  public static async pinMessage(partnerId: string | number, messageId: string): Promise<{ success: boolean; pinned: boolean }> {
+    this.invalidateCache('/dms/');
+    try {
+      return await this.request(`/v1/dms/conversations/${partnerId}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageId }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/dms/conversations/${partnerId}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageId }),
+      });
+    }
+  }
+
+  /** Désépingle un message d'une conversation. */
+  public static async unpinMessage(partnerId: string | number, messageId: string): Promise<{ success: boolean; pinned: boolean }> {
+    this.invalidateCache('/dms/');
+    try {
+      return await this.request(`/v1/dms/conversations/${partnerId}/pin/${messageId}`, { method: 'DELETE' });
+    } catch {
+      return await this.request(`/api/vibe/dms/conversations/${partnerId}/pin/${messageId}`, { method: 'DELETE' });
+    }
+  }
+
+  /** Recherche plein texte dans une conversation DM. */
+  public static async searchDMMessages(partnerId: string | number, q: string): Promise<{ messages: DirectMessage[] }> {
+    try {
+      return await this.request(`/v1/dms/messages/${partnerId}/search?q=${encodeURIComponent(q)}`);
+    } catch {
+      try {
+        return await this.request(`/api/vibe/dms/messages/${partnerId}/search?q=${encodeURIComponent(q)}`);
+      } catch {
+        return { messages: [] };
+      }
+    }
+  }
+
+  /** Marque manuellement une conversation comme non lue. */
+  public static async markConversationUnread(partnerId: string | number): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    try {
+      return await this.request(`/v1/dms/conversations/${partnerId}/mark-unread`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/dms/conversations/${partnerId}/mark-unread`, { method: 'POST' });
+    }
+  }
+
+  /** Posts programmés de l'utilisateur courant (tri scheduled_at ASC). */
+  public static async getScheduledPosts(): Promise<{ posts: Post[] }> {
+    try {
+      return await this.cachedRequest<{ posts: Post[] }>('/v1/posts/scheduled', 15000);
+    } catch {
+      try {
+        return await this.request<{ posts: Post[] }>('/api/vibe/posts/scheduled');
+      } catch {
+        return { posts: [] };
+      }
+    }
+  }
+
+  /** Replanifie un post (scheduled_at=null → publie aussitôt). */
+  public static async reschedulePost(postId: string, scheduledAt: string | null): Promise<{ success: boolean; status?: string; scheduled_at?: string }> {
+    this.invalidateCache('/v1/posts/');
+    try {
+      return await this.request(`/v1/posts/${postId}/reschedule`, {
+        method: 'PATCH',
+        body: JSON.stringify({ scheduled_at: scheduledAt }),
+      });
+    } catch {
+      return await this.request(`/api/vibe/posts/${postId}/reschedule`, {
+        method: 'PATCH',
+        body: JSON.stringify({ scheduled_at: scheduledAt }),
+      });
+    }
+  }
+
+  /** Brouillons serveur (multi-appareils). */
+  public static async getDrafts(): Promise<{ drafts: ServerDraft[] }> {
+    try {
+      return await this.cachedRequest<{ drafts: ServerDraft[] }>('/v1/drafts', 15000);
+    } catch {
+      try {
+        return await this.request<{ drafts: ServerDraft[] }>('/api/vibe/drafts');
+      } catch {
+        return { drafts: [] };
+      }
+    }
+  }
+
+  public static async saveDraft(draft: { id?: string; html: string; text: string; visibility?: string; scheduled_at?: string | null; ai_generated?: boolean; media_assets?: Array<{ url: string; media_type?: string; size?: number; alt_text?: string }> }): Promise<{ success: boolean; id: string }> {
+    try {
+      if (draft.id) {
+        return await this.request(`/v1/drafts/${draft.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(draft),
+        });
+      }
+      return await this.request('/v1/drafts', {
+        method: 'POST',
+        body: JSON.stringify(draft),
+      });
+    } catch {
+      if (draft.id) {
+        return await this.request(`/api/vibe/drafts/${draft.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(draft),
+        });
+      }
+      return await this.request('/api/vibe/drafts', {
+        method: 'POST',
+        body: JSON.stringify(draft),
+      });
+    }
+  }
+
+  public static async deleteDraft(id: string): Promise<{ success: boolean }> {
+    try {
+      return await this.request(`/v1/drafts/${id}`, { method: 'DELETE' });
+    } catch {
+      return await this.request(`/api/vibe/drafts/${id}`, { method: 'DELETE' });
+    }
+  }
+
+  /** Répond à une invitation de co-signature. */
+  public static async respondToCollab(postId: string, accept: boolean): Promise<{ success: boolean; status: string }> {
+    this.invalidateCache('/v1/posts/');
+    const action = accept ? 'accept' : 'decline';
+    try {
+      return await this.request(`/v1/posts/${postId}/collaborate/${action}`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/posts/${postId}/collaborate/${action}`, { method: 'POST' });
+    }
+  }
+
   public static async getUserLikedPosts(username: string): Promise<{ posts: Post[] }> {
     const cleanUser = username.trim().replace(/^@/, '');
     try {
@@ -408,7 +631,7 @@ export class ApiService {
     content: string,
     media_url?: string,
     media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
-    options?: { aiGenerated?: boolean; quotedPostId?: string; scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
+    options?: { aiGenerated?: boolean; quotedPostId?: string; scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private'; poll?: { question?: string; options: string[]; duration_hours: number }; collaboratorUsername?: string; mediaPositions?: number[] }
   ): Promise<{ success: boolean; post: Post }> {
     const payload = {
       content,
@@ -418,6 +641,9 @@ export class ApiService {
       quoted_post_id: options?.quotedPostId,
       scheduled_at: options?.scheduledAt || undefined,
       visibility: options?.visibility || 'public',
+      poll: options?.poll,
+      collaborator_username: options?.collaboratorUsername,
+      media_positions: options?.mediaPositions,
     };
     try {
       return await this.request('/v1/posts', {
@@ -657,7 +883,7 @@ export class ApiService {
     }
   }
 
-  public static async getMessages(partnerId: string | number): Promise<{ messages: DirectMessage[] }> {
+  public static async getMessages(partnerId: string | number): Promise<{ messages: DirectMessage[]; pinned_messages?: DirectMessage[] }> {
     try {
       return await this.cachedRequest(`/v1/dms/messages/${partnerId}`, 5000);
     } catch {
@@ -665,17 +891,17 @@ export class ApiService {
     }
   }
 
-  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string): Promise<{ success: boolean; message: DirectMessage }> {
+  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string, send_at?: string): Promise<{ success: boolean; message: DirectMessage; scheduled?: boolean }> {
     this.invalidateCache('/dms/');
     try {
       return await this.request('/v1/dms/messages', {
         method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id }),
+        body: JSON.stringify({ recipient_id, content, reply_to_id, send_at }),
       });
     } catch {
       return await this.request('/api/vibe/dms/messages', {
         method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id }),
+        body: JSON.stringify({ recipient_id, content, reply_to_id, send_at }),
       });
     }
   }

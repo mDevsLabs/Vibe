@@ -11,11 +11,12 @@ import { isBlockEitherWay, resolveHiddenUserIds, type RegisterMultiFn } from "./
 import { HybridRecommender } from "./vibe-recommender.ts";
 import { ensureCircleTable } from "./vibe-circle.ts";
 import {
+  attachPollsAndCollabs,
   attachQuotedPosts,
   ensurePostColumns,
   fetchPostMedia,
   publishDuePosts,
-} from "./vibe-posts.ts";
+} from "./vibe-posts-core.ts";
 
 // ── Signaux d'affinement d'algorithme (« Cela m'intéresse / pas ») ──
 export const FEEDBACK_STOP_WORDS = new Set([
@@ -122,6 +123,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
 
         await fetchPostMedia(posts);
         await attachQuotedPosts(posts);
+        await attachPollsAndCollabs(posts, currentUserId).catch(() => {});
 
         // Filtrage mute/block (après pagination OFFSET — les trous éventuels
         // sont acceptables pour un classement de tendances).
@@ -176,6 +178,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
 
         await fetchPostMedia(posts);
         await attachQuotedPosts(posts);
+        await attachPollsAndCollabs(posts, currentUserId).catch(() => {});
 
         // Filtrage mute/block dans le flux Abonnements
         const visibleStream = posts.filter((p: any) => !isHiddenAuthor(p.author_id));
@@ -384,6 +387,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
       const rankOffset = rawCursor ? parseRank(rawCursor) ?? 0 : 0;
       const page = ranked.slice(rankOffset, rankOffset + PAGE_SIZE);
       await attachQuotedPosts(page);
+      await attachPollsAndCollabs(page, currentUserId).catch(() => {});
 
       return c.json({
         mode: "for_you",
@@ -527,6 +531,7 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
 
       await fetchPostMedia(posts);
       await attachQuotedPosts(posts);
+      await attachPollsAndCollabs(posts, currentUserId).catch(() => {});
 
       // Filtrage mute/block des résultats de recherche
       const { mutedIds: searchMuted, blockedIds: searchBlocked } = await resolveHiddenUserIds(currentUserId);
@@ -550,4 +555,98 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
     "/v1/search/posts",
     "/search/posts",
   ], handleSearchPosts);
+
+  // 4. UNIFIED GLOBAL SEARCH (posts + users + books + DMs, limit/section)
+  const handleSearchUnified = async (c: any) => {
+    try {
+      await ensurePostColumns().catch(() => {});
+      const q = (c.req.query("q") || c.req.query("query") || "").trim();
+      if (!q) {
+        return c.json({ posts: [], users: [], books: [], messages: [], total: 0 });
+      }
+      const token = extractToken(c.req.raw);
+      let currentUserId: number | null = null;
+      if (token) {
+        try {
+          const payload = await verifyToken(token);
+          currentUserId = Number(payload.sub || (payload as any).id);
+        } catch {}
+      }
+      const sql = getDb();
+      const limit = Math.min(10, Math.max(1, Number(c.req.query("limit") || 5)));
+      const cleanQ = q.startsWith("#") ? q.slice(1) : q;
+
+      const postsPromise = sql`
+        SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
+               (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified
+        FROM posts p
+        JOIN users u ON u.id = p.author_id
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE p.visibility = 'public' AND COALESCE(p.status, 'published') = 'published'
+          AND (
+            p.content ILIKE ('%' || ${cleanQ} || '%')
+            OR u.username ILIKE ('%' || ${cleanQ} || '%')
+            OR pr.display_name ILIKE ('%' || ${cleanQ} || '%')
+          )
+        ORDER BY p.published_at DESC
+        LIMIT ${limit}
+      `.catch(() => []);
+
+      const usersPromise = sql`
+        SELECT u.id, u.username, u.tier,
+          (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
+          pr.display_name, pr.avatar_url, pr.bio, pr.followers_count, pr.posts_count
+        FROM users u
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE LOWER(u.username) LIKE ${`%${q.toLowerCase()}%`}
+           OR LOWER(COALESCE(pr.display_name, '')) LIKE ${`%${q.toLowerCase()}%`}
+        ORDER BY COALESCE(pr.followers_count, 0) DESC
+        LIMIT ${limit}
+      `.catch(() => []);
+
+      const booksPromise = currentUserId ? sql`
+        SELECT b.id, b.title, b.icon, b.created_at,
+               (SELECT COUNT(*) FROM vibe_book_items bi WHERE bi.book_id = b.id) AS items_count
+        FROM vibe_books b
+        WHERE b.user_id = ${currentUserId} AND b.title ILIKE ('%' || ${q} || '%')
+        ORDER BY b.created_at DESC
+        LIMIT ${limit}
+      `.catch(() => []) : Promise.resolve([]);
+
+      const messagesPromise = currentUserId ? sql`
+        SELECT m.id, m.conversation_id, m.sender_id, m.recipient_id, m.content, m.is_read, m.created_at
+        FROM direct_messages m
+        WHERE m.content ILIKE ('%' || ${q} || '%')
+          AND m.conversation_id IN (
+            SELECT dm.id FROM dm_conversations dm
+            WHERE dm.participant_one_id = ${currentUserId} OR dm.participant_two_id = ${currentUserId}
+          )
+          AND (m.status IS NULL OR m.status = 'sent')
+        ORDER BY m.created_at DESC
+        LIMIT ${limit}
+      `.catch(() => []) : Promise.resolve([]);
+
+      const [posts, users, books, messages] = await Promise.all([
+        postsPromise, usersPromise, booksPromise, messagesPromise,
+      ]);
+      try { await fetchPostMedia(posts); } catch {}
+      try { await attachQuotedPosts(posts); } catch {}
+      try { await attachPollsAndCollabs(posts, currentUserId); } catch {}
+
+      return c.json({
+        posts, users, books, messages,
+        total: posts.length + users.length + books.length + messages.length,
+      });
+    } catch (err: any) {
+      console.error("[Search Unified Error]:", err);
+      return c.json({ error: "Erreur recherche unifiée." }, 500);
+    }
+  };
+
+  registerMulti("get", [
+    "/api/vibe/search/unified",
+    "/vibe/search/unified",
+    "/v1/search/unified",
+    "/search/unified",
+  ], handleSearchUnified);
 }

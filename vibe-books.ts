@@ -9,7 +9,7 @@
 import type { Hono } from "npm:hono@4";
 import { extractToken, getDb, verifyToken } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
-import { attachQuotedPosts } from "./vibe-posts.ts";
+import { attachQuotedPosts } from "./vibe-posts-core.ts";
 
 /** Limite de Livres par compte. */
 export const MAX_BOOKS_PER_USER = 5;

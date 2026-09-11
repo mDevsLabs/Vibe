@@ -23,6 +23,7 @@ import { useAuth } from '../../context/AuthContext';
 import { VibeLogo } from './VibeLogo';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import { GlobalSearchBar } from './GlobalSearchBar';
 
 interface SidebarProps {
   onOpenComposer: () => void;
@@ -88,6 +89,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <VibeLogo size={40} showText={true} />
           </div>
         </Link>
+
+        {/* Recherche globale (écrans larges — complète le lien Explorer) */}
+        <div className="hidden xl:block px-1">
+          <GlobalSearchBar />
+        </div>
 
         {/* Navigation Items */}
         <nav className="space-y-1.5 flex flex-col items-center xl:items-stretch">

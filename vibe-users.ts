@@ -16,7 +16,7 @@ import {
 } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 import { selectStorageNode, uploadWithFallback } from "./storage.ts";
-import { attachQuotedPosts, publishDuePosts } from "./vibe-posts.ts";
+import { attachPollsAndCollabs, attachQuotedPosts, publishDuePosts } from "./vibe-posts-core.ts";
 import { ensureCircleTable } from "./vibe-circle.ts";
 
 export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiFn) {
@@ -169,6 +169,56 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
 
   registerMulti("get", ["/api/vibe/search/users", "/vibe/search/users", "/v1/search/users"], handleSearchUsers);
 
+  // 3b. ONBOARDING SUGGESTIONS (10 comptes populaires non suivis)
+  const handleOnboardingSuggestions = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const sql = getDb();
+      const users = await sql`
+        SELECT u.id, u.username, u.tier,
+          (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
+          pr.display_name, pr.avatar_url, pr.bio, pr.followers_count
+        FROM users u
+        LEFT JOIN profiles pr ON pr.user_id = u.id
+        WHERE u.id <> ${userId}
+          AND u.id NOT IN (SELECT following_id FROM follows WHERE follower_id = ${userId})
+          AND LOWER(u.username) NOT IN ('bot', 'mai')
+        ORDER BY COALESCE(pr.followers_count, 0) DESC
+        LIMIT 10
+      `.catch(() => []);
+      return c.json({ users });
+    } catch (err: any) {
+      return c.json({ error: "Erreur suggestions onboarding." }, 500);
+    }
+  };
+
+  registerMulti("get", ["/api/vibe/onboarding/suggestions", "/vibe/onboarding/suggestions", "/v1/onboarding/suggestions", "/onboarding/suggestions"], handleOnboardingSuggestions);
+
+  // 3c. ONBOARDING COMPLETE
+  const handleOnboardingComplete = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+      const sql = getDb();
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE`.catch(() => {});
+      await sql`
+        INSERT INTO user_settings (user_id, onboarding_completed)
+        VALUES (${userId}, TRUE)
+        ON CONFLICT (user_id) DO UPDATE SET onboarding_completed = TRUE, updated_at = NOW()
+      `;
+      return c.json({ success: true });
+    } catch (err: any) {
+      return c.json({ error: "Erreur validation onboarding." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/onboarding/complete", "/vibe/onboarding/complete", "/v1/onboarding/complete", "/onboarding/complete"], handleOnboardingComplete);
+
   // 4. GET PROFILE
   const handleGetProfile = async (c: any) => {
     try {
@@ -271,6 +321,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
           }
         }
         await attachQuotedPosts(posts);
+        await attachPollsAndCollabs(posts, currentUserId).catch(() => {});
       } catch (postErr: any) {
         console.error("[Get Profile] Erreur chargement posts:", postErr);
         posts = [];
@@ -361,6 +412,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
         }
       }
       await attachQuotedPosts(posts);
+      await attachPollsAndCollabs(posts, currentUserId).catch(() => {});
 
       return c.json({ posts });
     } catch (err: any) {

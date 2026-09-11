@@ -364,6 +364,60 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
         }
       }
 
+      // Personnalisation du contexte (opt-in granulaire via user_settings)
+      let personalContextBlock = "";
+      try {
+        const ctxRows = await sql`SELECT mai_context_posts, mai_context_dms, mai_context_books FROM user_settings WHERE user_id = ${userId} LIMIT 1`.catch(() => []);
+        const flags = ctxRows[0] || {};
+        const trunc = (s: any, n: number) => String(s || "").replace(/\s+/g, " ").trim().slice(0, n);
+        if (flags.mai_context_posts) {
+          const recentPosts = await sql`
+            SELECT content, published_at FROM posts
+            WHERE author_id = ${userId} AND COALESCE(status, 'published') = 'published'
+            ORDER BY published_at DESC LIMIT 20
+          `.catch(() => []);
+          if (recentPosts.length > 0) {
+            const list = recentPosts.map((p: any, i: number) => `${i + 1}. « ${trunc(p.content, 500)} »`).join("\n");
+            personalContextBlock += `\n\nContexte : voici les publications récentes de l'utilisateur :\n${list}`;
+          }
+        }
+        if (flags.mai_context_dms) {
+          console.warn(`[vibe-mai] Contexte DM inclus pour user ${userId} (opt-in mai_context_dms=TRUE) — données confidentielles.`);
+          const recentDMs = await sql`
+            SELECT content, created_at FROM direct_messages
+            WHERE (sender_id = ${userId} OR recipient_id = ${userId})
+              AND (status IS NULL OR status = 'sent')
+            ORDER BY created_at DESC LIMIT 10
+          `.catch(() => []);
+          if (recentDMs.length > 0) {
+            const excerpt = recentDMs.map((m: any) => `— « ${trunc(m.content, 200)} »`).join("\n").slice(0, 2000);
+            personalContextBlock += `\n\nContexte : extraits récents des messages privés de l'utilisateur (confidentiel, ne pas citer verbatim) :\n${excerpt}`;
+          }
+        }
+        if (flags.mai_context_books) {
+          const books = await sql`SELECT id, title FROM vibe_books WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 10`.catch(() => []);
+          if (books.length > 0) {
+            const titles = books.map((b: any) => `— ${trunc(b.title, 80)}`).join("\n");
+            personalContextBlock += `\n\nContexte : Vibe Books de l'utilisateur :\n${titles}`;
+            try {
+              const bookIds = books.map((b: any) => b.id);
+              const items = await sql`
+                SELECT bi.book_id, p.content FROM vibe_book_items bi
+                JOIN posts p ON p.id = bi.post_id
+                WHERE bi.book_id = ANY(${bookIds}::uuid[])
+                LIMIT 20
+              `.catch(() => []);
+              if (items.length > 0) {
+                const itemList = items.map((it: any) => `— « ${trunc(it.content, 200)} »`).join("\n").slice(0, 2000);
+                personalContextBlock += `\nPublications épinglées dans ces livres :\n${itemList}`;
+              }
+            } catch {}
+          }
+        }
+      } catch (ctxErr) {
+        console.warn("[vibe-mai] Contexte personnalisé ignoré:", (ctxErr as any)?.message);
+      }
+
       let toolToRun: string | null = execute_tool?.name || null;
       let toolArgs: any = execute_tool?.args || {};
 
@@ -435,7 +489,7 @@ export function registerVibeMAIRoutes(app: Hono, registerMulti: RegisterMultiFn)
           if (!modelsToTry.includes("nvidia/nemotron-3.5-lightning:free")) modelsToTry.push("nvidia/nemotron-3.5-lightning:free");
         }
 
-        const userText = `${message.trim()}${postContextBlock}`;
+        const userText = `${message.trim()}${postContextBlock}${personalContextBlock}`;
         const userContent: any = hasImages
           ? [{ type: "text", text: userText }, ...postImageParts]
           : userText;

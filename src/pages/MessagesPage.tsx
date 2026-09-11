@@ -38,9 +38,14 @@ import {
   Wand2,
   PenLine,
   Info,
-  Palette
+  Palette,
+  Languages,
+  Clock,
+  Pin,
+  PinOff,
+  FileText
 } from 'lucide-react';
-import { ApiService } from '../services/api';
+import { ApiService, browserToDeepLCode } from '../services/api';
 import { RealtimeService } from '../services/realtimeService';
 import { DirectMessage, DMConversation } from '../types/vibe';
 import { useAuth } from '../context/AuthContext';
@@ -52,9 +57,19 @@ import { RichContent } from '../components/common/RichContent';
 
 interface AttachedMedia {
   url: string;
-  type: 'image' | 'video';
+  type: 'image' | 'video' | 'document';
   size: number;
+  fileName?: string;
 }
+
+const dmDraftKey = (partnerId: string | number | null) => `vibe_dm_draft_${partnerId}`;
+
+const formatFileSize = (bytes: number): string => {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+};
 
 export const MessagesPage: React.FC = () => {
   const { user } = useAuth();
@@ -108,6 +123,35 @@ export const MessagesPage: React.FC = () => {
   const [isModerating, setIsModerating] = useState(false);
 
   const REPORT_REASONS = ['Spam ou arnaque', 'Harcèlement', 'Contenu haineux ou violent', 'Contenu illégal', 'Impersonation', 'Autre'];
+
+  // Traduction 1-clic des messages (mAI, texte brut sans post_id)
+  const [translations, setTranslations] = useState<Record<string, string>>({});
+  const [translatingIds, setTranslatingIds] = useState<Set<string>>(new Set());
+  // Messages épinglés (bannière, max 3, temps réel via SSE dm_pin_updated)
+  const [pinnedMessages, setPinnedMessages] = useState<DirectMessage[]>([]);
+  const [pinsCollapsed, setPinsCollapsed] = useState(false);
+  // Envoi programmé (datetime-local + badge)
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState('');
+  // Recherche dans la conversation (filtre local + API si < 3 résultats)
+  const [convSearchOpen, setConvSearchOpen] = useState(false);
+  const [convSearchQuery, setConvSearchQuery] = useState('');
+  const [convSearchApiResults, setConvSearchApiResults] = useState<DirectMessage[]>([]);
+  const [convSearchIndex, setConvSearchIndex] = useState(0);
+  // Séparateur « Non lus » + bouton flottant ↓
+  const [firstUnreadId, setFirstUnreadId] = useState<string | null>(null);
+  const [showJumpToUnread, setShowJumpToUnread] = useState(false);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Brouillons DM (localStorage vibe_dm_draft_<partnerId>)
+  const [dmDraftKeys, setDmDraftKeys] = useState<string[]>(() => {
+    try {
+      return Object.keys(localStorage).filter((k) => k.startsWith('vibe_dm_draft_') && localStorage.getItem(k));
+    } catch {
+      return [];
+    }
+  });
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Conversation active dérivée de la liste (nom personnalisé, état de blocage…)
   const activeConv = conversations.find((c) => String(c.partner_id) === String(activePartnerId)) || null;
@@ -164,7 +208,13 @@ export const MessagesPage: React.FC = () => {
       // Invalider le cache pour forcer la lecture réelle et fraîche
       ApiService.invalidateCache(`/v1/dms/messages/${partnerId}`);
       const res = await ApiService.getMessages(partnerId);
-      setMessages(res.messages || []);
+      const msgs = res.messages || [];
+      setMessages(msgs);
+      setPinnedMessages(res.pinned_messages || []);
+      // Premier message non lu (hors messages propres) → séparateur + bouton ↓
+      const firstUnread = msgs.find((m) => !m.is_read && user && String(m.sender_id) !== String(user.id));
+      setFirstUnreadId(firstUnread ? String(firstUnread.id) : null);
+      setShowJumpToUnread(Boolean(firstUnread));
 
       // Supprimer immédiatement le point/badge de non lu sur la conversation ouverte
       setConversations((prev) =>
@@ -183,10 +233,14 @@ export const MessagesPage: React.FC = () => {
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 50);
+      // Le séparateur « Non lus » disparaît 3 s après le scroll en bas
+      setTimeout(() => {
+        setShowJumpToUnread(false);
+      }, 3000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Impossible de charger les messages.');
     }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     fetchConversations();
@@ -264,6 +318,67 @@ export const MessagesPage: React.FC = () => {
   useEffect(() => {
     setPartnerTyping((prev) => (prev ? false : prev));
   }, [activePartnerId]);
+
+  // Brouillon DM : restaure à l'ouverture de la conversation
+  useEffect(() => {
+    if (!activePartnerId) return;
+    try {
+      const saved = localStorage.getItem(dmDraftKey(activePartnerId));
+      if (saved && !editingMessage) setMessageInput(saved);
+    } catch {}
+    setScheduledAt('');
+    setShowSchedule(false);
+    setConvSearchOpen(false);
+    setConvSearchQuery('');
+    setConvSearchApiResults([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePartnerId]);
+
+  // Brouillon DM : sauvegarde différée 500 ms après la frappe
+  useEffect(() => {
+    if (!activePartnerId || editingMessage) return;
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = setTimeout(() => {
+      try {
+        if (messageInput) {
+          localStorage.setItem(dmDraftKey(activePartnerId), messageInput);
+          setDmDraftKeys((prev) => (prev.includes(dmDraftKey(activePartnerId)) ? prev : [...prev, dmDraftKey(activePartnerId)]));
+        } else {
+          localStorage.removeItem(dmDraftKey(activePartnerId));
+          setDmDraftKeys((prev) => prev.filter((k) => k !== dmDraftKey(activePartnerId)));
+        }
+      } catch {}
+    }, 500);
+    return () => {
+      if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    };
+  }, [messageInput, activePartnerId, editingMessage]);
+
+  // SSE : épinglage/désépinglage temps réel des deux côtés
+  useEffect(() => {
+    const unsubscribe = RealtimeService.on((type, payload) => {
+      if (type !== 'dm_pin_updated' || !payload || !activePartnerId) return;
+      ApiService.invalidateCache(`/v1/dms/messages/${activePartnerId}`);
+      ApiService.getMessages(activePartnerId)
+        .then((res) => setPinnedMessages(res.pinned_messages || []))
+        .catch(() => {});
+    });
+    return unsubscribe;
+  }, [activePartnerId]);
+
+  // Deep-link : /messages?partner=<id> (depuis la recherche globale)
+  useEffect(() => {
+    try {
+      const partner = new URLSearchParams(window.location.search).get('partner');
+      if (partner && !activePartnerId) {
+        const pid = partner;
+        setActivePartnerId(pid);
+        setActivePartner({ id: pid, username: `user-${pid}` });
+        fetchMessages(pid);
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSelectConversation = (conv: DMConversation) => {
     haptics.light();
@@ -373,6 +488,111 @@ export const MessagesPage: React.FC = () => {
     }
   };
 
+  /** Traduction 1-clic d'un message (mAI, texte brut). */
+  const handleTranslateMessage = async (m: DirectMessage) => {
+    setActionMenuFor(null);
+    if (translations[m.id]) return;
+    setTranslatingIds((prev) => new Set(prev).add(String(m.id)));
+    try {
+      const target = browserToDeepLCode(navigator.language || 'fr-FR');
+      const res = await ApiService.translateText(m.content, target);
+      if (res?.translation) {
+        setTranslations((prev) => ({ ...prev, [m.id]: res.translation }));
+        haptics.success();
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Traduction impossible.');
+    } finally {
+      setTranslatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(String(m.id));
+        return next;
+      });
+    }
+  };
+
+  /** Épingle / désépingle un message (max 3 par conversation). */
+  const handleTogglePin = async (m: DirectMessage) => {
+    setActionMenuFor(null);
+    if (!activePartnerId) return;
+    const isPinned = pinnedMessages.some((p) => String(p.id) === String(m.id));
+    try {
+      if (isPinned) {
+        await ApiService.unpinMessage(activePartnerId, String(m.id));
+        setPinnedMessages((prev) => prev.filter((p) => String(p.id) !== String(m.id)));
+      } else {
+        await ApiService.pinMessage(activePartnerId, String(m.id));
+        if (activePartnerId) fetchMessages(activePartnerId);
+      }
+      haptics.success();
+    } catch (err: any) {
+      haptics.error();
+      setErrorMessage(err?.message || "L'épinglage a échoué.");
+    }
+  };
+
+  /** Marque manuellement la conversation comme non lue (menu conversation). */
+  const handleMarkUnread = async () => {
+    if (!activePartnerId) return;
+    setConvMenuOpen(false);
+    try {
+      await ApiService.markConversationUnread(activePartnerId);
+      haptics.success();
+      fetchConversations();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Marquage impossible.');
+    }
+  };
+
+  /** Recherche dans la conversation : filtre local puis API si < 3 résultats. */
+  useEffect(() => {
+    const q = convSearchQuery.trim();
+    if (!convSearchOpen || !activePartnerId || q.length < 3) {
+      setConvSearchApiResults([]);
+      return;
+    }
+    const localCount = messages.filter((m) => m.content.includes(q)).length;
+    if (localCount >= 3) {
+      setConvSearchApiResults([]);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const res = await ApiService.searchDMMessages(activePartnerId, q);
+        const known = new Set(messages.map((m) => String(m.id)));
+        setConvSearchApiResults((res.messages || []).filter((m) => !known.has(String(m.id))));
+      } catch {
+        setConvSearchApiResults([]);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [convSearchQuery, convSearchOpen, activePartnerId, messages]);
+
+  /** Surlignage des occurrences (découpage React, sans HTML brut). */
+  const highlightMatches = (content: string, query: string): React.ReactNode => {
+    if (!query) return content;
+    const parts = content.split(query);
+    if (parts.length <= 1) return content;
+    return (
+      <>
+        {parts.map((part, i) => (
+          <span key={i}>
+            {part}
+            {i < parts.length - 1 && <mark className="bg-yellow-400/60 text-inherit rounded-sm px-0.5">{query}</mark>}
+          </span>
+        ))}
+      </>
+    );
+  };
+
+  const scrollToMessage = (id: string) => {
+    const el = messageRefs.current.get(id);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      haptics.light();
+    }
+  };
+
   const handleSearchUsers = (q: string) => {
     setSearchQuery(q);
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
@@ -423,12 +643,19 @@ export const MessagesPage: React.FC = () => {
 
     const currentImages = attachedMediaList.filter((m) => m.type === 'image').length;
     const currentVideos = attachedMediaList.filter((m) => m.type === 'video').length;
+    const currentDocs = attachedMediaList.filter((m) => m.type === 'document').length;
     let newImages = 0;
     let newVideos = 0;
+    let newDocs = 0;
 
     for (const f of files) {
       if (f.type.startsWith('image/')) newImages++;
       else if (f.type.startsWith('video/')) newVideos++;
+      else if (f.type.startsWith('application/') || f.type === 'text/plain') newDocs++;
+      else {
+        setErrorMessage(`Type de fichier non pris en charge : ${f.name}`);
+        return;
+      }
     }
 
     if (currentImages + newImages > 5) {
@@ -439,6 +666,10 @@ export const MessagesPage: React.FC = () => {
       setErrorMessage(`Limite de 2 vidéos par message atteinte (actuel: ${currentVideos}).`);
       return;
     }
+    if (currentDocs + newDocs > 5) {
+      setErrorMessage(`Limite de 5 documents par message atteinte (actuel: ${currentDocs}).`);
+      return;
+    }
 
     setIsUploading(true);
     setErrorMessage(null);
@@ -447,8 +678,12 @@ export const MessagesPage: React.FC = () => {
       for (const file of files) {
         const res = await ApiService.uploadFile(file);
         if (res.url) {
-          const type: 'image' | 'video' = file.type.startsWith('video/') ? 'video' : 'image';
-          setAttachedMediaList((prev) => [...prev, { url: res.url, type, size: file.size }]);
+          const type: 'image' | 'video' | 'document' = file.type.startsWith('video/')
+            ? 'video'
+            : file.type.startsWith('image/')
+            ? 'image'
+            : 'document';
+          setAttachedMediaList((prev) => [...prev, { url: res.url, type, size: file.size, fileName: file.name }]);
         }
       }
     } catch (err: any) {
@@ -536,6 +771,19 @@ export const MessagesPage: React.FC = () => {
       created_at: new Date().toISOString(),
     };
 
+    // Envoi programmé : la date doit être future
+    let sendAtIso: string | undefined;
+    if (scheduledAt) {
+      const ts = Date.parse(scheduledAt);
+      if (Number.isNaN(ts) || ts <= Date.now()) {
+        setErrorMessage("La date d'envoi programmé doit être dans le futur.");
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        setIsSending(false);
+        return;
+      }
+      sendAtIso = new Date(ts).toISOString();
+    }
+
     setMessages((prev) => [...prev, optimisticMsg]);
     setMessageInput('');
     setAttachedMediaList([]);
@@ -543,8 +791,15 @@ export const MessagesPage: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      await ApiService.sendMessage(activePartnerId, textToSend, replyTo && !String(replyTo.id).startsWith('temp') ? String(replyTo.id) : undefined);
+      await ApiService.sendMessage(activePartnerId, textToSend, replyTo && !String(replyTo.id).startsWith('temp') ? String(replyTo.id) : undefined, sendAtIso);
       setReplyTo(null);
+      // Brouillon consommé + programmation réinitialisée
+      try {
+        localStorage.removeItem(dmDraftKey(activePartnerId));
+        setDmDraftKeys((prev) => prev.filter((k) => k !== dmDraftKey(activePartnerId)));
+      } catch {}
+      setScheduledAt('');
+      setShowSchedule(false);
       haptics.success();
       fetchMessages(activePartnerId);
       fetchConversations();
@@ -765,10 +1020,16 @@ export const MessagesPage: React.FC = () => {
           ) : (
             conversations.map((conv) => {
               const isSelected = activePartnerId === conv.partner_id;
+              const hasDraft = dmDraftKeys.includes(dmDraftKey(conv.partner_id));
               return (
                 <div
                   key={conv.partner_id}
                   onClick={() => handleSelectConversation(conv)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    handleSelectConversation(conv);
+                    setConvMenuOpen(true);
+                  }}
                   className={`vibe-chat-conv-item p-3.5 flex items-center gap-3 cursor-pointer transition-colors ${
                     isSelected ? 'active' : ''
                   }`}
@@ -789,6 +1050,11 @@ export const MessagesPage: React.FC = () => {
                       <span className="text-[10px] text-zinc-500 font-mono">{formatTime(conv.last_message_at)}</span>
                     </div>
                     <p className="text-xs opacity-70 truncate mt-0.5">{conv.last_message_content || 'Nouveau message'}</p>
+                    {hasDraft && (
+                      <span className="mt-0.5 inline-block px-1.5 py-0.5 rounded-md bg-zinc-200 dark:bg-zinc-800 text-[9px] font-bold text-zinc-500">
+                        Brouillon
+                      </span>
+                    )}
                   </div>
                   {conv.is_blocked && (
                     <span title="Utilisateur bloqué"><Ban className="w-3.5 h-3.5 text-zinc-500 shrink-0" /></span>
@@ -842,6 +1108,56 @@ export const MessagesPage: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-1">
+                {/* Recherche dans la conversation */}
+                {convSearchOpen ? (
+                  <div className="flex items-center gap-1 rounded-full bg-zinc-100 dark:bg-zinc-900 px-2 py-1">
+                    <Search className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <input
+                      type="text"
+                      value={convSearchQuery}
+                      onChange={(e) => {
+                        setConvSearchQuery(e.target.value);
+                        setConvSearchIndex(0);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          setConvSearchOpen(false);
+                          setConvSearchQuery('');
+                        }
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          setConvSearchIndex((i) => i + 1);
+                        }
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          setConvSearchIndex((i) => Math.max(0, i - 1));
+                        }
+                      }}
+                      autoFocus
+                      placeholder="Filtrer…"
+                      className="w-28 sm:w-40 bg-transparent text-xs text-black dark:text-white placeholder-zinc-500 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        setConvSearchOpen(false);
+                        setConvSearchQuery('');
+                      }}
+                      className="text-zinc-500 hover:text-black dark:hover:text-white"
+                      title="Fermer la recherche"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConvSearchOpen(true)}
+                    className="vibe-chat-icon-btn p-2 transition-colors"
+                    title="Rechercher dans la conversation"
+                  >
+                    <Search className="w-4 h-4" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setThemeModalOpen(true)}
@@ -865,6 +1181,12 @@ export const MessagesPage: React.FC = () => {
                   <>
                     <div className="fixed inset-0 z-20" onClick={() => setConvMenuOpen(false)} />
                     <div className="absolute right-0 top-full mt-1 w-56 z-30 p-1.5 rounded-2xl vibe-menu shadow-2xl animate-fadeIn">
+                      <button
+                        onClick={handleMarkUnread}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] vibe-chat-menu-item text-left"
+                      >
+                        <Mail className="w-3.5 h-3.5" /> Marquer comme non lu
+                      </button>
                       <button
                         onClick={() => { setRenameValue(activeConv?.custom_name || ''); setRenameModalOpen(true); }}
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] vibe-chat-menu-item text-left"
@@ -934,11 +1256,94 @@ export const MessagesPage: React.FC = () => {
               </div>
             )}
 
+            {/* Bannière messages épinglés (repliable) */}
+            {pinnedMessages.length > 0 && (
+              <div className="mx-3 mt-2 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 overflow-hidden">
+                <button
+                  onClick={() => setPinsCollapsed(!pinsCollapsed)}
+                  className="w-full flex items-center gap-1.5 px-3 py-2 text-[11px] font-bold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                >
+                  <Pin className="w-3.5 h-3.5" />
+                  <span>📌 Messages épinglés ({pinnedMessages.length})</span>
+                  <span className="ml-auto text-zinc-400">{pinsCollapsed ? '▸' : '▾'}</span>
+                </button>
+                {!pinsCollapsed && (
+                  <div className="px-3 pb-2 space-y-1">
+                    {pinnedMessages.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setPinsCollapsed(true);
+                          scrollToMessage(String(p.id));
+                        }}
+                        className="w-full text-left px-2 py-1.5 rounded-xl hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                        title="Aller au message"
+                      >
+                        <p className="text-[11px] text-zinc-600 dark:text-zinc-300 truncate">
+                          {String(p.content || '').slice(0, 40) || '(média)'}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Messages Thread */}
             <div
-              className="vibe-chat-thread flex-1 p-4 space-y-3 overflow-y-auto max-h-[calc(100vh-140px)]"
+              ref={threadRef}
+              className="vibe-chat-thread relative flex-1 p-4 space-y-3 overflow-y-auto max-h-[calc(100vh-140px)]"
               style={{ background: chatBackgroundTheme === 'default' ? undefined : CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.style }}
             >
+              {(() => {
+                const q = convSearchOpen ? convSearchQuery.trim() : '';
+                if (!q) return null;
+                const local = messages.filter((m) => m.content.includes(q));
+                const combined = [...local, ...convSearchApiResults];
+                if (combined.length === 0) {
+                  return (
+                    <p className="text-center text-[11px] text-zinc-500 py-2">
+                      Aucun message contenant « {q} »
+                    </p>
+                  );
+                }
+                const active = combined[Math.min(convSearchIndex, combined.length - 1)];
+                return (
+                  <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900 text-white text-[11px] shadow-lg w-fit mx-auto">
+                    <span>{Math.min(convSearchIndex + 1, combined.length)}/{combined.length} résultat(s)</span>
+                    <button
+                      onClick={() => {
+                        const next = Math.max(0, convSearchIndex - 1);
+                        setConvSearchIndex(next);
+                        scrollToMessage(String(combined[next]?.id));
+                      }}
+                      className="px-1 font-bold"
+                      title="Résultat précédent (↑)"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      onClick={() => {
+                        const next = Math.min(combined.length - 1, convSearchIndex + 1);
+                        setConvSearchIndex(next);
+                        scrollToMessage(String(combined[next]?.id));
+                      }}
+                      className="px-1 font-bold"
+                      title="Résultat suivant (↓)"
+                    >
+                      ↓
+                    </button>
+                    {active && (
+                      <button
+                        onClick={() => scrollToMessage(String(active.id))}
+                        className="underline underline-offset-2"
+                      >
+                        Voir
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
               {messages.map((m) => {
                 const isMe = user && (String(m.sender_id) === String(user.id) || m.sender_username === user.username);
                 // Extract possible media URLs inside message
@@ -950,8 +1355,29 @@ export const MessagesPage: React.FC = () => {
                 const currentThemeConfig = MESSAGE_BUBBLE_THEMES[messageBubbleTheme] || MESSAGE_BUBBLE_THEMES.monochrome;
                 const currentShapeConfig = MESSAGE_BUBBLE_SHAPES[messageBubbleShape] || MESSAGE_BUBBLE_SHAPES.pill;
 
+                const isFirstUnread = firstUnreadId != null && String(m.id) === String(firstUnreadId);
+                const searchQ = convSearchOpen ? convSearchQuery.trim() : '';
+                const matchesSearch = searchQ ? m.content.includes(searchQ) : false;
                 return (
-                  <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} relative my-1 group`}>
+                  <>
+                    {/* Séparateur « Non lus » (style WhatsApp) */}
+                    {isFirstUnread && (
+                      <div className="flex items-center gap-2 py-1" aria-label="Messages non lus">
+                        <div className="flex-1 h-px bg-red-500/70" />
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-red-500 bg-red-500/10 px-2 py-0.5 rounded-full">
+                          Non lus
+                        </span>
+                        <div className="flex-1 h-px bg-red-500/70" />
+                      </div>
+                    )}
+                  <div
+                    key={m.id}
+                    ref={(el) => {
+                      if (el) messageRefs.current.set(String(m.id), el);
+                      else messageRefs.current.delete(String(m.id));
+                    }}
+                    className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} relative my-1 group ${matchesSearch ? 'rounded-2xl ring-1 ring-yellow-400/60' : ''}`}
+                  >
                     {/* Ligne de message avec le bouton d'actions parfaitement aligné */}
                     <div className={`flex items-center gap-1.5 max-w-[85%] sm:max-w-[75%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                       {/* Bulle du message */}
@@ -963,11 +1389,36 @@ export const MessagesPage: React.FC = () => {
                         >
                           {urls.map((url, i) => {
                             const isVid = url.includes('.mp4') || url.includes('.webm') || url.includes('video');
-                            return isVid ? (
-                              <video key={i} src={url} controls className="rounded-2xl max-h-64 w-full object-cover" />
-                            ) : (
-                              <img key={i} src={url} alt="Pièce jointe" className="rounded-2xl max-h-64 w-full object-cover" />
-                            );
+                            const isImage = /\.(png|jpe?g|webp|gif|svg|bmp)(\?|#|$)/i.test(url);
+                            if (isVid) {
+                              return <video key={i} src={url} controls className="rounded-2xl max-h-64 w-full object-cover" />;
+                            }
+                            if (!isImage) {
+                              const fileName = (() => {
+                                try {
+                                  return decodeURIComponent(url.split('?')[0].split('/').pop() || 'Document');
+                                } catch {
+                                  return 'Document';
+                                }
+                              })();
+                              return (
+                                <a
+                                  key={i}
+                                  href={url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center gap-2.5 p-2.5 rounded-2xl bg-black/10 dark:bg-white/10 hover:bg-black/20 dark:hover:bg-white/20 transition-colors max-w-[240px]"
+                                >
+                                  <FileText className="w-6 h-6 shrink-0" />
+                                  <span className="min-w-0">
+                                    <span className="block text-[11px] font-bold truncate">{fileName}</span>
+                                    <span className="block text-[10px] opacity-70">Ouvrir le document</span>
+                                  </span>
+                                </a>
+                              );
+                            }
+                            return <img key={i} src={url} alt="Pièce jointe" className="rounded-2xl max-h-64 w-full object-cover" />;
                           })}
                         </div>
                       ) : (
@@ -1015,17 +1466,46 @@ export const MessagesPage: React.FC = () => {
                             </div>
                           )}
 
-                          {nonUrlText && <RichContent content={nonUrlText} className="leading-relaxed" />}
+                          {nonUrlText && (matchesSearch && searchQ ? (
+                            <p className="leading-relaxed break-words">{highlightMatches(nonUrlText, searchQ)}</p>
+                          ) : (
+                            <RichContent content={nonUrlText} className="leading-relaxed" />
+                          ))}
 
                           {urls.length > 0 && (
                             <div className="mt-2 space-y-1.5">
                               {urls.map((url, i) => {
                                 const isVid = url.includes('.mp4') || url.includes('.webm') || url.includes('video');
-                                return isVid ? (
-                                  <video key={i} src={url} controls className="rounded-xl max-h-48 w-full object-cover" />
-                                ) : (
-                                  <img key={i} src={url} alt="Pièce jointe" className="rounded-xl max-h-48 w-full object-cover" />
-                                );
+                                const isImage = /\.(png|jpe?g|webp|gif|svg|bmp)(\?|#|$)/i.test(url);
+                                if (isVid) {
+                                  return <video key={i} src={url} controls className="rounded-xl max-h-48 w-full object-cover" />;
+                                }
+                                if (!isImage) {
+                                  const fileName = (() => {
+                                    try {
+                                      return decodeURIComponent(url.split('?')[0].split('/').pop() || 'Document');
+                                    } catch {
+                                      return 'Document';
+                                    }
+                                  })();
+                                  return (
+                                    <a
+                                      key={i}
+                                      href={url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="flex items-center gap-2.5 p-2.5 rounded-xl bg-black/10 dark:bg-white/10 hover:bg-black/20 dark:hover:bg-white/20 transition-colors max-w-[240px]"
+                                    >
+                                      <FileText className="w-6 h-6 shrink-0" />
+                                      <span className="min-w-0">
+                                        <span className="block text-[11px] font-bold truncate">{fileName}</span>
+                                        <span className="block text-[10px] opacity-70">Ouvrir le document</span>
+                                      </span>
+                                    </a>
+                                  );
+                                }
+                                return <img key={i} src={url} alt="Pièce jointe" className="rounded-xl max-h-48 w-full object-cover" />;
                               })}
                             </div>
                           )}
@@ -1130,6 +1610,26 @@ export const MessagesPage: React.FC = () => {
                             <Copy className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Copier le message
                           </button>
 
+                          <button
+                            type="button"
+                            onClick={() => handleTranslateMessage(m)}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
+                          >
+                            <Languages className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Traduire
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePin(m)}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] vibe-chat-menu-item transition-colors text-left"
+                          >
+                            {pinnedMessages.some((p) => String(p.id) === String(m.id)) ? (
+                              <><PinOff className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Désépingler</>
+                            ) : (
+                              <><Pin className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" /> Épingler</>
+                            )}
+                          </button>
+
                           {isMe && !String(m.id).startsWith('temp') && (
                             <button
                               type="button"
@@ -1160,6 +1660,30 @@ export const MessagesPage: React.FC = () => {
                       </div>
                     )}
 
+                    {/* Traduction mAI sous la bulle originale */}
+                    {translations[m.id] && (
+                      <div className="max-w-[85%] sm:max-w-[75%] mt-1 pl-2 border-l-2 border-zinc-300 dark:border-zinc-700">
+                        <p className="text-[11px] italic text-zinc-500 dark:text-zinc-400 leading-relaxed break-words">
+                          {translations[m.id]}
+                        </p>
+                        <p className="text-[9px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+                          Traduit avec mAI
+                        </p>
+                      </div>
+                    )}
+                    {translatingIds.has(String(m.id)) && (
+                      <p className="text-[10px] text-zinc-500 mt-1 flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Traduction…
+                      </p>
+                    )}
+                    {/* Badge envoi programmé */}
+                    {(m as any).status === 'scheduled' && (
+                      <span className="mt-1 inline-flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                        <Clock className="w-2.5 h-2.5" />
+                        Envoi prévu{(m as any).send_at ? ` le ${formatTime((m as any).send_at)}` : ''}
+                      </span>
+                    )}
+
                     <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500 px-1 font-mono">
                       <span>{formatTime(m.created_at)}</span>
                       {m.is_edited && (
@@ -1182,18 +1706,40 @@ export const MessagesPage: React.FC = () => {
                       )}
                     </div>
                   </div>
+                  </>
                 );
               })}
               <div ref={messagesEndRef} />
+
+              {/* Bouton flottant « ↓ N non lus » */}
+              {showJumpToUnread && firstUnreadId && (
+                <button
+                  onClick={() => {
+                    scrollToMessage(firstUnreadId);
+                    setTimeout(() => setShowJumpToUnread(false), 3000);
+                  }}
+                  className="sticky bottom-3 ml-auto flex items-center gap-1 px-3 py-1.5 rounded-full bg-zinc-900 text-white text-[11px] font-bold shadow-xl hover:bg-zinc-800 transition-colors w-fit"
+                >
+                  ↓ Non lus
+                </button>
+              )}
             </div>
 
-            {/* Attached Multi-Media Preview (Up to 5 images / 2 videos) */}
+            {/* Attached Multi-Media Preview (images / vidéos / documents, max 50 Mo) */}
             {attachedMediaList.length > 0 && (
               <div className="vibe-chat-bottom-bar p-3 border-t flex items-center gap-2 overflow-x-auto">
                 {attachedMediaList.map((media, idx) => (
                   <div key={idx} className="relative group shrink-0">
                     {media.type === 'video' ? (
                       <video src={media.url} className="w-16 h-16 object-cover rounded-xl border border-zinc-200 dark:border-zinc-800" />
+                    ) : media.type === 'document' ? (
+                      <div className="w-40 h-16 rounded-xl border border-zinc-200 dark:border-zinc-800 flex items-center gap-2 px-2 overflow-hidden">
+                        <FileText className="w-5 h-5 shrink-0 text-zinc-500" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-bold truncate">{media.fileName || 'Document'}</p>
+                          <p className="text-[9px] text-zinc-500 font-mono">{formatFileSize(media.size)}</p>
+                        </div>
+                      </div>
                     ) : (
                       <img src={media.url} alt="Aperçu" className="w-16 h-16 object-cover rounded-xl border border-zinc-200 dark:border-zinc-800" />
                     )}
@@ -1206,7 +1752,7 @@ export const MessagesPage: React.FC = () => {
                   </div>
                 ))}
                 <span className="text-[11px] text-zinc-500 pl-2">
-                  {attachedMediaList.length} média(s) (max 50 Mo)
+                  {attachedMediaList.length} fichier(s) (max 50 Mo)
                 </span>
               </div>
             )}
@@ -1293,13 +1839,50 @@ export const MessagesPage: React.FC = () => {
                 </div>
               )}
 
+              {/* Programmation de l'envoi */}
+              {showSchedule && (
+                <div className="flex items-center gap-2 px-1 animate-fadeIn">
+                  <Clock className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                  <input
+                    type="datetime-local"
+                    value={scheduledAt}
+                    min={new Date().toISOString().slice(0, 16)}
+                    onChange={(e) => setScheduledAt(e.target.value)}
+                    className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs text-black dark:text-white focus:outline-none"
+                  />
+                  {scheduledAt && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScheduledAt('');
+                        setShowSchedule(false);
+                      }}
+                      className="text-zinc-500 hover:text-black dark:hover:text-white shrink-0"
+                      title="Annuler la programmation"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+              {scheduledAt && !showSchedule && (
+                <button
+                  type="button"
+                  onClick={() => setShowSchedule(true)}
+                  className="mx-1 w-fit flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-bold"
+                >
+                  <Clock className="w-3 h-3" />
+                  Envoi prévu le {new Date(scheduledAt).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                </button>
+              )}
+
               <div className="flex items-center gap-2 sm:gap-3">
                 <input
                   type="file"
                   ref={fileInputRef}
                   onChange={handleAttachFiles}
                   multiple
-                  accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
+                  accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt"
                   className="hidden"
                 />
 
@@ -1400,6 +1983,21 @@ export const MessagesPage: React.FC = () => {
                   )}
                 </div>
 
+                {/* Envoi programmé (horloge) : visible si texte ou média */}
+                {(messageInput.trim() || attachedMediaList.length > 0) && !activePartnerBlocked && !editingMessage && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSchedule(!showSchedule)}
+                    className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shrink-0 ${
+                      showSchedule || scheduledAt
+                        ? 'bg-zinc-900 text-white dark:bg-white dark:text-black'
+                        : 'vibe-chat-icon-btn'
+                    }`}
+                    title="Programmer l'envoi"
+                  >
+                    <Clock className="w-4 h-4" />
+                  </button>
+                )}
                 {/* Bouton d'envoi séparé : flèche allant vers le haut (ArrowUp) */}
                 <button
                   type="submit"

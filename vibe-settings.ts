@@ -27,6 +27,11 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS chat_background_theme TEXT DEFAULT 'default'`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_shape TEXT DEFAULT 'pill'`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS default_vibe_audience VARCHAR(32) DEFAULT 'public'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS scheduled_theme TEXT`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_context_posts BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_context_dms BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_context_books BOOLEAN DEFAULT FALSE`;
       await sql`
         CREATE TABLE IF NOT EXISTS vibe_audience_preferences (
           user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -125,7 +130,8 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           feed_default_mode, hide_reposts, blocked_keywords, two_factor_auth, allow_mentions,
           theme_preference, accent_color, font_size, mai_auto_approve_tools,
           posts_ai_generated_by_default, mai_default_model, mai_tts_voice, ui_language,
-          message_bubble_theme, chat_background_theme, message_bubble_shape, default_vibe_audience
+          message_bubble_theme, chat_background_theme, message_bubble_shape, default_vibe_audience,
+          scheduled_theme, onboarding_completed, mai_context_posts, mai_context_dms, mai_context_books
         )
         VALUES (
           ${userId},
@@ -156,7 +162,12 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.message_bubble_theme || 'monochrome'},
           ${body.chat_background_theme || 'default'},
           ${body.message_bubble_shape || 'pill'},
-          ${body.default_vibe_audience || 'public'}
+          ${body.default_vibe_audience || 'public'},
+          ${body.scheduled_theme ?? null},
+          ${body.onboarding_completed ?? false},
+          ${body.mai_context_posts ?? false},
+          ${body.mai_context_dms ?? false},
+          ${body.mai_context_books ?? false}
         )
         ON CONFLICT (user_id)
         DO UPDATE SET
@@ -188,6 +199,11 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           chat_background_theme = CASE WHEN ${body.chat_background_theme !== undefined} THEN EXCLUDED.chat_background_theme ELSE user_settings.chat_background_theme END,
           message_bubble_shape = CASE WHEN ${body.message_bubble_shape !== undefined} THEN EXCLUDED.message_bubble_shape ELSE user_settings.message_bubble_shape END,
           default_vibe_audience = CASE WHEN ${body.default_vibe_audience !== undefined} THEN EXCLUDED.default_vibe_audience ELSE user_settings.default_vibe_audience END,
+          scheduled_theme = CASE WHEN ${body.scheduled_theme !== undefined} THEN EXCLUDED.scheduled_theme ELSE user_settings.scheduled_theme END,
+          onboarding_completed = CASE WHEN ${body.onboarding_completed !== undefined} THEN EXCLUDED.onboarding_completed ELSE user_settings.onboarding_completed END,
+          mai_context_posts = CASE WHEN ${body.mai_context_posts !== undefined} THEN EXCLUDED.mai_context_posts ELSE user_settings.mai_context_posts END,
+          mai_context_dms = CASE WHEN ${body.mai_context_dms !== undefined} THEN EXCLUDED.mai_context_dms ELSE user_settings.mai_context_dms END,
+          mai_context_books = CASE WHEN ${body.mai_context_books !== undefined} THEN EXCLUDED.mai_context_books ELSE user_settings.mai_context_books END,
           updated_at = NOW()
       `;
 

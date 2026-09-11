@@ -15,6 +15,7 @@ import { MobileTabBar } from './components/layout/MobileTabBar';
 import { MAIDrawer } from './components/layout/MAIDrawer';
 import { FloatingAudioPlayer } from './components/feed/FloatingAudioPlayer';
 import { PostComposer } from './components/feed/PostComposer';
+import { OnboardingModal } from './components/common/OnboardingModal';
 import { HomePage } from './pages/HomePage';
 import { AuthModal } from './pages/AuthModal';
 import { PageSkeleton } from './components/common/PageSkeleton';
@@ -82,7 +83,7 @@ function ScrollManager() {
 }
 
 function VibeApp() {
-  const { isAuthenticated, isLoadingSession } = useAuth();
+  const { isAuthenticated, isLoadingSession, showOnboarding, dismissOnboarding } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
@@ -352,6 +353,9 @@ function VibeApp() {
         )}
         {/* Mini-lecteur audio flottant mAI (posts & fils de discussion) */}
         <FloatingAudioPlayer />
+
+        {/* Onboarding guidé (première visite, user_settings.onboarding_completed = false) */}
+        {showOnboarding && <OnboardingModal onDone={dismissOnboarding} />}
 
         {/* Offline status banner */}
         <OfflineBanner />
