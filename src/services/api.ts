@@ -14,9 +14,15 @@ import type {
   DMConversation,
   NotificationItem,
   MAIQuotas,
+  MAIConversationSummary,
+  MaiToolCall,
   UserSettings,
   User,
   VibeBook,
+  VibeBookMember,
+  VibeBookPost,
+  BookComment,
+  ProfileListUser,
   Poll,
   UnifiedSearchResult,
   ServerDraft,
@@ -47,6 +53,62 @@ export interface TranslateResult {
   /** true si le contenu source est déjà dans la langue cible. */
   same_language?: boolean;
   cached?: boolean;
+}
+
+/** Périodes supportées par les endpoints stats (?period=). */
+export type StatsPeriod = '7d' | '30d' | '90d' | '12m';
+
+/** Point quotidien d'une série stats créateur. */
+export interface CreatorSeriesPoint {
+  day: string;
+  views: number;
+  likes: number;
+  reposts: number;
+  replies: number;
+  profile_views: number;
+}
+
+/** Statistiques créateur agrégées (champs historiques + séries à période). */
+export interface CreatorStats {
+  total_views: number;
+  total_likes: number;
+  total_reposts: number;
+  total_replies: number;
+  posts_count: number;
+  top_post: Post | null;
+  daily: Array<{ day: string; views: number; posts: number }>;
+  period?: string;
+  series?: CreatorSeriesPoint[];
+  sources?: Array<{ source: string; views: number }>;
+  profile_views?: number;
+  /** Période précédente (comparaison de croissance). */
+  previous_period?: { total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number } | null;
+  /** Jour le plus vu (événement vues) de la période. */
+  best_day?: { day: string; views: number } | null;
+  /** Jour de publication le plus performant. */
+  best_publish_day?: { day: string; views: number; posts: number } | null;
+  /** Répartition horaire des vues (0-23). */
+  hourly?: Array<{ hour: number; views: number }>;
+  /** Top 5 des publications les plus engageantes. */
+  top_posts?: Array<Post & { engagement?: number }>;
+  /** Taux d'engagement global (%). */
+  engagement_rate?: number;
+  /** Fréquence de publication (posts/semaine). */
+  posts_per_week?: number;
+}
+
+/** Statistiques d'un post (auteur uniquement). */
+export interface PostStats {
+  views: number;
+  likes: number;
+  reposts: number;
+  replies: number;
+  bookmarks: number;
+  engagement_rate: number;
+  period?: string;
+  reach_7d: Array<{ day: string; views: number }>;
+  reach?: Array<{ day: string; views: number }>;
+  top_referrers: unknown[];
 }
 
 /** Langues cibles supportées par DeepL (libellés français). */
@@ -366,6 +428,34 @@ export class ApiService {
     }
   }
 
+  /** Top Vibe — meilleures publications des N derniers jours (Explorer). */
+  public static async getTopPosts(limit: number = 5, days: number = 30): Promise<{ success: boolean; posts: Post[] }> {
+    const qs = `?limit=${limit}&days=${days}`;
+    try {
+      return await this.cachedRequest(`/v1/posts/top${qs}`, 60000);
+    } catch {
+      try {
+        return await this.cachedRequest(`/api/vibe/posts/top${qs}`, 60000);
+      } catch {
+        return { success: false, posts: [] };
+      }
+    }
+  }
+
+  /** Top Vibers — comptes les plus suivis (Explorer). */
+  public static async getTopVibers(limit: number = 5): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number; bio?: string; is_following?: boolean }> }> {
+    const qs = `?limit=${limit}`;
+    try {
+      return await this.cachedRequest(`/v1/users/top${qs}`, 60000);
+    } catch {
+      try {
+        return await this.cachedRequest(`/api/vibe/users/top${qs}`, 60000);
+      } catch {
+        return { users: [] };
+      }
+    }
+  }
+
   public static async searchUsers(q: string): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number }> }> {
     try {
       return await this.request(`/v1/search/users?q=${encodeURIComponent(q)}`);
@@ -424,20 +514,45 @@ export class ApiService {
   }
 
   /** Statistiques créateur d'un post (auteur uniquement). */
-  public static async getPostStats(postId: string): Promise<{ views: number; likes: number; reposts: number; replies: number; bookmarks: number; engagement_rate: number; reach_7d: unknown[]; top_referrers: unknown[] }> {
+  public static async getPostStats(postId: string, period: StatsPeriod = '7d'): Promise<PostStats> {
     try {
-      return await this.cachedRequest(`/v1/posts/${postId}/stats`, 30000);
+      return await this.cachedRequest(`/v1/posts/${postId}/stats?period=${period}`, 30000);
     } catch {
-      return await this.request(`/api/vibe/posts/${postId}/stats`);
+      return await this.request(`/api/vibe/posts/${postId}/stats?period=${period}`);
     }
   }
 
-  /** Statistiques créateur agrégées (30 derniers jours). */
-  public static async getCreatorStats(): Promise<{ total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number; top_post: Post | null; daily: Array<{ day: string; views: number; posts: number }> }> {
+  /** Statistiques créateur agrégées (?period=7d|30d|90d|12m, défaut 30d). */
+  public static async getCreatorStats(period: StatsPeriod = '30d'): Promise<CreatorStats> {
     try {
-      return await this.cachedRequest('/v1/users/me/creator-stats', 60000);
+      return await this.cachedRequest(`/v1/users/me/creator-stats?period=${period}`, 60000);
     } catch {
-      return await this.request('/api/vibe/users/me/creator-stats');
+      return await this.request(`/api/vibe/users/me/creator-stats?period=${period}`);
+    }
+  }
+
+  /** Visites profil agrégées (?period=7d|30d|90d|12m, défaut 30d, soi-même uniquement). */
+  public static async getProfileViews(period: StatsPeriod = '30d'): Promise<{ period: string; total: number; series: Array<{ day: string; views: number }> }> {
+    try {
+      return await this.cachedRequest(`/v1/users/me/profile-views?period=${period}`, 60000);
+    } catch {
+      return await this.request(`/api/vibe/users/me/profile-views?period=${period}`);
+    }
+  }
+
+  /** Track une visite profil (fire-and-forget, anti-spam serveur 1/24h, pas d'auto-comptage). */
+  public static async trackProfileView(username: string, source = 'profile'): Promise<{ success: boolean; counted?: boolean }> {
+    const clean = username.replace(/^@/, '');
+    if (!clean) return { success: false };
+    const body = JSON.stringify({ source });
+    try {
+      return await this.request(`/v1/profiles/${encodeURIComponent(clean)}/view`, { method: 'POST', body });
+    } catch {
+      try {
+        return await this.request(`/api/vibe/profiles/${encodeURIComponent(clean)}/view`, { method: 'POST', body });
+      } catch {
+        return { success: false };
+      }
     }
   }
 
@@ -663,13 +778,14 @@ export class ApiService {
     id: string,
     content: string,
     media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
-    options?: { scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
+    options?: { scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private'; mediaPositions?: number[] }
   ): Promise<{ success: boolean; post: Post }> {
     const payload = {
       content,
       media_assets,
       scheduled_at: options?.scheduledAt,
       visibility: options?.visibility,
+      media_positions: options?.mediaPositions,
     };
     try {
       return await this.request(`/v1/posts/${id}`, {
@@ -725,9 +841,9 @@ export class ApiService {
   }
 
   // ─────────────────────────────────────────────
-  // LIVRES — collections de « Vibe préférées » (max 5 par compte)
+  // LIVRES — collections de « Vibe préférées » (max 5 possédés par compte, collaboratifs)
   // ─────────────────────────────────────────────
-  public static async getBooks(postId?: string): Promise<{ success: boolean; books: VibeBook[]; maxBooks: number }> {
+  public static async getBooks(postId?: string): Promise<{ success: boolean; books: VibeBook[]; maxBooks: number; ownedCount: number }> {
     const qs = postId ? `?post_id=${encodeURIComponent(postId)}` : '';
     try {
       return await this.request(`/v1/books${qs}`);
@@ -736,8 +852,10 @@ export class ApiService {
     }
   }
 
-  public static async createBook(title: string, icon: string): Promise<{ success: boolean; book: VibeBook }> {
-    const body = JSON.stringify({ title, icon });
+  public static async createBook(title: string, icon: string, isPublic = false): Promise<{ success: boolean; book: VibeBook }> {
+    // La conversation Messages du Livre est créée côté serveur : rafraîchir la liste DM
+    this.invalidateCache('/dms/');
+    const body = JSON.stringify({ title, icon, is_public: isPublic });
     try {
       return await this.request('/v1/books', { method: 'POST', body });
     } catch {
@@ -745,7 +863,17 @@ export class ApiService {
     }
   }
 
-  public static async updateBook(bookId: string, data: { title?: string; icon?: string }): Promise<{ success: boolean; book: VibeBook }> {
+  /** Recherche les Livres publics par titre (mention @livre / attachement dans un post). */
+  public static async searchPublicBooks(q: string): Promise<{ success: boolean; books: Array<{ id: string; title: string; icon?: string; owner_username?: string; owner_display_name?: string; members_count?: number; items_count?: number }> }> {
+    const qs = `?q=${encodeURIComponent(q)}`;
+    try {
+      return await this.request(`/v1/books/public${qs}`);
+    } catch {
+      return await this.request(`/api/vibe/books/public${qs}`);
+    }
+  }
+
+  public static async updateBook(bookId: string, data: { title?: string; icon?: string; is_public?: boolean }): Promise<{ success: boolean; book: VibeBook }> {
     const body = JSON.stringify(data);
     try {
       return await this.request(`/v1/books/${bookId}/update`, { method: 'POST', body });
@@ -755,6 +883,7 @@ export class ApiService {
   }
 
   public static async deleteBook(bookId: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
     try {
       return await this.request(`/v1/books/${bookId}`, { method: 'DELETE' });
     } catch {
@@ -771,11 +900,51 @@ export class ApiService {
     }
   }
 
-  public static async getBookPosts(bookId: string): Promise<{ success: boolean; book: VibeBook; posts: Post[] }> {
+  /** Contenu d'un Livre : Vibe partagées + membres. */
+  public static async getBookPosts(bookId: string): Promise<{ success: boolean; book: VibeBook; members: VibeBookMember[]; posts: VibeBookPost[] }> {
     try {
       return await this.request(`/v1/books/${bookId}/posts`);
     } catch {
       return await this.request(`/api/vibe/books/${bookId}/posts`);
+    }
+  }
+
+  /** Rejoint un Livre par code (ou URL de partage) — adhésion immédiate. */
+  public static async joinBook(code: string): Promise<{ success: boolean; book: VibeBook; already_member?: boolean }> {
+    this.invalidateCache('/dms/');
+    const body = JSON.stringify({ code });
+    try {
+      return await this.request('/v1/books/join', { method: 'POST', body });
+    } catch {
+      return await this.request('/api/vibe/books/join', { method: 'POST', body });
+    }
+  }
+
+  /** Membres d'un Livre (qui a rejoint). */
+  public static async getBookMembers(bookId: string): Promise<{ success: boolean; members: VibeBookMember[] }> {
+    try {
+      return await this.request(`/v1/books/${bookId}/members`);
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/members`);
+    }
+  }
+
+  /** Quitte un Livre collaboratif (membres non créateurs). */
+  public static async leaveBook(bookId: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    try {
+      return await this.request(`/v1/books/${bookId}/leave`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/leave`, { method: 'POST' });
+    }
+  }
+
+  /** Régénère le code de partage d'un Livre (créateur uniquement). */
+  public static async regenerateBookCode(bookId: string): Promise<{ success: boolean; join_code: string }> {
+    try {
+      return await this.request(`/v1/books/${bookId}/regenerate-code`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/books/${bookId}/regenerate-code`, { method: 'POST' });
     }
   }
 
@@ -786,6 +955,66 @@ export class ApiService {
     } catch {
       return await this.request(`/api/vibe/books/for-post/${postId}`);
     }
+  }
+
+  /** Épingle / désépingle une Vibe dans un Livre (max 3, membres autorisés). */
+  public static async pinBookPost(bookId: string, postId: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean }> {
+    return this.request(`/v1/books/${bookId}/posts/${postId}/pin`, {
+      method: 'POST',
+      body: JSON.stringify({ pinned }),
+    });
+  }
+
+  /** Exclut un membre d'un Livre (créateur uniquement). */
+  public static async kickBookMember(bookId: string, userId: string | number): Promise<{ success: boolean; removed: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}/members/${userId}`, { method: 'DELETE' });
+  }
+
+  /** Transfère la propriété d'un Livre à un membre (créateur uniquement). */
+  public static async transferBookOwnership(bookId: string, userId: string | number): Promise<{ success: boolean; new_owner: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}/members/${userId}/transfer-ownership`, { method: 'POST' });
+  }
+
+  /** Discussion du Livre : liste des commentaires (pagée). */
+  public static async getBookComments(bookId: string, limit = 50, offset = 0): Promise<{ success: boolean; comments: BookComment[] }> {
+    return this.request(`/v1/books/${bookId}/comments?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Ajoute un commentaire à la discussion du Livre (réponse citée optionnelle). */
+  public static async addBookComment(bookId: string, content: string, replyToId?: string | null): Promise<{ success: boolean; comment: BookComment }> {
+    return this.request(`/v1/books/${bookId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ content, ...(replyToId ? { reply_to_id: replyToId } : {}) }),
+    });
+  }
+
+  /** Supprime un commentaire de la discussion (auteur ou créateur du Livre). */
+  public static async deleteBookComment(bookId: string, commentId: string): Promise<{ success: boolean }> {
+    return this.request(`/v1/books/${bookId}/comments/${commentId}`, { method: 'DELETE' });
+  }
+
+  /** Réagit à un message de la discussion du Livre (toggle emoji). */
+  public static async reactBookComment(
+    bookId: string,
+    commentId: string,
+    emoji: string
+  ): Promise<{ success: boolean; reacted: boolean; reactions: { emoji: string; count: number; mine: boolean }[] }> {
+    return this.request(`/v1/books/${bookId}/comments/${commentId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  /** Abonnés d'un profil (liste paginée, avec état « je suis »). */
+  public static async getProfileFollowers(username: string, limit = 20, offset = 0): Promise<{ users: ProfileListUser[]; has_more: boolean }> {
+    return this.request(`/v1/profiles/${username}/followers?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Abonnements d'un profil (liste paginée, avec état « je suis »). */
+  public static async getProfileFollowing(username: string, limit = 20, offset = 0): Promise<{ users: ProfileListUser[]; has_more: boolean }> {
+    return this.request(`/v1/profiles/${username}/following?limit=${limit}&offset=${offset}`);
   }
 
   /** Retour d'algorithme sur un post : 'more' | 'less' | null (désactive). */
@@ -807,16 +1036,18 @@ export class ApiService {
    * Incrémente le compteur d'impressions d'un post. Appelé fire-and-forget
    * par le tracking de vues (IntersectionObserver), sans invalidation de
    * cache : le compteur est volontairement approximatif côté affichage.
+   * Accepte le temps passé pour le profil temporel (post_views).
    */
-  public static async viewPost(id: string): Promise<{ success: boolean; views_count: number | null }> {
+  public static async viewPost(id: string, opts?: { duration_ms?: number; dwell_ms?: number; visible_ratio?: number; source?: string }): Promise<{ success: boolean; views_count: number | null }> {
+    const body = opts ? JSON.stringify({ duration_ms: opts.duration_ms, dwell_ms: opts.dwell_ms, visible_ratio: opts.visible_ratio, source: opts.source }) : undefined;
     try {
-      return await this.request(`/v1/posts/${id}/view`, { method: 'POST' });
+      return await this.request(`/v1/posts/${id}/view`, { method: 'POST', ...(body ? { body } : {}) });
     } catch {
-      return await this.request(`/api/vibe/posts/${id}/view`, { method: 'POST' });
+      return await this.request(`/api/vibe/posts/${id}/view`, { method: 'POST', ...(body ? { body } : {}) });
     }
   }
 
-  /** Épingler / désépingler un post sur son profil (max 3, contrôlé serveur). */
+  /** Épingler / désépingler un post sur son profil (max 2, contrôlé serveur). */
   public static async setPostPinned(id: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean; pinned_count?: number; code?: string; error?: string }> {
     try {
       return await this.request(`/v1/posts/${id}/pin`, {
@@ -827,6 +1058,23 @@ export class ApiService {
       // Limite d'épinglage atteinte : pas de fallback, on propage le code
       if (err?.code === 'PIN_LIMIT') throw err;
       return await this.request(`/api/vibe/posts/${id}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ pinned }),
+      });
+    }
+  }
+
+  /** Épingler / retirer de son profil un post d'un autre compte (max 2 au total, contrôlé serveur). */
+  public static async setPostProfilePinned(id: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean; pinned_count?: number; code?: string; error?: string }> {
+    try {
+      return await this.request(`/v1/posts/${id}/profile-pin`, {
+        method: 'POST',
+        body: JSON.stringify({ pinned }),
+      });
+    } catch (err: any) {
+      // Limite d'épinglage atteinte : pas de fallback, on propage le code
+      if (err?.code === 'PIN_LIMIT') throw err;
+      return await this.request(`/api/vibe/posts/${id}/profile-pin`, {
         method: 'POST',
         body: JSON.stringify({ pinned }),
       });
@@ -849,7 +1097,7 @@ export class ApiService {
     content: string,
     parent_comment_id?: string,
     media_assets?: Array<{ url: string; media_type: string; alt_text?: string }>
-  ): Promise<{ success: boolean; comment: Comment }> {
+  ): Promise<{ success: boolean; comment: Comment; ai_pending?: boolean }> {
     const payload = { content, parent_comment_id, media_assets };
     try {
       return await this.request(`/v1/posts/${postId}/comments`, {
@@ -891,19 +1139,98 @@ export class ApiService {
     }
   }
 
-  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string, send_at?: string): Promise<{ success: boolean; message: DirectMessage; scheduled?: boolean }> {
+  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string, send_at?: string, conversation_id?: string, forwarded_from?: { message_id: string } | null, attached_post_id?: string): Promise<{ success: boolean; message: DirectMessage; scheduled?: boolean }> {
     this.invalidateCache('/dms/');
+    const body = JSON.stringify({ recipient_id, content, reply_to_id, send_at, conversation_id, forwarded_from, attached_post_id });
     try {
-      return await this.request('/v1/dms/messages', {
-        method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id, send_at }),
-      });
+      return await this.request('/v1/dms/messages', { method: 'POST', body });
     } catch {
-      return await this.request('/api/vibe/dms/messages', {
-        method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id, send_at }),
-      });
+      return await this.request('/api/vibe/dms/messages', { method: 'POST', body });
     }
+  }
+
+  // ─────────────────────────────────────────────
+  // MESSAGES DE GROUPE (migration 019)
+  // ─────────────────────────────────────────────
+  /** Crée un groupe dont le créateur devient admin. */
+  public static async createGroup(name: string, memberIds: Array<string | number>): Promise<{ success: boolean; conversation_id: string; name: string; member_count: number }> {
+    this.invalidateCache('/dms/');
+    return this.request('/v1/dms/groups', {
+      method: 'POST',
+      body: JSON.stringify({ name, member_ids: memberIds }),
+    });
+  }
+
+  /** Ajoute des membres (admin) — les ajoutés récupèrent tout l'historique. */
+  public static async addGroupMembers(groupId: string, memberIds: Array<string | number>): Promise<{ success: boolean; added: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ member_ids: memberIds }),
+    });
+  }
+
+  /** Retire un membre (admin) ou quitte le groupe soi-même. */
+  public static async removeGroupMember(groupId: string, userId: string | number): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members/${userId}`, { method: 'DELETE' });
+  }
+
+  /** Détails d'un groupe (nom, membres, rôle admin). */
+  public static async getGroup(groupId: string): Promise<{ group: { id: string; group_name: string; group_avatar_url?: string; created_by: string; is_admin: boolean; members: Array<{ user_id: string; username: string; display_name?: string; avatar_url?: string; role: string; joined_at: string }> } }> {
+    return this.request(`/v1/dms/groups/${groupId}`);
+  }
+
+  /** Met à jour le groupe (admin) : nom et/ou photo. */
+  public static async updateGroup(groupId: string, data: { name?: string; avatar_url?: string | null }): Promise<{ success: boolean; group?: { group_name: string; group_avatar_url: string | null } }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Supprime définitivement le groupe (admin). */
+  public static async deleteGroup(groupId: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}`, { method: 'DELETE' });
+  }
+
+  /** Transfère le rôle d'administrateur du groupe à un membre. */
+  public static async transferGroupAdmin(groupId: string, userId: string | number): Promise<{ success: boolean; new_admin: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members/${userId}/transfer-admin`, { method: 'POST' });
+  }
+
+  /** Masque un message pour soi uniquement (« supprimer pour moi »). */
+  public static async hideMessage(messageId: string): Promise<{ success: boolean; hidden: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/messages/${messageId}/hide`, { method: 'POST' });
+  }
+
+  /** Mémorise côté serveur une traduction de message (max 3 langues). */
+  public static async saveMessageTranslation(messageId: string, lang: string, text: string, detected?: string | null): Promise<{ success: boolean; translations: Record<string, { text: string; detected?: string | null; at?: string }> }> {
+    return this.request(`/v1/dms/messages/${messageId}/translations`, {
+      method: 'POST',
+      body: JSON.stringify({ lang, text, detected }),
+    });
+  }
+
+  /** Catalogue des outils mAI (lib/tools/index.json, filtré par réglages). */
+  public static async getMAITools(): Promise<{ tools: Array<{ id: string; name: string; slash_command: string; mention_tag: string; description: string; icon_name: string; category: string; sensitive: boolean }> }> {
+    try {
+      return await this.request('/v1/mai/tools');
+    } catch {
+      return await this.request('/api/vibe/mai/tools');
+    }
+  }
+
+  /** Enregistre la liste des outils mAI activés (Paramètres → Outils mAI). */
+  public static async updateMAITools(enabledToolIds: string[]): Promise<{ success: boolean; enabled_tool_ids: string[] }> {
+    return this.request('/v1/mai/tools', {
+      method: 'POST',
+      body: JSON.stringify({ enabled_tool_ids: enabledToolIds }),
+    });
   }
 
   public static async reactToMessage(messageId: string, emoji: string): Promise<{ success: boolean; reacted: boolean; reactions: { emoji: string; count: number; mine: boolean }[] }> {
@@ -1227,9 +1554,20 @@ export class ApiService {
     message: string,
     execute_tool?: { name: string; args: any },
     model?: string,
-    context?: { post_id?: string }
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any }; conversation_id?: string }> {
-    const payload = { message, execute_tool, model, context };
+    context?: { post_id?: string },
+    conversationId?: string
+  ): Promise<{
+    reply: string;
+    toolExecuted?: any;
+    toolCalls?: MaiToolCall[];
+    modelUsed?: string;
+    requiresApproval?: boolean;
+    pendingTool?: { name: string; args: any };
+    conversation_id?: string | null;
+    user_message_id?: string | null;
+    assistant_message_id?: string | null;
+  }> {
+    const payload = { message, execute_tool, model, context, conversation_id: conversationId };
     try {
       return await this.request('/v1/mai/chat', {
         method: 'POST',
@@ -1243,12 +1581,35 @@ export class ApiService {
     }
   }
 
-  /** Historique de la conversation mAI active (persistance serveur). */
-  public static async getMAIHistory(): Promise<{ conversation_id: string | null; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; created_at: string }> }> {
+  /** Régénère la dernière réponse mAI de la conversation (sans rejouer tout le fil). */
+  public static async regenerateMAI(opts?: { model?: string; postId?: string; conversationId?: string }): Promise<{ success: boolean; reply: string; message_id: string | null; modelUsed?: string; conversation_id?: string | null }> {
+    const payload = JSON.stringify({
+      model: opts?.model,
+      context: opts?.postId ? { post_id: opts.postId } : undefined,
+      conversation_id: opts?.conversationId,
+    });
     try {
-      return await this.request('/v1/mai/history');
+      return await this.request('/v1/mai/regenerate', { method: 'POST', body: payload });
     } catch {
-      return await this.request('/api/vibe/mai/history');
+      return await this.request('/api/vibe/mai/regenerate', { method: 'POST', body: payload });
+    }
+  }
+
+  /** Historique d'une conversation mAI (persistance serveur, multi-conversations). */
+  public static async getMAIHistory(conversationId?: string, limit?: number, offset?: number): Promise<{
+    conversation_id: string | null;
+    messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; tool_calls?: MaiToolCall[]; created_at: string }>;
+    has_more?: boolean;
+  }> {
+    const params = new URLSearchParams();
+    if (conversationId) params.set('conversation_id', conversationId);
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    try {
+      return await this.request(`/v1/mai/history${qs}`);
+    } catch {
+      return await this.request(`/api/vibe/mai/history${qs}`);
     }
   }
 
@@ -1261,22 +1622,79 @@ export class ApiService {
     }
   }
 
+  /** Liste des conversations mAI de l'utilisateur (page Studio). */
+  public static async getMAIConversations(): Promise<{ success: boolean; conversations: MAIConversationSummary[] }> {
+    try {
+      return await this.request('/v1/mai/conversations');
+    } catch {
+      return await this.request('/api/vibe/mai/conversations');
+    }
+  }
+
+  /** Renomme une conversation mAI. */
+  public static async renameMAIConversation(conversationId: string, title: string): Promise<{ success: boolean; conversation: { id: string; title: string } }> {
+    const body = JSON.stringify({ title });
+    try {
+      return await this.request(`/v1/mai/conversations/${conversationId}/rename`, { method: 'POST', body });
+    } catch {
+      return await this.request(`/api/vibe/mai/conversations/${conversationId}/rename`, { method: 'POST', body });
+    }
+  }
+
+  /** Supprime une conversation mAI (messages en cascade). */
+  public static async deleteMAIConversation(conversationId: string): Promise<{ success: boolean; deleted: string }> {
+    try {
+      return await this.request(`/v1/mai/conversations/${conversationId}`, { method: 'DELETE' });
+    } catch {
+      return await this.request(`/api/vibe/mai/conversations/${conversationId}`, { method: 'DELETE' });
+    }
+  }
+
+  /** Duplique une conversation mAI (messages copiés). */
+  public static async duplicateMAIConversation(conversationId: string): Promise<{ success: boolean; conversation_id: string }> {
+    try {
+      return await this.request(`/v1/mai/conversations/${conversationId}/duplicate`, { method: 'POST' });
+    } catch {
+      return await this.request(`/api/vibe/mai/conversations/${conversationId}/duplicate`, { method: 'POST' });
+    }
+  }
+
   /** Exécute un outil mAI explicitement approuvé par l'utilisateur. */
   public static async executeMAITool(
     name: string,
     args: any = {},
-    model?: string
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string }> {
+    model?: string,
+    approve: boolean = false,
+    conversationId?: string
+  ): Promise<{
+    reply: string;
+    toolExecuted?: any;
+    toolCalls?: MaiToolCall[];
+    modelUsed?: string;
+    requiresApproval?: boolean;
+    pendingTool?: { name: string; args: any };
+    conversation_id?: string | null;
+    assistant_message_id?: string | null;
+  }> {
+    const body = JSON.stringify({ name, args, model, approve, conversation_id: conversationId });
     try {
-      return await this.request('/v1/mai/execute-tool', {
-        method: 'POST',
-        body: JSON.stringify({ name, args, model }),
-      });
+      return await this.request('/v1/mai/execute-tool', { method: 'POST', body });
     } catch {
-      return await this.request('/api/vibe/mai/execute-tool', {
-        method: 'POST',
-        body: JSON.stringify({ name, args, model }),
-      });
+      return await this.request('/api/vibe/mai/execute-tool', { method: 'POST', body });
+    }
+  }
+
+  /** Refuse l'exécution d'un outil sensible (flux d'approbation persisté). */
+  public static async refuseMAITool(
+    name: string,
+    args: any = {},
+    conversationId?: string
+  ): Promise<{ success: boolean; reply: string; toolCalls?: MaiToolCall[]; conversation_id?: string | null; message_id?: string | null }> {
+    const body = JSON.stringify({ name, args, conversation_id: conversationId });
+    try {
+      return await this.request('/v1/mai/tool-refused', { method: 'POST', body });
+    } catch {
+      return await this.request('/api/vibe/mai/tool-refused', { method: 'POST', body });
     }
   }
 
@@ -1316,6 +1734,8 @@ export class ApiService {
   }
 
   public static async updateProfile(data: Partial<Profile>): Promise<{ success: boolean }> {
+    // Sans invalidation, le profil GET en cache (30 s) réaffichait l'ancien pseudo/tags après save
+    this.invalidateCache('/profiles/');
     try {
       return await this.request('/v1/profile/update', {
         method: 'POST',

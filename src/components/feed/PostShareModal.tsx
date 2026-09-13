@@ -10,6 +10,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
+import { makeExcerpt } from '../common/richTextUtils';
 import {
   X,
   Search,
@@ -56,8 +57,7 @@ export const PostShareModal: React.FC<PostShareModalProps> = ({ post, onClose })
 
   // Snippet du message de partage : auteur + extrait + lien
   const defaultShareMessage = useMemo(() => {
-    const plain = (post.content || '').replace(/<[^>]*>/g, ' ').trim();
-    const excerpt = plain.length > 80 ? `${plain.slice(0, 80)}…` : plain;
+    const excerpt = makeExcerpt(post.content, 80);
     return excerpt ? `À voir sur Vibe — @${post.username} : « ${excerpt} »\n${postUrl}` : `À voir sur Vibe : ${postUrl}`;
   }, [post.content, post.username, postUrl]);
 

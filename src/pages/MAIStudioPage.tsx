@@ -20,24 +20,57 @@ import {
   ShieldCheck,
   ShieldAlert,
   SquarePen,
-  XCircle
+  XCircle,
+  Trash2,
+  CopyPlus,
+  Download,
+  ClipboardCopy,
+  FileJson,
+  Menu,
+  MoreVertical,
+  MessagesSquare
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { ApiService } from '../services/api';
 import { ToolAutocomplete } from '../components/layout/ToolAutocomplete';
-import { MAITool } from '../data/maiTools';
+import { type MAITool } from '../data/maiTools';
 import { ModelDropdown } from '../components/common/ModelDropdown';
 import { RichContent } from '../components/common/RichContent';
+import { ShareToDMModal } from '../components/common/ShareToDMModal';
+import { MaiToolChips } from '../components/mai/MaiToolChips';
+import { useConfirmDialog } from '../components/common/ConfirmDialog';
+import { haptics } from '../services/haptics';
+import { NotificationService } from '../services/notificationService';
+import { downloadTextFile } from '../services/mediaActions';
+import { maiExportSlug, buildMAIConversationMarkdown, buildMAIConversationJSON } from '../algorithms';
+import type { MaiToolCall, MAIConversationSummary } from '../types/vibe';
 
 interface ChatMessage {
   id: string;
+  /** Id serveur du message persisté (mai_messages.id). */
+  serverId?: string;
   sender: 'user' | 'mai';
   content: string;
   toolExecuted?: any;
+  /** Outils utilisés par l'IA (chips persistantes). */
+  toolCalls?: MaiToolCall[];
   modelUsed?: string;
   time: string;
   requiresApproval?: boolean;
 }
+
+const formatConvDate = (iso?: string): string => {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const sameDay = d.toDateString() === new Date().toDateString();
+    return sameDay
+      ? d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+  } catch {
+    return '';
+  }
+};
 
 const DEFAULT_MODELS = [
   { id: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1', description: 'Modèle IA par défaut haute performance', provider: 'Poolside' },
@@ -58,11 +91,23 @@ export const MAIStudioPage: React.FC = () => {
   const [promptInput, setPromptInput] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [shareMessageText, setShareMessageText] = useState<string | null>(null);
   // Approbation des outils sensibles : l'IA doit demander l'accord de
   // l'utilisateur, sauf si l'auto-approbation a été activée en paramètre.
   const [pendingTool, setPendingTool] = useState<{ name: string; args: any } | null>(null);
   const [autoApprove, setAutoApprove] = useState<boolean>(false);
   const [isApproving, setIsApproving] = useState(false);
+
+  // Multi-conversations mAI (liste latérale, renommage, duplication, export)
+  const [conversations, setConversations] = useState<MAIConversationSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [convItemMenuId, setConvItemMenuId] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirmDialog();
 
   // Autocomplete state
   const [autocompleteTrigger, setAutocompleteTrigger] = useState<'/' | '@' | null>(null);
@@ -88,6 +133,16 @@ export const MAIStudioPage: React.FC = () => {
         }
       } catch {}
     };
+
+    // Préremplissage depuis un lien externe (?prefill=…) — ex. bouton mAI de la page Statistiques
+    try {
+      const prefill = new URLSearchParams(window.location.search).get('prefill');
+      if (prefill && prefill.trim()) {
+        setPromptInput(prefill.trim());
+        // Nettoie l'URL pour éviter le renvoi du prompt au rafraîchissement
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    } catch {}
     ApiService.getSettings()
       .then((res: any) => {
         const saved = res?.settings?.mai_default_model;
@@ -103,32 +158,192 @@ export const MAIStudioPage: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Chargement de l'historique persisté de la conversation mAI
+  // Multi-conversations : liste + chargement de l'historique persisté
+  const loadConversations = async (): Promise<MAIConversationSummary[]> => {
+    try {
+      const res = await ApiService.getMAIConversations();
+      const list = res.conversations || [];
+      setConversations(list);
+      return list;
+    } catch {
+      return [];
+    }
+  };
+
+  const loadHistory = async (conversationId?: string | null) => {
+    try {
+      const res = await ApiService.getMAIHistory(conversationId || undefined);
+      setActiveConversationId(res.conversation_id || null);
+      setMessages(
+        (res.messages || []).map((m) => ({
+          id: m.id,
+          serverId: m.id,
+          sender: m.role === 'assistant' ? ('mai' as const) : ('user' as const),
+          content: m.content,
+          toolCalls: Array.isArray(m.tool_calls) ? m.tool_calls : [],
+          time: new Date(m.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        }))
+      );
+      setPendingTool(null);
+    } catch {}
+  };
+
   useEffect(() => {
-    ApiService.getMAIHistory()
-      .then((res) => {
-        if (res.messages && res.messages.length > 0) {
-          setMessages(
-            res.messages.map((m) => ({
-              id: m.id,
-              sender: m.role === 'assistant' ? ('mai' as const) : ('user' as const),
-              content: m.content,
-              time: new Date(m.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-            }))
-          );
-        }
-      })
-      .catch(() => {});
+    (async () => {
+      setConversationsLoading(true);
+      const list = await loadConversations();
+      await loadHistory(list[0]?.id);
+      // Aucune conversation existante : l'historique vient d'en créer une
+      if (list.length === 0) await loadConversations();
+      setConversationsLoading(false);
+    })();
   }, []);
+
+  const handleSelectConversation = (conversationId: string) => {
+    haptics.light();
+    setActiveConversationId(conversationId);
+    setConvItemMenuId(null);
+    setSidebarOpen(false);
+    setPendingTool(null);
+    loadHistory(conversationId);
+  };
 
   // Démarrer une nouvelle conversation mAI (vide l'historique actif)
   const handleNewConversation = async () => {
     try {
-      await ApiService.newMAIConversation();
+      const res = await ApiService.newMAIConversation();
+      if (res?.conversation_id) setActiveConversationId(res.conversation_id);
       setMessages([]);
       setPendingTool(null);
+      setConvItemMenuId(null);
+      setSidebarOpen(false);
+      await loadConversations();
       inputRef.current?.focus();
     } catch {}
+  };
+
+  /** Renomme une conversation (Entrée / perte de focus valident, Échap annule). */
+  const handleRenameConversation = async (conversationId: string, title: string) => {
+    const clean = title.replace(/\s+/g, ' ').trim();
+    setRenamingId(null);
+    setRenameDraft('');
+    if (!clean) return;
+    const current = conversations.find((c) => c.id === conversationId);
+    if (current && current.title === clean) return;
+    try {
+      await ApiService.renameMAIConversation(conversationId, clean);
+      setConversations((list) => list.map((c) => (c.id === conversationId ? { ...c, title: clean } : c)));
+    } catch (err: any) {
+      NotificationService.showInAppToast('Renommage', err?.message || 'Impossible de renommer la discussion.', 'error');
+    }
+  };
+
+  /** Supprime une conversation (messages en cascade) + bascule sur la suivante. */
+  const handleDeleteConversation = async (conversationId: string) => {
+    setConvItemMenuId(null);
+    const ok = await confirm({
+      title: 'Supprimer cette discussion ?',
+      message: 'Tous ses messages seront définitivement supprimés.',
+      confirmLabel: 'Supprimer',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await ApiService.deleteMAIConversation(conversationId);
+      const list = await loadConversations();
+      if (activeConversationId === conversationId) {
+        const next = list[0]?.id || null;
+        setPendingTool(null);
+        await loadHistory(next);
+      }
+      haptics.medium();
+      NotificationService.showInAppToast('Discussion supprimée', 'La conversation a été supprimée.', 'info');
+    } catch (err: any) {
+      haptics.error();
+      NotificationService.showInAppToast('Suppression', err?.message || 'Impossible de supprimer la discussion.', 'error');
+    }
+  };
+
+  /** Duplique une conversation (messages copiés) puis l'ouvre. */
+  const handleDuplicateConversation = async (conversationId: string) => {
+    setConvItemMenuId(null);
+    try {
+      const res = await ApiService.duplicateMAIConversation(conversationId);
+      await loadConversations();
+      if (res?.conversation_id) {
+        await loadHistory(res.conversation_id);
+        setActiveConversationId(res.conversation_id);
+      }
+      haptics.success();
+      NotificationService.showInAppToast('Discussion dupliquée', 'La copie est prête dans la liste.', 'success');
+    } catch (err: any) {
+      haptics.error();
+      NotificationService.showInAppToast('Duplication', err?.message || 'Impossible de dupliquer la discussion.', 'error');
+    }
+  };
+
+  /** Charge l'intégralité d'une conversation (pour export / copie). */
+  const fetchFullConversation = async (conversationId: string) => {
+    const res = await ApiService.getMAIHistory(conversationId, 1000);
+    const summary = conversations.find((c) => c.id === conversationId);
+    return {
+      conv: {
+        id: conversationId,
+        title: summary?.title || 'Discussion mAI',
+        created_at: summary?.created_at,
+        updated_at: summary?.updated_at,
+      },
+      messages: (res.messages || []).map((m) => ({
+        role: m.role,
+        content: m.content,
+        created_at: m.created_at,
+        tool_calls: Array.isArray(m.tool_calls) ? m.tool_calls : [],
+      })),
+    };
+  };
+
+  /** Export fichier Markdown / JSON d'une conversation. */
+  const handleExportConversation = async (conversationId: string, format: 'md' | 'json') => {
+    setConvItemMenuId(null);
+    try {
+      const { conv, messages: msgs } = await fetchFullConversation(conversationId);
+      const slug = maiExportSlug(conv.title);
+      if (format === 'md') {
+        downloadTextFile(`${slug}.md`, buildMAIConversationMarkdown(conv, msgs), 'text/markdown;charset=utf-8');
+      } else {
+        downloadTextFile(`${slug}.json`, buildMAIConversationJSON(conv, msgs), 'application/json;charset=utf-8');
+      }
+      haptics.success();
+      NotificationService.showInAppToast('Export', `Discussion exportée en ${format.toUpperCase()}.`, 'success');
+    } catch (err: any) {
+      haptics.error();
+      NotificationService.showInAppToast('Export', err?.message || "L'export a échoué.", 'error');
+    }
+  };
+
+  /** Copie la conversation entière (Markdown) dans le presse-papiers. */
+  const handleCopyConversation = async (conversationId: string) => {
+    setConvItemMenuId(null);
+    try {
+      const { conv, messages: msgs } = await fetchFullConversation(conversationId);
+      await navigator.clipboard.writeText(buildMAIConversationMarkdown(conv, msgs));
+      haptics.success();
+      NotificationService.showInAppToast('Copié', 'La discussion a été copiée dans le presse-papiers.', 'success');
+    } catch (err: any) {
+      NotificationService.showInAppToast('Copie', err?.message || 'Impossible de copier la discussion.', 'error');
+    }
+  };
+
+  const handleCopyConversationAsJson = async (conversationId: string) => {
+    setConvItemMenuId(null);
+    try {
+      const { conv, messages: msgs } = await fetchFullConversation(conversationId);
+      await navigator.clipboard.writeText(buildMAIConversationJSON(conv, msgs));
+      haptics.success();
+      NotificationService.showInAppToast('Copié', 'JSON de la discussion copié.', 'success');
+    } catch (err: any) {
+      NotificationService.showInAppToast('Copie', err?.message || 'Impossible de copier la discussion.', 'error');
+    }
   };
 
   // Charger le réglage d'auto-approbation des outils mAI
@@ -200,12 +415,35 @@ export const MAIStudioPage: React.FC = () => {
     setIsExecuting(true);
 
     try {
-      const res = await ApiService.chatMAI(query, undefined, selectedModel);
+      const res = await ApiService.chatMAI(query, undefined, selectedModel, undefined, activeConversationId || undefined);
+      // Outils utilisés (persistés côté serveur) — repli local pour les anciens formats
+      const toolCalls: MaiToolCall[] = res.toolCalls?.length
+        ? res.toolCalls
+        : res.toolExecuted
+        ? [{
+            id: `local-${Date.now()}`,
+            name: res.toolExecuted.name,
+            args: {},
+            status: res.toolExecuted.result?.success === false ? 'error' : 'executed',
+            result: res.toolExecuted.result,
+            at: new Date().toISOString(),
+          }]
+        : res.requiresApproval && res.pendingTool
+        ? [{
+            id: `local-${Date.now()}`,
+            name: res.pendingTool.name,
+            args: res.pendingTool.args,
+            status: 'pending_approval',
+            at: new Date().toISOString(),
+          }]
+        : [];
       const maiMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
+        serverId: res.assistant_message_id || undefined,
         sender: 'mai',
         content: res.reply,
         toolExecuted: res.toolExecuted,
+        toolCalls,
         modelUsed: res.modelUsed || selectedModel,
         time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
         requiresApproval: Boolean(res.requiresApproval),
@@ -214,6 +452,11 @@ export const MAIStudioPage: React.FC = () => {
       if (res.requiresApproval && res.pendingTool) {
         setPendingTool(res.pendingTool);
       }
+      if (res.conversation_id && res.conversation_id !== activeConversationId) {
+        setActiveConversationId(res.conversation_id);
+      }
+      // Titre automatique (premier message) + ordre de la liste
+      loadConversations();
       refreshQuotas();
     } catch (err: any) {
       const errorMsg: ChatMessage = {
@@ -234,7 +477,7 @@ export const MAIStudioPage: React.FC = () => {
     const tool = pendingTool;
     setPendingTool(null);
 
-    const pushMaiMsg = (content: string, toolExecuted?: any) => {
+    const pushMaiMsg = (content: string, toolExecuted?: any, toolCalls?: MaiToolCall[]) => {
       setMessages((prev) => [
         ...prev,
         {
@@ -242,6 +485,7 @@ export const MAIStudioPage: React.FC = () => {
           sender: 'mai',
           content,
           toolExecuted,
+          toolCalls,
           modelUsed: selectedModel,
           time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
         },
@@ -249,14 +493,20 @@ export const MAIStudioPage: React.FC = () => {
     };
 
     if (!approved) {
-      pushMaiMsg(`🚫 Très bien, je n'exécute pas l'outil « ${tool.name} ». Dites-moi si je peux faire autre chose pour vous.`);
+      // Refus persisté côté serveur (flux d'approbation conservé dans l'historique)
+      try {
+        const res = await ApiService.refuseMAITool(tool.name, tool.args, activeConversationId || undefined);
+        pushMaiMsg(res.reply, undefined, res.toolCalls);
+      } catch {
+        pushMaiMsg(`🚫 Très bien, je n'exécute pas l'outil « ${tool.name} ». Dites-moi si je peux faire autre chose pour vous.`);
+      }
       setIsApproving(false);
       return;
     }
 
     try {
-      const res = await ApiService.executeMAITool(tool.name, tool.args, selectedModel);
-      pushMaiMsg(res.reply, res.toolExecuted);
+      const res = await ApiService.executeMAITool(tool.name, tool.args, selectedModel, true, activeConversationId || undefined);
+      pushMaiMsg(res.reply, res.toolExecuted, res.toolCalls);
       refreshQuotas();
     } catch (err: any) {
       pushMaiMsg(`⚠️ Erreur lors de l'exécution de « ${tool.name} » : ${err.message || 'réessayez plus tard.'}`);
@@ -283,11 +533,207 @@ export const MAIStudioPage: React.FC = () => {
     );
   };
 
+  /** Regénère la dernière réponse mAI (remplace la bulle, sans rejouer le prompt côté client). */
+  const handleRegenerate = async () => {
+    if (isRegenerating || isExecuting) return;
+    setIsRegenerating(true);
+    try {
+      const res = await ApiService.regenerateMAI({ model: selectedModel, conversationId: activeConversationId || undefined });
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].sender === 'mai') {
+            next[i] = {
+              ...next[i],
+              content: res.reply,
+              toolExecuted: null,
+              toolCalls: [],
+              modelUsed: res.modelUsed || next[i].modelUsed,
+            };
+            break;
+          }
+        }
+        return next;
+      });
+      haptics.success();
+      refreshQuotas();
+    } catch (err: any) {
+      haptics.error();
+      NotificationService.showInAppToast(
+        'Régénération',
+        err?.message || 'La régénération de la réponse a échoué.',
+        'error'
+      );
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  // Liste des conversations mAI (sidebar desktop + tiroir mobile)
+  const conversationList = (
+    <>
+      <div className="p-3 border-b border-zinc-800 flex items-center justify-between gap-2 shrink-0">
+        <span className="text-xs font-bold text-white uppercase tracking-wide flex items-center gap-1.5">
+          <MessagesSquare className="w-3.5 h-3.5" /> Discussions
+        </span>
+        <button
+          onClick={handleNewConversation}
+          title="Nouvelle discussion mAI"
+          className="p-1.5 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+        >
+          <SquarePen className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5 min-h-0">
+        {conversationsLoading && conversations.length === 0 ? (
+          <div className="p-4 text-center text-[11px] text-zinc-500 flex items-center justify-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Chargement…
+          </div>
+        ) : conversations.length === 0 ? (
+          <p className="p-4 text-center text-[11px] text-zinc-500">Aucune discussion pour l'instant.</p>
+        ) : (
+          conversations.map((c) => {
+            const isActive = c.id === activeConversationId;
+            const isRenaming = renamingId === c.id;
+            return (
+              <div
+                key={c.id}
+                className={`group/item relative rounded-xl transition-colors ${isActive ? 'bg-zinc-900' : 'hover:bg-zinc-900/60'}`}
+              >
+                {isRenaming ? (
+                  <input
+                    autoFocus
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleRenameConversation(c.id, renameDraft);
+                      }
+                      if (e.key === 'Escape') {
+                        setRenamingId(null);
+                        setRenameDraft('');
+                      }
+                    }}
+                    onBlur={() => handleRenameConversation(c.id, renameDraft)}
+                    maxLength={120}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-white focus:outline-none"
+                  />
+                ) : (
+                  <button type="button" onClick={() => handleSelectConversation(c.id)} className="w-full text-left px-3 py-2 pr-9">
+                    <span className="flex items-center gap-1.5">
+                      <span className="block text-[11px] font-bold text-white truncate flex-1">{c.title}</span>
+                      <span className="text-[9px] text-zinc-600 font-mono shrink-0">{formatConvDate(c.updated_at)}</span>
+                    </span>
+                    <span className="block text-[10px] text-zinc-600 truncate mt-0.5">
+                      {c.preview || `${c.message_count || 0} message${(c.message_count || 0) > 1 ? 's' : ''}`}
+                    </span>
+                  </button>
+                )}
+                {!isRenaming && (
+                  <div className="absolute right-1 top-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setConvItemMenuId(convItemMenuId === c.id ? null : c.id)}
+                      className={`p-1 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-800 transition-opacity ${convItemMenuId === c.id ? 'opacity-100' : 'opacity-0 group-hover/item:opacity-100'}`}
+                      title="Actions de la discussion"
+                    >
+                      <MoreVertical className="w-3.5 h-3.5" />
+                    </button>
+                    {convItemMenuId === c.id && (
+                      <>
+                        <div className="fixed inset-0 z-30" onClick={() => setConvItemMenuId(null)} />
+                        <div className="absolute right-0 top-full mt-1 w-48 z-40 p-1 rounded-xl vibe-menu shadow-2xl animate-fadeIn">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConvItemMenuId(null);
+                              setRenamingId(c.id);
+                              setRenameDraft(c.title);
+                            }}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" /> Renommer
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDuplicateConversation(c.id)}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <CopyPlus className="w-3.5 h-3.5" /> Dupliquer
+                          </button>
+                          <div className="border-t border-zinc-800 my-1" />
+                          <button
+                            type="button"
+                            onClick={() => handleExportConversation(c.id, 'md')}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <Download className="w-3.5 h-3.5" /> Exporter (Markdown)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportConversation(c.id, 'json')}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <FileJson className="w-3.5 h-3.5" /> Exporter (JSON)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyConversation(c.id)}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <ClipboardCopy className="w-3.5 h-3.5" /> Copier (Markdown)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyConversationAsJson(c.id)}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white text-left"
+                          >
+                            <ClipboardCopy className="w-3.5 h-3.5" /> Copier (JSON)
+                          </button>
+                          <div className="border-t border-zinc-800 my-1" />
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteConversation(c.id)}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-red-400 hover:bg-red-950/40 text-left"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Supprimer
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </>
+  );
+
   return (
-    <div className="flex-1 h-screen border-r border-zinc-800 bg-black flex flex-col select-none">
+    <>
+      <div
+        className="flex-1 h-screen border-r border-zinc-800 bg-black flex select-none"
+        style={{ height: 'calc(100dvh - var(--vibe-kb-offset, 0px))' }}
+      >
+        {/* Sidebar desktop : multi-conversations mAI */}
+        <aside className="hidden md:flex w-64 lg:w-72 shrink-0 flex-col border-r border-zinc-800">
+          {conversationList}
+        </aside>
+
+        <div className="flex-1 min-w-0 flex flex-col">
       {/* Top Header */}
       <header className="sticky top-0 z-20 backdrop-blur-md bg-black/80 border-b border-zinc-800 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            title="Discussions mAI"
+            className="p-2 -ml-1 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors md:hidden"
+          >
+            <Menu className="w-4 h-4" />
+          </button>
           <div className="w-10 h-10 rounded-2xl bg-white text-black flex items-center justify-center font-black">
             <Sparkles className="w-5 h-5 text-black" />
           </div>
@@ -295,7 +741,9 @@ export const MAIStudioPage: React.FC = () => {
             <h1 className="text-base font-bold text-white tracking-tight">
               <span>mAI</span>
             </h1>
-            <p className="text-xs text-zinc-400">Assistant IA unifié & modèles intelligents</p>
+            <p className="text-xs text-zinc-400 truncate max-w-[40vw]">
+              {conversations.find((c) => c.id === activeConversationId)?.title || 'Assistant IA unifié & modèles intelligents'}
+            </p>
           </div>
         </div>
 
@@ -382,9 +830,13 @@ export const MAIStudioPage: React.FC = () => {
             </p>
           </div>
         )}
-        {messages.map((m) => {
+        {messages.map((m, idx) => {
           const isMe = m.sender === 'user';
           const isCopied = copiedId === m.id;
+          const imageUrl =
+            m.toolCalls?.find((tc) => tc.result?.result?.imageUrl)?.result?.result?.imageUrl ||
+            m.toolExecuted?.result?.result?.imageUrl ||
+            null;
 
           return (
             <div key={m.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} group`}>
@@ -408,6 +860,9 @@ export const MAIStudioPage: React.FC = () => {
                 <div className="leading-relaxed space-y-2">
                   <RichContent content={m.content} className="leading-relaxed" />
                 </div>
+
+                {/* Outils utilisés par mAI (chips persistantes, rechargées de l'historique) */}
+                <MaiToolChips toolCalls={m.toolCalls} className="mt-2.5" />
 
                 {/* Panneau d'approbation utilisateur pour les outils sensibles */}
                 {m.requiresApproval && pendingTool && (
@@ -440,10 +895,10 @@ export const MAIStudioPage: React.FC = () => {
                 )}
 
                 {/* Rich Tool Execution Display */}
-                {m.toolExecuted?.result?.result?.imageUrl && (
+                {imageUrl && (
                   <div className="mt-3 rounded-2xl overflow-hidden border border-zinc-800">
                     <img
-                      src={m.toolExecuted.result.result.imageUrl}
+                      src={imageUrl}
                       alt="Génération mAI"
                       className="w-full max-h-96 object-cover"
                     />
@@ -463,6 +918,16 @@ export const MAIStudioPage: React.FC = () => {
                       <span>{isCopied ? 'Copié !' : 'Copier'}</span>
                     </button>
 
+                    <button
+                      type="button"
+                      onClick={() => setShareMessageText(m.content)}
+                      className="flex items-center gap-1 hover:text-white transition-colors p-1 rounded-md"
+                      title="Partager par message Vibe"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Partager</span>
+                    </button>
+
                     {isMe && (
                       <button
                         type="button"
@@ -477,15 +942,29 @@ export const MAIStudioPage: React.FC = () => {
                   </div>
 
                   {!isMe && (
-                    <button
-                      type="button"
-                      onClick={() => handlePublishAsPost(m.content, m.toolExecuted?.result?.result?.imageUrl)}
-                      className="flex items-center gap-1 text-zinc-400 hover:text-white transition-colors p-1"
-                      title="Publier sur Vibe"
-                    >
-                      <Share2 className="w-3.5 h-3.5" />
-                      <span>Publier sur Vibe</span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {idx === messages.length - 1 && !m.toolExecuted && !(m.toolCalls && m.toolCalls.length > 0) && (
+                        <button
+                          type="button"
+                          onClick={handleRegenerate}
+                          disabled={isRegenerating || isExecuting || Boolean(m.requiresApproval)}
+                          className="flex items-center gap-1 text-zinc-400 hover:text-white transition-colors p-1 disabled:opacity-40"
+                          title="Regénérer la réponse"
+                        >
+                          {isRegenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                          <span>Regénérer</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handlePublishAsPost(m.content, imageUrl || undefined)}
+                        className="flex items-center gap-1 text-zinc-400 hover:text-white transition-colors p-1"
+                        title="Publier sur Vibe"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                        <span>Publier sur Vibe</span>
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -544,6 +1023,32 @@ export const MAIStudioPage: React.FC = () => {
           </button>
         </form>
       </div>
-    </div>
+        </div>
+      </div>
+
+      {/* Tiroir mobile : liste des conversations mAI */}
+      {sidebarOpen && (
+        <div className="md:hidden fixed inset-0 z-[70]">
+          <div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setSidebarOpen(false)}
+          />
+          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] bg-black border-r border-zinc-800 flex flex-col shadow-2xl animate-fadeIn">
+            {conversationList}
+          </aside>
+        </div>
+      )}
+
+      {/* Partage d'un message mAI par message Vibe */}
+      {shareMessageText !== null && (
+        <ShareToDMModal
+          isOpen={shareMessageText !== null}
+          onClose={() => setShareMessageText(null)}
+          initialMessage={shareMessageText}
+        />
+      )}
+
+      {confirmDialog}
+    </>
   );
 };

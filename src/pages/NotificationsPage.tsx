@@ -32,6 +32,7 @@ import { haptics } from '../services/haptics';
 import { AppStorage } from '../services/storageAdapter';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { useConfirmDialog } from '../components/common/ConfirmDialog';
 
 type PermissionState = 'unsupported' | 'default' | 'granted' | 'denied';
 
@@ -82,6 +83,7 @@ function saveReadAllAt(timestamp: number) {
 
 export const NotificationsPage: React.FC = () => {
   const navigate = useNavigate();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [filter, setFilter] = useState<'all' | 'messages' | 'likes' | 'mentions' | 'verified'>('all');
   const [isLoading, setIsLoading] = useState(true);
@@ -218,7 +220,13 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const handleClearAll = async () => {
-    if (!window.confirm('Voulez-vous supprimer toutes vos notifications ?')) return;
+    const ok = await confirm({
+      title: 'Supprimer toutes les notifications ?',
+      message: 'Votre liste de notifications sera vidée.',
+      confirmLabel: 'Tout supprimer',
+      tone: 'danger',
+    });
+    if (!ok) return;
     haptics.medium();
     saveClearedAt(Date.now());
     notifications.forEach((n) => saveDeletedId(n.id));
@@ -536,6 +544,8 @@ export const NotificationsPage: React.FC = () => {
           )}
         </>
       )}
+
+      {confirmDialog}
     </div>
   );
 };

@@ -31,6 +31,10 @@ export interface Profile {
   verificationTier?: VerificationTier;
   showcaseLayout?: 'stream' | 'grid';
   topicModel?: string[];
+  /** Abonnement du compte ('Free' | 'Plus' | 'Pro' | 'Max'), renvoyé par GET /profiles/:username. */
+  tier?: string;
+  /** Le propriétaire a masqué la coche bleue sur son profil public. */
+  hide_verified_badge?: boolean;
   /** Statuts sociaux renvoyés par GET /profiles/:username pour le visiteur. */
   isFollowing?: boolean;
   blocked_by_me?: boolean;
@@ -90,8 +94,14 @@ export interface Post {
   replies_count: number;
   bookmarks_count: number;
   views_count?: number;
-  /** Post épinglé tout en haut du profil de son auteur (max 3). */
+  /** Post épinglé tout en haut du profil de son auteur (max 2). */
   is_pinned?: boolean;
+  /** Post d'un autre compte mis en avant sur le profil consulté. */
+  pinned_by_profile?: boolean;
+  /** Pseudo du propriétaire du profil qui a mis ce post en avant. */
+  pinned_by_username?: string;
+  /** Livres référencés dans le post (@livre / attachement), ordre d'apparition. */
+  book_refs?: BookRef[];
   toxicity_score?: number;
   sentiment_score?: number;
   created_via?: 'web' | 'mai_agent' | 'api';
@@ -116,6 +126,8 @@ export interface Post {
     graphProximityScore: number;
     safetyFactor: number;
     interestFactor?: number;
+    dwellScore?: number;
+    timeContextBoost?: number;
   };
   media_url?: string;
   media_assets?: MediaAsset[];
@@ -228,6 +240,19 @@ export interface DirectMessage {
   /** Envoi programmé : 'scheduled' jusqu'à send_at, sinon 'sent'. */
   status?: 'scheduled' | 'sent';
   send_at?: string | null;
+  /** Mentions @username détectées dans le contenu. */
+  mentions?: string[];
+  /** Mentions urgentes (@tous ou @utilisateur) — notifie en urgence. */
+  urgent_mentions?: string[];
+  /** Ids des membres ayant lu (groupes). */
+  read_by?: string[];
+  /** Traductions mémorisées côté serveur : langue → { texte, langue détectée, date }. */
+  translations?: Record<string, { text: string; detected?: string | null; at?: string }>;
+  /** Attributions d'un message transféré (auteur re-dérivé côté serveur). */
+  forwarded_from?: { message_id: string; username: string; display_name?: string | null } | null;
+  /** Publication du Livre jointe au message (conversations de Livre). */
+  attached_post_id?: string | null;
+  attached_post?: { id: string; username: string; display_name?: string | null; avatar_url?: string | null; excerpt: string } | null;
 }
 
 export interface DMConversation {
@@ -244,6 +269,28 @@ export interface DMConversation {
   custom_name?: string | null;
   /** Partenaire bloqué par le compte courant */
   is_blocked?: boolean;
+  /** Conversation de groupe (migration 019) : partner_id = "group:<uuid>" */
+  is_group?: boolean;
+  /** Admin du groupe (créateur) — vrai pour le compte courant si admin */
+  is_admin?: boolean;
+  /** Membres du groupe (normalisés côté API) */
+  members?: GroupMember[];
+  /** Conversation rattachée à un Livre (mêmes mécanismes de groupe). */
+  is_book?: boolean;
+  book_id?: string | null;
+  book_title?: string | null;
+  /** Nom de l'icône lucide du Livre. */
+  book_icon?: string | null;
+}
+
+/** Membre d'un groupe DM. */
+export interface GroupMember {
+  user_id: string;
+  username: string;
+  display_name?: string;
+  avatar_url?: string;
+  role: string;
+  joined_at?: string;
 }
 
 export interface NotificationItem {
@@ -252,14 +299,14 @@ export interface NotificationItem {
   actor_id?: string;
   actor_username?: string;
   actor_avatar_url?: string;
-  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction' | 'quote' | 'post';
+  type: 'like' | 'repost' | 'reply' | 'follow' | 'mention' | 'dm' | 'mai_system' | 'reaction' | 'quote' | 'post' | 'book_join';
   post_id?: string;
   message: string;
   is_read: boolean;
   created_at: string;
 }
 
-/** Livre de « Vibe préférées » — collection de posts en favoris (max 5 par compte). */
+/** Livre de « Vibe préférées » — collection de posts en favoris (max 5 possédés par compte). */
 export interface VibeBook {
   id: string;
   title: string;
@@ -269,6 +316,84 @@ export interface VibeBook {
   items_count?: number;
   /** true si le post passé en query est déjà dans ce Livre. */
   contains_post?: boolean;
+  /** Id du créateur du Livre. */
+  user_id?: number;
+  /** Code de partage (lien/code d'invitation) — visible par tous les membres. */
+  join_code?: string | null;
+  /** true si le compte courant est le créateur. */
+  is_owner?: boolean;
+  /** Rôle du compte courant dans le Livre. */
+  role?: 'owner' | 'member';
+  /** Nombre de membres (créateur inclus). */
+  members_count?: number;
+  /** Livre public : consultable en lecture seule par tous (code d'invitation masqué). */
+  is_public?: boolean;
+  /** true si le compte courant est membre (ou créateur) du Livre. */
+  is_member?: boolean;
+  /** Conversation Messages du Livre (partner_id = "group:<uuid>"). */
+  conversation_id?: string | null;
+}
+
+/** Référence de Livre attachée à un post (carte affichée sous le contenu). */
+export interface BookRef {
+  id: string;
+  title: string;
+  /** Nom de l'icône lucide-react du Livre. */
+  icon?: string;
+  owner_username?: string;
+  owner_display_name?: string;
+  members_count?: number;
+  items_count?: number;
+  /** false quand le Livre est devenu privé et que le lecteur n'est pas membre. */
+  can_view?: boolean;
+}
+
+/** Membre d'un Livre collaboratif. */
+export interface VibeBookMember {
+  user_id: number | string;
+  username: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  role: 'owner' | 'member';
+  joined_at?: string;
+}
+
+/** Vibe enregistrée dans un Livre, avec attribution du partage. */
+export interface VibeBookPost extends Post {
+  added_by?: number | null;
+  added_by_username?: string | null;
+  added_by_display_name?: string | null;
+  added_by_avatar_url?: string | null;
+  saved_at?: string;
+  /** Vibe épinglée en haut du Livre (max 3). */
+  is_pinned?: boolean;
+  pinned_at?: string | null;
+}
+
+/** Commentaire de la discussion d'un Livre. */
+export interface BookComment {
+  id: string;
+  content: string;
+  created_at: string;
+  user_id: number | string;
+  username: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  reply_to_id?: string | null;
+  reply_content?: string | null;
+  reply_username?: string | null;
+  reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
+}
+
+/** Entrée de liste d'abonnés / abonnements d'un profil. */
+export interface ProfileListUser {
+  id: number | string;
+  username: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  is_verified?: boolean;
+  followers_count?: number;
+  is_following?: boolean;
 }
 
 export interface MAIQuotas {
@@ -284,6 +409,31 @@ export interface MAIQuotas {
     percent: number;
   };
   resetAt: string;
+}
+
+/** Appel d'outil mAI persisté (mai_messages.tool_calls) — chip du chat. */
+export interface MaiToolCall {
+  id: string;
+  /** Id du catalogue d'outils (ex. generate_vibe_image). */
+  name: string;
+  args?: Record<string, any>;
+  status: 'executed' | 'error' | 'pending_approval' | 'rejected' | 'disabled' | 'blocked';
+  /** Résultat brut { success, result?, error? } (null si en attente/refusé/désactivé). */
+  result?: { success?: boolean; result?: any; error?: string } | null;
+  error?: string | null;
+  model?: string | null;
+  at?: string;
+}
+
+/** Résumé d'une conversation mAI (liste latérale de la page Studio). */
+export interface MAIConversationSummary {
+  id: string;
+  title: string;
+  is_pinned?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  message_count?: number;
+  preview?: string;
 }
 
 export interface UserSettings {
@@ -329,4 +479,14 @@ export interface UserSettings {
   mai_context_posts?: boolean;
   mai_context_dms?: boolean;
   mai_context_books?: boolean;
+  /** Masque la coche bleue (badge vérifié) sur le profil public (comptes Plus/Pro/Max). */
+  hide_verified_badge?: boolean;
+  /** Outils mAI activés (ids du catalogue lib/tools) ; null/absent = tous. */
+  mai_enabled_tools?: string[] | null;
+  /** Les co-signatures dont je suis désigné co-auteur sont acceptées automatiquement. */
+  collab_auto_accept?: boolean;
+  /** Traduction automatique des messages privés reçus. */
+  dm_auto_translate?: boolean;
+  /** Langue cible de la traduction automatique des messages (code type DeepL). */
+  dm_translate_lang?: string | null;
 }

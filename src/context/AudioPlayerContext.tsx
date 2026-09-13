@@ -103,7 +103,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       setCurrentTime(0);
       setDuration(0);
       requestAnimationFrame(() => {
-        audioRef.current?.play().catch(() => setIsPlaying(false));
+        const audio = audioRef.current;
+        if (!audio) return;
+        // Le <audio> n'a pas de src déclaratif : l'URL TTS vient du serveur
+        audio.src = url;
+        audio.load();
+        audio.play().catch(() => setIsPlaying(false));
       });
     } catch (err: any) {
       if (token !== playTokenRef.current) return;

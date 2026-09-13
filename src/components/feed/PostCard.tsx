@@ -29,6 +29,7 @@ import {
   Loader2,
   BarChart2,
   Share2,
+  Download,
   Pin,
   PinOff,
   EyeOff,
@@ -42,13 +43,21 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext';
 import { useAuth } from '../../context/AuthContext';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { NotificationService } from '../../services/notificationService';
+import { useConfirmDialog } from '../common/ConfirmDialog';
 import { ProfileAvatar } from '../common/ProfileAvatar';
-import { RichContent } from '../common/RichContent';
+import { RichContent, htmlToPlainText } from '../common/RichContent';
+import { BookRefCard } from './BookRefCard';
 import { usePostViewTracking } from '../../hooks/usePostViewTracking';
 import { formatCompactCount } from '../../algorithms';
 import { haptics } from '../../services/haptics';
+import { motion } from 'framer-motion';
+import { LikeParticles } from '../common/LikeParticles';
+import { useMotionPrefs } from '../../hooks/useMotionPrefs';
 import { PostShareModal } from './PostShareModal';
 import { BookPickerModal } from './BookPickerModal';
+import { MediaCarousel } from './MediaCarousel';
+import { MediaLightbox } from './MediaLightbox';
+import { downloadMedia, shareMedia } from '../../services/mediaActions';
 import { PostStatsModal } from './PostStatsModal';
 
 interface PostCardProps {
@@ -101,6 +110,9 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const [isTranslating, setIsTranslating] = useState(false);
   // Épinglage sur le profil + modale de partage
   const [isPinned, setIsPinned] = useState(post.is_pinned || false);
+  const [isPinnedByProfile, setIsPinnedByProfile] = useState(post.pinned_by_profile || false);
+  // Visionneuse plein écran (index dans la liste d'images du post)
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [showShare, setShowShare] = useState(false);
   // Livre : « Vibe préférée » enregistrée dans un Livre (favoris durables)
   const [showBookPicker, setShowBookPicker] = useState(false);
@@ -157,7 +169,13 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
   // État du cœur flottant pour double-tap mobile
   const [heartFloatPos, setHeartFloatPos] = useState<{ x: number; y: number } | null>(null);
+  const { confirm, confirmDialog } = useConfirmDialog();
   const lastTapRef = useRef<number>(0);
+  // Animations spring/pop + haptics synchro (respecte toggle + reduced-motion)
+  const { play, animationsEnabled } = useMotionPrefs();
+  const [burstKey, setBurstKey] = useState(0);
+  const [repostBurst, setRepostBurst] = useState(false);
+  const [bookmarkBurst, setBookmarkBurst] = useState(false);
 
   // Temps réel (SSE) : compteurs like/repost/réponses poussés par le serveur
   useEffect(() => {
@@ -279,12 +297,13 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const handleListen = (e: React.MouseEvent) => {
     e.stopPropagation();
     setShowMenu(false);
-    const snippet = (post.content || '').trim().slice(0, 48);
+    const plain = htmlToPlainText(post.content || '').trim();
+    const snippet = plain.slice(0, 48);
     playQueue([
       {
         id: post.id,
-        title: `@${post.username}${snippet ? ` — ${snippet}${(post.content || '').length > 48 ? '…' : ''}` : ''}`,
-        text: post.content || '',
+        title: `@${post.username}${snippet ? ` — ${snippet}${plain.length > 48 ? '…' : ''}` : ''}`,
+        text: plain,
       },
     ]);
   };
@@ -296,10 +315,11 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     setLikesCount((prev) => (newLikedState ? prev + 1 : Math.max(0, prev - 1)));
     if (newLikedState) {
       setLikeBurst(true);
+      setBurstKey((k) => k + 1);
       setTimeout(() => setLikeBurst(false), 450);
-      haptics.like();
+      play('like');
     } else {
-      haptics.unlike();
+      play('unlike');
     }
 
     try {
@@ -330,11 +350,12 @@ export const PostCardBase: React.FC<PostCardProps> = ({
       setHeartFloatPos({ x: clientX - rect.left, y: clientY - rect.top });
       setTimeout(() => setHeartFloatPos(null), 780);
 
-      haptics.like();
+      play('like');
       if (!isLiked) {
         setIsLiked(true);
         setLikesCount((prev) => prev + 1);
         setLikeBurst(true);
+        setBurstKey((k) => k + 1);
         setTimeout(() => setLikeBurst(false), 450);
         ApiService.toggleLike(post.id).catch(() => {
           setIsLiked(false);
@@ -352,7 +373,13 @@ export const PostCardBase: React.FC<PostCardProps> = ({
     const newRepostState = !isReposted;
     setIsReposted(newRepostState);
     setRepostsCount((prev) => (newRepostState ? prev + 1 : Math.max(0, prev - 1)));
-    haptics.medium();
+    if (newRepostState) {
+      setRepostBurst(true);
+      setTimeout(() => setRepostBurst(false), 450);
+      play('success');
+    } else {
+      play('medium');
+    }
 
     try {
       await ApiService.toggleRepost(post.id);
@@ -364,19 +391,32 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
   const handleBookmark = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    setIsBookmarked(!isBookmarked);
-    haptics.medium();
+    const next = !isBookmarked;
+    setIsBookmarked(next);
+    if (next) {
+      setBookmarkBurst(true);
+      setTimeout(() => setBookmarkBurst(false), 450);
+      play('success');
+    } else {
+      play('light');
+    }
     try {
       await ApiService.toggleBookmark(post.id);
     } catch {
-      setIsBookmarked(isBookmarked);
+      setIsBookmarked(!next);
     }
   };
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
     haptics.warning();
-    if (!window.confirm('Voulez-vous vraiment supprimer cette publication ?')) return;
+    const ok = await confirm({
+      title: 'Supprimer cette publication ?',
+      message: 'Cette action est irréversible.',
+      confirmLabel: 'Supprimer',
+      tone: 'danger',
+    });
+    if (!ok) return;
     setIsDeleting(true);
     try {
       await ApiService.deletePost(post.id);
@@ -386,14 +426,14 @@ export const PostCardBase: React.FC<PostCardProps> = ({
         onPostDeleted(post.id);
       }
     } catch (err: any) {
-      alert(err.message || 'Erreur lors de la suppression.');
+      NotificationService.showInAppToast('Erreur', err.message || 'Erreur lors de la suppression.', 'error');
     } finally {
       setIsDeleting(false);
       setShowMenu(false);
     }
   };
 
-  /** Épingle/désépingle la publication tout en haut du profil (max 3). */
+  /** Épingle/désépingle la publication tout en haut du profil (max 2). */
   const handleTogglePin = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setShowMenu(false);
@@ -413,7 +453,38 @@ export const PostCardBase: React.FC<PostCardProps> = ({
       if (err?.code === 'PIN_LIMIT') {
         NotificationService.showInAppToast(
           'Limite atteinte',
-          'Vous ne pouvez épingler que 3 publications maximum.',
+          'Vous ne pouvez épingler que 2 publications maximum.',
+          'error'
+        );
+      } else {
+        NotificationService.showInAppToast('Erreur', err?.message || "L'épinglage a échoué.", 'error');
+      }
+    }
+  };
+
+  /** Met en avant un post d'un autre compte sur son profil (max 2 au total). */
+  const handleToggleProfilePin = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    const next = !isPinnedByProfile;
+    try {
+      const res = await ApiService.setPostProfilePinned(post.id, next);
+      setIsPinnedByProfile(Boolean(res.pinned));
+      haptics.success();
+      NotificationService.showInAppToast(
+        res.pinned ? 'Post mis en avant' : 'Post retiré',
+        res.pinned
+          ? 'Il apparaît en tête de votre profil avec son auteur original.'
+          : 'Il ne figure plus sur votre profil.',
+        'info'
+      );
+      window.dispatchEvent(new CustomEvent('vibe:post_updated'));
+    } catch (err: any) {
+      if (err?.code === 'PIN_LIMIT') {
+        haptics.warning();
+        NotificationService.showInAppToast(
+          'Limite atteinte',
+          'Vous ne pouvez épingler que 2 publications maximum.',
           'error'
         );
       } else {
@@ -444,7 +515,13 @@ export const PostCardBase: React.FC<PostCardProps> = ({
   const handleBlockAuthor = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setShowMenu(false);
-    if (!window.confirm(`Bloquer @${post.username} ?\n\nCette action coupe tout contact de manière visible : messages, abonnement et notifications. @${post.username} ne pourra plus interagir avec vous.`)) return;
+    const ok = await confirm({
+      title: `Bloquer @${post.username} ?`,
+      message: 'Cette action coupe tout contact de manière visible : messages, abonnement et notifications.',
+      confirmLabel: 'Bloquer',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await ApiService.blockUser(post.author_id);
       NotificationService.showInAppToast(
@@ -490,9 +567,20 @@ export const PostCardBase: React.FC<PostCardProps> = ({
           className="absolute z-30 pointer-events-none animate-heartFloat"
           style={{ left: `${heartFloatPos.x}px`, top: `${heartFloatPos.y}px` }}
         >
-          <div className="p-3 rounded-full bg-black/70 backdrop-blur-md shadow-2xl border border-rose-500/40 flex items-center justify-center">
-            <Heart className="w-10 h-10 fill-rose-500 text-rose-500 drop-shadow-[0_0_12px_rgba(244,63,94,0.7)]" />
-          </div>
+          {animationsEnabled ? (
+            <motion.div
+              initial={{ scale: 0.3, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ type: 'spring', stiffness: 500, damping: 20 }}
+              className="p-3 rounded-full bg-black/70 backdrop-blur-md shadow-2xl border border-rose-500/40 flex items-center justify-center"
+            >
+              <Heart className="w-10 h-10 fill-rose-500 text-rose-500 drop-shadow-[0_0_12px_rgba(244,63,94,0.7)]" />
+            </motion.div>
+          ) : (
+            <div className="p-3 rounded-full bg-black/70 backdrop-blur-md shadow-2xl border border-rose-500/40 flex items-center justify-center">
+              <Heart className="w-10 h-10 fill-rose-500 text-rose-500" />
+            </div>
+          )}
         </div>
       )}
       <div className="flex gap-3">
@@ -534,13 +622,18 @@ export const PostCardBase: React.FC<PostCardProps> = ({
 
         {/* Content Container */}
         <div className="flex-1 min-w-0 space-y-1.5">
-          {/* Étiquette « Post épinglé » (fixé en haut du profil) */}
-          {isPinned && (
+          {/* Étiquette « Post épinglé » (auteur) ou « mis en avant » (profil d'un autre) */}
+          {isPinnedByProfile ? (
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-400" title="Post mis en avant sur ce profil">
+              <Pin className="w-3 h-3" />
+              Épinglé par @{post.pinned_by_username || 'un membre'}
+            </div>
+          ) : isPinned ? (
             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-400" title="Ce post est épinglé sur le profil de son auteur">
               <Pin className="w-3 h-3" />
               Post épinglé
             </div>
-          )}
+          ) : null}
 
           {/* Post Header */}
           <div className="flex items-center justify-between">
@@ -739,7 +832,7 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                     </button>
                   )}
 
-                  {/* Épinglage sur le profil (auteur uniquement, max 3) */}
+                  {/* Épinglage sur le profil (auteur uniquement, max 2) */}
                   {isAuthor && (
                     <button
                       onClick={handleTogglePin}
@@ -754,6 +847,26 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                         <>
                           <Pin className="w-3.5 h-3.5 text-white" />
                           <span>Épingler sur votre profil</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Mise en avant d'un post d'un autre compte (max 2 au total) */}
+                  {!isAuthor && user && post.visibility === 'public' && (
+                    <button
+                      onClick={handleToggleProfilePin}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+                    >
+                      {isPinnedByProfile ? (
+                        <>
+                          <PinOff className="w-3.5 h-3.5 text-white" />
+                          <span>Retirer de mon profil</span>
+                        </>
+                      ) : (
+                        <>
+                          <Pin className="w-3.5 h-3.5 text-white" />
+                          <span>Épingler sur mon profil</span>
                         </>
                       )}
                     </button>
@@ -814,6 +927,11 @@ export const PostCardBase: React.FC<PostCardProps> = ({
           <div className="text-zinc-100 text-sm sm:text-base leading-relaxed">
             <RichContent content={post.content} onOpenProfile={onOpenProfile} />
           </div>
+
+          {/* Livres référencés (@livre / attachement) */}
+          {post.book_refs && post.book_refs.length > 0 && (
+            <BookRefCard books={post.book_refs} />
+          )}
 
           {/* Traduction DeepL (repli mAI) : affichée sous le texte d'origine */}
           {(translation || isTranslating) && (
@@ -968,65 +1086,56 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                   alt={quotedImage.alt_text || 'Média cité'}
                   loading="lazy"
                   decoding="async"
-                  className="mt-2 rounded-xl border border-zinc-800 max-h-44 w-full object-cover"
+                  className="mt-2 rounded-xl border border-zinc-800 max-h-44 w-full object-cover animate-mediaIn"
                 />
               )}
             </div>
           )}
 
-          {/* Multi-Image Grid Gallery (Up to 5 images) avec légendes */}
+          {/* Images : image unique cliquable ou carrousel défilant (légendes intégrées) */}
           {images.length > 0 && (
             <div className="pt-2">
-              <div
-                className={`grid gap-1.5 rounded-2xl overflow-hidden border border-zinc-800 ${
-                  images.length === 1
-                    ? 'grid-cols-1 max-h-[480px]'
-                    : images.length === 2
-                    ? 'grid-cols-2 aspect-[16/9]'
-                    : images.length === 3
-                    ? 'grid-cols-2 aspect-[16/9]'
-                    : images.length === 4
-                    ? 'grid-cols-2 aspect-square'
-                    : 'grid-cols-3 aspect-[16/9]'
-                }`}
-              >
-                {images.map((img, i) => (
-                  <div
-                    key={i}
-                    className={`relative overflow-hidden bg-zinc-950 ${
-                      images.length === 3 && i === 0 ? 'row-span-2' : ''
-                    } ${images.length === 5 && i < 2 ? 'col-span-1 sm:col-span-1' : ''}`}
+              {images.length === 1 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      haptics.light();
+                      setLightboxIndex(0);
+                    }}
+                    className="block w-full rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 cursor-zoom-in"
+                    aria-label={images[0].alt_text || 'Image 1'}
                   >
                     <img
-                      src={img.url}
-                      alt={img.alt_text || `Média ${i + 1}`}
+                      src={images[0].url}
+                      alt={images[0].alt_text || 'Média 1'}
                       loading="lazy"
                       decoding="async"
-                      className="w-full h-full object-cover hover:scale-105 transition-transform duration-300 animate-mediaIn"
+                      className="w-full max-h-[480px] object-cover animate-mediaIn"
                     />
-                  </div>
-                ))}
-              </div>
-              {/* Légendes des images */}
-              {images.some((img) => img.alt_text?.trim()) && (
-                <div className="mt-1.5 space-y-0.5">
-                  {images
-                    .filter((img) => img.alt_text?.trim())
-                    .map((img, i) => (
-                      <p key={`cap-${i}`} className="text-xs text-zinc-500 leading-snug break-words">
-                        {img.alt_text}
-                      </p>
-                    ))}
-                </div>
+                  </button>
+                  {images[0].alt_text?.trim() && (
+                    <p className="mt-1.5 text-xs text-zinc-500 leading-snug break-words">{images[0].alt_text}</p>
+                  )}
+                </>
+              ) : (
+                <MediaCarousel
+                  images={images}
+                  onOpen={(i) => {
+                    haptics.light();
+                    setLightboxIndex(i);
+                  }}
+                />
               )}
             </div>
           )}
 
-          {/* Video Players (Up to 2 videos) avec légendes */}
+          {/* Video Players (Up to 2 videos) avec légendes et actions */}
           {videos.length > 0 && (
             <div className="pt-2 space-y-2">
               {videos.map((vid, idx) => (
-                <div key={idx} className="rounded-2xl overflow-hidden border border-zinc-800 bg-black max-h-96">
+                <div key={idx} className="rounded-2xl overflow-hidden border border-zinc-800 bg-black max-h-96 animate-mediaIn">
                   <video
                     src={vid.url}
                     controls
@@ -1039,6 +1148,30 @@ export const PostCardBase: React.FC<PostCardProps> = ({
                       {vid.alt_text}
                     </p>
                   )}
+                  <div className="flex items-center justify-end gap-1 px-3 py-1.5 border-t border-zinc-900">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        downloadMedia(vid.url);
+                      }}
+                      className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors"
+                      title="Télécharger la vidéo"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        shareMedia(vid.url, 'Vidéo Vibe');
+                      }}
+                      className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors"
+                      title="Partager la vidéo"
+                    >
+                      <Share2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1061,17 +1194,19 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             </button>
 
             {/* Repost */}
-            <button
+            <motion.button
+              whileTap={animationsEnabled ? { scale: 0.82 } : undefined}
+              transition={{ type: 'spring', stiffness: 500, damping: 25 }}
               onClick={handleRepost}
               className={`flex items-center gap-1.5 transition-colors group ${
                 isReposted ? 'text-white font-bold' : 'hover:text-white'
               }`}
             >
-              <div className="p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors">
+              <div className={`p-1.5 rounded-full group-hover:bg-zinc-900 transition-colors ${repostBurst ? 'animate-likeBurst' : ''}`}>
                 <Repeat className="w-4 h-4" />
               </div>
-              <span>{repostsCount}</span>
-            </button>
+              <span key={repostsCount} className={repostBurst ? 'animate-countPop' : ''}>{repostsCount}</span>
+            </motion.button>
 
             {/* Citer (quote-post : nouvelle publication avec l'original intégré) */}
             <button
@@ -1096,18 +1231,21 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             </span>
 
             {/* Like */}
-            <button
+            <motion.button
+              whileTap={animationsEnabled ? { scale: 0.82 } : undefined}
+              transition={{ type: 'spring', stiffness: 500, damping: 22 }}
               onClick={handleLike}
-              className={`flex items-center gap-1.5 transition-all group active:scale-90 ${
+              className={`flex items-center gap-1.5 transition-all group ${
                 isLiked ? 'text-rose-500 font-bold' : 'hover:text-rose-400'
               }`}
               title={isLiked ? 'Ne plus aimer' : "J'aime"}
             >
-              <div className={`p-1.5 rounded-full group-hover:bg-rose-500/10 transition-colors ${likeBurst ? 'animate-likeBurst' : ''}`}>
+              <div className={`relative p-1.5 rounded-full group-hover:bg-rose-500/10 transition-colors ${likeBurst ? 'animate-likeBurst' : ''}`}>
                 <Heart className={`w-4 h-4 transition-transform ${isLiked ? 'fill-rose-500 text-rose-500 scale-110' : 'group-hover:scale-110'}`} />
+                {animationsEnabled && <LikeParticles burstKey={burstKey} />}
               </div>
-              <span className={isLiked ? 'text-rose-500' : ''}>{likesCount}</span>
-            </button>
+              <span key={likesCount} className={`${isLiked ? 'text-rose-500' : ''} ${likeBurst ? 'animate-countPop' : ''}`}>{likesCount}</span>
+            </motion.button>
 
             {/* Livre : enregistrer la Vibe dans un Livre (Vibe préférées) */}
             <button
@@ -1127,17 +1265,19 @@ export const PostCardBase: React.FC<PostCardProps> = ({
             </button>
 
             {/* Bookmark */}
-            <button
+            <motion.button
+              whileTap={animationsEnabled ? { scale: 0.82 } : undefined}
+              transition={{ type: 'spring', stiffness: 500, damping: 25 }}
               onClick={handleBookmark}
-              className={`flex items-center gap-1.5 transition-all active:scale-90 group ${
+              className={`flex items-center gap-1.5 transition-all group ${
                 isBookmarked ? 'text-amber-400 font-bold' : 'hover:text-white'
               }`}
               title={isBookmarked ? 'Retirer des signets' : 'Enregistrer dans les signets'}
             >
-              <div className={`p-1.5 rounded-full group-hover:bg-amber-400/10 transition-colors`}>
+              <div className={`p-1.5 rounded-full group-hover:bg-amber-400/10 transition-colors ${bookmarkBurst ? 'animate-likeBurst' : ''}`}>
                 <Bookmark className={`w-4 h-4 ${isBookmarked ? 'fill-amber-400 text-amber-400' : ''}`} />
               </div>
-            </button>
+            </motion.button>
 
             {/* Partager (ouvre la modale DM / lien / QR Code) */}
             <button
@@ -1161,6 +1301,15 @@ export const PostCardBase: React.FC<PostCardProps> = ({
         <PostShareModal post={post} onClose={() => setShowShare(false)} />
       )}
 
+      {/* Visionneuse plein écran des images (swipe, légende, téléchargement, partage) */}
+      {lightboxIndex !== null && images.length > 0 && (
+        <MediaLightbox
+          items={images}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
+
       {/* Modale « Enregistrer dans un Livre » (Vibe préférées) */}
       {showBookPicker && user && (
         <BookPickerModal
@@ -1174,6 +1323,8 @@ export const PostCardBase: React.FC<PostCardProps> = ({
       {showStats && (
         <PostStatsModal postId={post.id} onClose={() => setShowStats(false)} />
       )}
+
+      {confirmDialog}
     </article>
   );
 };

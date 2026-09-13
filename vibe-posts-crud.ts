@@ -14,15 +14,32 @@ import { MAIAgentFleet } from "./vibe-mai-fleet.ts";
 import { pushRealtimeEvent } from "./realtime.ts";
 import { ensureCircleTable } from "./vibe-circle.ts";
 import {
+  attachBookRefs,
   attachPollsAndCollabs,
   attachQuotedPosts,
   ensurePostColumns,
+  extractBookRefIds,
   fetchPostMedia,
   isUuid,
   publishDuePosts,
   stripHtmlTags,
+  syncPostBookRefs,
   visibilityFilter,
 } from "./vibe-posts-core.ts";
+import { ensureBooksTables } from "./vibe-books.ts";
+
+/** Longueur maximale d'une Vibe (publication), en texte brut, par forfait. */
+const POST_CHARS_LIMIT_FREE = 1_000;
+/** Garde-fou technique pour les forfaits payants (« caractères illimités » en pratique). */
+const POST_CHARS_LIMIT_PAID = 50_000;
+
+const postCharsError = (isPaid: boolean, charLimit: number) => ({
+  error: isPaid
+    ? "La publication est trop longue."
+    : `Une Vibe est limitée à ${POST_CHARS_LIMIT_FREE.toLocaleString("fr-FR")} caractères (texte) avec le forfait Free. Passez à Plus, Pro ou Max pour publier sans limite.`,
+  char_limit: charLimit,
+  plan_required: !isPaid,
+});
 
 export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
   // 1. POSTS CRUD
@@ -49,9 +66,13 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       if (!content || !content.trim()) {
         return c.json({ error: "Le contenu est obligatoire." }, 400);
       }
-      // Garde-fou de taille (contenu HTML riche, texte "illimité")
-      if (content.length > 50_000) {
-        return c.json({ error: "La publication est trop longue." }, 400);
+
+      // Limite de longueur par forfait (texte brut, balises de mise en forme exclues)
+      const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
+      const isPaid = isPaidTier(tierRows[0]?.tier);
+      const charLimit = isPaid ? POST_CHARS_LIMIT_PAID : POST_CHARS_LIMIT_FREE;
+      if (stripHtmlTags(String(content)).length > charLimit) {
+        return c.json(postCharsError(isPaid, charLimit), 400);
       }
 
       // Scan de sécurité sur le texte brut (sans balises de mise en forme)
@@ -65,8 +86,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         if (Number.isNaN(ts) || ts <= Date.now()) {
           return c.json({ error: "Date de planification invalide ou passée." }, 400);
         }
-        const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
-        if (!isPaidTier(tierRows[0]?.tier)) {
+        if (!isPaid) {
           return c.json(
             { error: "La planification des vibes est réservée aux abonnés Plus, Pro et Max.", plan_required: true },
             403
@@ -119,6 +139,13 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       `;
 
       const newPost = inserted[0];
+
+      // Références de Livres (@livre / attachement) : extraites du HTML et persistées
+      const bookRefIds = extractBookRefIds(String(content));
+      if (bookRefIds.length > 0) {
+        await ensureBooksTables(sql).catch(() => {});
+        await syncPostBookRefs(sql, String(newPost.id), bookRefIds);
+      }
 
       // Inférence du type MIME à partir de l'extension du fichier
       const inferMediaType = (url: string, fallback = "image/jpeg"): string => {
@@ -235,7 +262,10 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         console.warn("[Vibe API] Erreur création sondage:", pollErr);
       }
 
-      // Co-auteur : { collaborator_username } → invitation pending + double notification
+      // Co-auteur : { collaborator_username }
+      // - réglage invité collab_auto_accept = TRUE → co-signature directe (status
+      //   'accepted', auto_accepted = TRUE, simple notification, AUCUNE invitation)
+      // - sinon → invitation 'pending' à accepter/refuser (comportement historique)
       let createdCollaborators: any[] = [];
       try {
         const collabUsername = String((body as any)?.collaborator_username || "").trim().replace(/^@/, "").toLowerCase();
@@ -243,19 +273,41 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
           const targetRows = await sql`SELECT id, username FROM users WHERE LOWER(username) = ${collabUsername} LIMIT 1`;
           const targetId = targetRows[0] ? Number(targetRows[0].id) : 0;
           if (targetId && targetId !== userId && !(await isBlockEitherWay(userId, targetId))) {
-            await sql`
-              INSERT INTO post_collaborators (post_id, user_id, status)
-              VALUES (${newPost.id}::uuid, ${targetId}, 'pending')
-              ON CONFLICT (post_id, user_id) DO NOTHING
-            `.catch(() => {});
-            createdCollaborators = [{ username: targetRows[0].username, status: "pending" }];
-            await sql`
-              INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-              VALUES (${targetId}, ${userId}, 'mention', ${newPost.id}::uuid, 'vous a invité à co-signer une publication')
-            `.catch(() => {});
+            // Réglage d'auto-acceptation du co-auteur désigné
+            let autoAccept = false;
             try {
-              await pushRealtimeEvent(targetId, "notification", { type: "collab_invite", post_id: newPost.id, actor_id: userId });
+              const s = await sql`SELECT collab_auto_accept FROM user_settings WHERE user_id = ${targetId} LIMIT 1`.catch(() => []);
+              autoAccept = Boolean(s[0]?.collab_auto_accept);
             } catch {}
+            if (autoAccept) {
+              await sql`
+                INSERT INTO post_collaborators (post_id, user_id, status, auto_accepted, accepted_at)
+                VALUES (${newPost.id}::uuid, ${targetId}, 'accepted', TRUE, NOW())
+                ON CONFLICT (post_id, user_id) DO NOTHING
+              `.catch(() => {});
+              createdCollaborators = [{ username: targetRows[0].username, status: "accepted" }];
+              await sql`
+                INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
+                VALUES (${targetId}, ${userId}, 'mention', ${newPost.id}::uuid, 'vous a ajouté comme co-auteur d\'une publication')
+              `.catch(() => {});
+              try {
+                await pushRealtimeEvent(targetId, "notification", { type: "collab_accepted", post_id: newPost.id, actor_id: userId });
+              } catch {}
+            } else {
+              await sql`
+                INSERT INTO post_collaborators (post_id, user_id, status)
+                VALUES (${newPost.id}::uuid, ${targetId}, 'pending')
+                ON CONFLICT (post_id, user_id) DO NOTHING
+              `.catch(() => {});
+              createdCollaborators = [{ username: targetRows[0].username, status: "pending" }];
+              await sql`
+                INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
+                VALUES (${targetId}, ${userId}, 'mention', ${newPost.id}::uuid, 'vous a invité à co-signer une publication')
+              `.catch(() => {});
+              try {
+                await pushRealtimeEvent(targetId, "notification", { type: "collab_invite", post_id: newPost.id, actor_id: userId });
+              } catch {}
+            }
           }
         }
       } catch (collabErr) {
@@ -278,14 +330,16 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
           poll: createdPoll,
           collaborators: createdCollaborators,
         };
+        await attachBookRefs([createdPost], userId).catch(() => {});
         return c.json({ success: true, post: createdPost }, 201);
       }
 
       await sql`UPDATE profiles SET posts_count = posts_count + 1 WHERE user_id = ${userId}`;
 
       // Détection et notification des mentions @username dans les publications
+      // (les ancres de Livres @livre sont retirées du scan pour éviter de faux utilisateurs)
       try {
-        const plainContent = stripHtmlTags(content);
+        const plainContent = stripHtmlTags(String(content).replace(/<a\b[^>]*data-book-id[\s\S]*?<\/a>/gi, ' '));
         const mentionMatches = Array.from(new Set(plainContent.match(/@([a-zA-Z0-9_]{1,30})/g) || [])).map((m: string) => m.slice(1).toLowerCase());
         if (mentionMatches.length > 0) {
           const mentionedUsers = await sql`
@@ -354,6 +408,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         collaborators: createdCollaborators,
       };
       await attachQuotedPosts([createdPost]);
+      await attachBookRefs([createdPost], userId).catch(() => {});
 
       return c.json({
         success: true,
@@ -416,7 +471,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
 
   registerMulti("post", ["/api/vibe/posts/:id/poll/vote", "/vibe/posts/:id/poll/vote", "/v1/posts/:id/poll/vote", "/posts/:id/poll/vote"], handlePollVote);
 
-  // 1c. POST STATS (auteur uniquement ; reach/referrers en stub)
+  // 1c. POST STATS (auteur uniquement ; reach temporel via post_views)
   const handlePostStats = async (c: any) => {
     try {
       const token = extractToken(c.req.raw);
@@ -425,6 +480,9 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       const userId = Number(payload.sub || (payload as any).id);
       const postId = c.req.param("id");
       if (!isUuid(postId)) return c.json({ error: "Identifiant invalide." }, 400);
+      const periodParam = String(c.req.query("period") || "7d").toLowerCase();
+      const periodDays = periodParam === "30d" ? 30 : periodParam === "90d" ? 90 : 7;
+      const sinceIso = new Date(Date.now() - periodDays * 86400000).toISOString();
       const sql = getDb();
       const rows = await sql`SELECT author_id, views_count, likes_count, reposts_count, replies_count, bookmarks_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
       if (rows.length === 0) return c.json({ error: "Publication introuvable." }, 404);
@@ -436,7 +494,28 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       const replies = Number(p.replies_count || 0);
       const bookmarks = Number(p.bookmarks_count || 0);
       const engagement_rate = views > 0 ? Math.round(((likes + reposts + replies + bookmarks) / views) * 1000) / 10 : 0;
-      return c.json({ views, likes, reposts, replies, bookmarks, engagement_rate, reach_7d: [], top_referrers: [] });
+      // Série temporelle des vues (best-effort)
+      let reach: Array<{ day: string; views: number }> = [];
+      try {
+        await ensurePostColumns().catch(() => {});
+        const viewRows = await sql`
+          SELECT created_at::date AS day, COUNT(*) AS views
+          FROM post_views
+          WHERE post_id = ${postId}::uuid AND created_at >= ${sinceIso}::timestamptz
+          GROUP BY created_at::date
+          ORDER BY day ASC
+        `;
+        const byDay = new Map<string, number>();
+        for (const r of viewRows as any[]) {
+          const d = String((r as any).day).slice(0, 10);
+          byDay.set(d, Number((r as any).views || 0));
+        }
+        for (let i = periodDays - 1; i >= 0; i--) {
+          const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+          reach.push({ day: d, views: byDay.get(d) || 0 });
+        }
+      } catch {}
+      return c.json({ views, likes, reposts, replies, bookmarks, engagement_rate, period: periodParam, reach_7d: reach, reach, top_referrers: [] });
     } catch (err: any) {
       return c.json({ error: "Erreur stats post." }, 500);
     }
@@ -444,15 +523,21 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
 
   registerMulti("get", ["/api/vibe/posts/:id/stats", "/vibe/posts/:id/stats", "/v1/posts/:id/stats", "/posts/:id/stats"], handlePostStats);
 
-  // 1d. CREATOR STATS (30 derniers jours, agrégation)
+  // 1d. CREATOR STATS (période ?period=7d|30d|90d|12m, défaut 30d)
+  // Champs historiques conservés (total_*, top_post, daily) + nouveaux :
+  // series[{day,views,likes,reposts,replies,profile_views}], sources, profile_views.
   const handleCreatorStats = async (c: any) => {
     try {
       const token = extractToken(c.req.raw);
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      const periodParam = String(c.req.query("period") || "30d").toLowerCase();
+      const periodDays = periodParam === "7d" ? 7 : periodParam === "90d" ? 90 : periodParam === "12m" ? 365 : 30;
+      const sinceIso = new Date(Date.now() - periodDays * 86400000).toISOString();
       const sql = getDb();
       await publishDuePosts().catch(() => {});
+      await ensurePostColumns().catch(() => {});
       const agg = await sql`
         SELECT COALESCE(SUM(views_count), 0) AS total_views,
                COALESCE(SUM(likes_count), 0) AS total_likes,
@@ -460,32 +545,160 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
                COALESCE(SUM(replies_count), 0) AS total_replies,
                COUNT(*) AS posts_count
         FROM posts
-        WHERE author_id = ${userId} AND published_at >= NOW() - INTERVAL '30 days'
+        WHERE author_id = ${userId} AND published_at >= ${sinceIso}::timestamptz
       `;
       const top = await sql`
         SELECT id, content, views_count, likes_count, reposts_count, replies_count, published_at,
                (COALESCE(likes_count,0) + COALESCE(reposts_count,0) * 2 + COALESCE(replies_count,0) * 2) AS engagement
         FROM posts
-        WHERE author_id = ${userId} AND published_at >= NOW() - INTERVAL '30 days'
+        WHERE author_id = ${userId} AND published_at >= ${sinceIso}::timestamptz
         ORDER BY engagement DESC, published_at DESC
         LIMIT 1
       `;
       const daily = await sql`
         SELECT published_at::date AS day, COALESCE(SUM(views_count), 0) AS views, COUNT(*) AS posts
         FROM posts
-        WHERE author_id = ${userId} AND published_at >= NOW() - INTERVAL '30 days'
+        WHERE author_id = ${userId} AND published_at >= ${sinceIso}::timestamptz
         GROUP BY published_at::date
         ORDER BY day ASC
       `;
       const a = agg[0] || {};
+      // Séries temporelles par date d'ÉVÉNEMENT (best-effort, tables absentes => zéros)
+      const days: string[] = [];
+      for (let i = periodDays - 1; i >= 0; i--) {
+        days.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+      }
+      const bucket = (rows: any[], key = "day", val = "n") => {
+        const m = new Map<string, number>();
+        for (const r of rows as any[]) m.set(String(r[key]).slice(0, 10), Number(r[val] || 0));
+        return m;
+      };
+      let viewsByDay = new Map<string, number>();
+      let likesByDay = new Map<string, number>();
+      let repostsByDay = new Map<string, number>();
+      let repliesByDay = new Map<string, number>();
+      let profileByDay = new Map<string, number>();
+      let sources: Array<{ source: string; views: number }> = [];
+      let profileViewsTotal = 0;
+      try {
+        const [v, l, rp] = await Promise.all([
+          sql`SELECT pv.created_at::date AS day, COUNT(*) AS n FROM post_views pv JOIN posts p ON p.id = pv.post_id WHERE p.author_id = ${userId} AND pv.created_at >= ${sinceIso}::timestamptz GROUP BY pv.created_at::date`,
+          sql`SELECT pi.created_at::date AS day, COUNT(*) AS n FROM post_interactions pi JOIN posts p ON p.id = pi.post_id WHERE p.author_id = ${userId} AND pi.interaction_type = 'like' AND pi.created_at >= ${sinceIso}::timestamptz GROUP BY pi.created_at::date`,
+          sql`SELECT pi.created_at::date AS day, COUNT(*) AS n FROM post_interactions pi JOIN posts p ON p.id = pi.post_id WHERE p.author_id = ${userId} AND pi.interaction_type = 'repost' AND pi.created_at >= ${sinceIso}::timestamptz GROUP BY pi.created_at::date`,
+        ]);
+        viewsByDay = bucket(v as any[]);
+        likesByDay = bucket(l as any[]);
+        repostsByDay = bucket(rp as any[]);
+      } catch {}
+      try {
+        const cm = await sql`SELECT c.created_at::date AS day, COUNT(*) AS n FROM comments c JOIN posts p ON p.id = c.post_id WHERE p.author_id = ${userId} AND c.created_at >= ${sinceIso}::timestamptz GROUP BY c.created_at::date`;
+        repliesByDay = bucket(cm as any[]);
+      } catch {}
+      try {
+        const pv = await sql`SELECT created_at::date AS day, COUNT(*) AS n FROM profile_views WHERE profile_user_id = ${userId} AND created_at >= ${sinceIso}::timestamptz GROUP BY created_at::date`;
+        profileByDay = bucket(pv as any[]);
+        for (const n of profileByDay.values()) profileViewsTotal += n;
+      } catch {}
+      try {
+        const s = await sql`SELECT COALESCE(pv.source, 'feed') AS source, COUNT(*) AS views FROM post_views pv JOIN posts p ON p.id = pv.post_id WHERE p.author_id = ${userId} AND pv.created_at >= ${sinceIso}::timestamptz GROUP BY COALESCE(pv.source, 'feed') ORDER BY views DESC`;
+        sources = (s as any[]).map((r: any) => ({ source: String(r.source), views: Number(r.views || 0) }));
+      } catch {}
+      // ── Nouvelles analyses (migration 019) ──
+      // 1. Comparaison avec la période précédente (croissance)
+      let previous_period: any = null;
+      try {
+        const prevSince = new Date(Date.now() - 2 * periodDays * 86400000).toISOString();
+        const prevUntil = new Date(Date.now() - periodDays * 86400000).toISOString();
+        const prev = await sql`
+          SELECT COALESCE(SUM(views_count), 0) AS views, COALESCE(SUM(likes_count), 0) AS likes,
+                 COALESCE(SUM(reposts_count), 0) AS reposts, COALESCE(SUM(replies_count), 0) AS replies,
+                 COUNT(*) AS posts
+          FROM posts
+          WHERE author_id = ${userId} AND published_at >= ${prevSince}::timestamptz AND published_at < ${prevUntil}::timestamptz
+        `;
+        previous_period = {
+          total_views: Number(prev[0]?.views || 0),
+          total_likes: Number(prev[0]?.likes || 0),
+          total_reposts: Number(prev[0]?.reposts || 0),
+          total_replies: Number(prev[0]?.replies || 0),
+          posts_count: Number(prev[0]?.posts || 0),
+        };
+      } catch {}
+      // 2. Meilleur jour (vues) + meilleur jour de publication
+      let best_day: any = null;
+      let best_publish_day: any = null;
+      try {
+        const bd = await sql`
+          SELECT created_at::date AS day, COUNT(*) AS views
+          FROM post_views pv JOIN posts p ON p.id = pv.post_id
+          WHERE p.author_id = ${userId} AND pv.created_at >= ${sinceIso}::timestamptz
+          GROUP BY 1 ORDER BY views DESC LIMIT 1
+        `;
+        if (bd[0]) best_day = { day: String(bd[0].day).slice(0, 10), views: Number(bd[0].views || 0) };
+      } catch {}
+      try {
+        const bpd = await sql`
+          SELECT published_at::date AS day, COALESCE(SUM(views_count), 0) AS views, COUNT(*) AS posts
+          FROM posts WHERE author_id = ${userId} AND published_at >= ${sinceIso}::timestamptz
+          GROUP BY 1 ORDER BY views DESC LIMIT 1
+        `;
+        if (bpd[0]) best_publish_day = { day: String(bpd[0].day).slice(0, 10), views: Number(bpd[0].views || 0), posts: Number(bpd[0].posts || 0) };
+      } catch {}
+      // 3. Répartition horaire des vues (0-23) pour trouver les heures optimales
+      let hourly: Array<{ hour: number; views: number }> = [];
+      try {
+        const h = await sql`
+          SELECT EXTRACT(HOUR FROM pv.created_at)::int AS hour, COUNT(*) AS views
+          FROM post_views pv JOIN posts p ON p.id = pv.post_id
+          WHERE p.author_id = ${userId} AND pv.created_at >= ${sinceIso}::timestamptz
+          GROUP BY 1 ORDER BY 1
+        `;
+        const byHour = new Map<number, number>((h as any[]).map((r: any) => [Number(r.hour), Number(r.views || 0)]));
+        hourly = Array.from({ length: 24 }, (_, i) => ({ hour: i, views: byHour.get(i) || 0 }));
+      } catch {}
+      // 4. Posts les plus engageants de la période (top 5)
+      let top_posts: any[] = [];
+      try {
+        const tp = await sql`
+          SELECT id, content, views_count, likes_count, reposts_count, replies_count, published_at,
+                 (COALESCE(likes_count,0) + COALESCE(reposts_count,0)*2 + COALESCE(replies_count,0)*2) AS engagement
+          FROM posts WHERE author_id = ${userId} AND published_at >= ${sinceIso}::timestamptz
+          ORDER BY engagement DESC, published_at DESC LIMIT 5
+        `;
+        top_posts = (tp as any[]).map((p: any) => ({ ...p, engagement: Number(p.engagement || 0) }));
+      } catch {}
+      // 5. Taux d'engagement moyen par post et fréquence de publication
+      const views_total = Number(a.total_views || 0);
+      const engagementRate = views_total > 0 ? Math.round(((Number(a.total_likes || 0) + Number(a.total_reposts || 0) * 2 + Number(a.total_replies || 0) * 2) / views_total) * 1000) / 10 : 0;
+      const postsPerWeek = periodDays >= 7 ? Math.round((Number(a.posts_count || 0) / (periodDays / 7)) * 10) / 10 : Number(a.posts_count || 0);
+      const series = days.map((day) => ({
+        day,
+        views: viewsByDay.get(day) || 0,
+        likes: likesByDay.get(day) || 0,
+        reposts: repostsByDay.get(day) || 0,
+        replies: repliesByDay.get(day) || 0,
+        profile_views: profileByDay.get(day) || 0,
+      }));
       return c.json({
-        total_views: Number(a.total_views || 0),
+        total_views: views_total,
         total_likes: Number(a.total_likes || 0),
         total_reposts: Number(a.total_reposts || 0),
         total_replies: Number(a.total_replies || 0),
         posts_count: Number(a.posts_count || 0),
         top_post: top[0] || null,
         daily,
+        period: periodParam,
+        series,
+        sources,
+        profile_views: profileViewsTotal,
+        // Nouvelles analyses (migration 019)
+        previous_period,
+        best_day,
+        best_publish_day,
+        hourly,
+        top_posts,
+        engagement_rate: engagementRate,
+        posts_per_week: postsPerWeek,
       });
     } catch (err: any) {
       return c.json({ error: "Erreur stats créateur." }, 500);
@@ -711,6 +924,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       const postResult = { ...rows[0], media_assets: media };
       await attachQuotedPosts([postResult]);
       await attachPollsAndCollabs([postResult], currentUserId);
+      await attachBookRefs([postResult], currentUserId).catch(() => {});
       return c.json({ post: postResult });
     } catch {
       return c.json({ error: "Erreur lors de la récupération." }, 500);
@@ -776,8 +990,13 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       if (!content || !String(content).trim()) {
         return c.json({ error: "Le contenu est obligatoire." }, 400);
       }
-      if (String(content).length > 50_000) {
-        return c.json({ error: "La publication est trop longue." }, 400);
+
+      // Limite de longueur par forfait (texte brut, balises de mise en forme exclues)
+      const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
+      const isPaid = isPaidTier(tierRows[0]?.tier);
+      const charLimit = isPaid ? POST_CHARS_LIMIT_PAID : POST_CHARS_LIMIT_FREE;
+      if (stripHtmlTags(String(content)).length > charLimit) {
+        return c.json(postCharsError(isPaid, charLimit), 400);
       }
 
       const safety = MAIAgentFleet.assessContentSafety(stripHtmlTags(content));
@@ -795,8 +1014,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
           if (Number.isNaN(ts) || ts <= Date.now()) {
             return c.json({ error: "Date de planification invalide ou passée." }, 400);
           }
-          const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
-          if (!isPaidTier(tierRows[0]?.tier)) {
+          if (!isPaid) {
             return c.json(
               { error: "La planification des vibes est réservée aux abonnés Plus, Pro et Max.", plan_required: true },
               403
@@ -828,6 +1046,11 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ error: "Publication introuvable." }, 404);
       }
 
+      // Références de Livres : resynchronisées avec le nouveau contenu
+      const updatedBookRefIds = extractBookRefIds(String(content));
+      if (updatedBookRefIds.length > 0) await ensureBooksTables(sql).catch(() => {});
+      await syncPostBookRefs(sql, postId, updatedBookRefIds);
+
       // Remplacement des médias (légendes incluses) si la liste est fournie
       let insertedMediaList: any[] = [];
       if (Array.isArray(media_assets)) {
@@ -850,17 +1073,32 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
             return fallback;
           }
         };
-        for (const media of media_assets) {
+        const mediaPositions = Array.isArray(body.media_positions) ? body.media_positions : [];
+        for (let mi = 0; mi < media_assets.length; mi++) {
+          const media = media_assets[mi];
           if (!media || !media.url) continue;
           const urlStr = String(media.url).trim();
           if (!urlStr) continue;
-          const res = await sql`
-            INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text)
-            VALUES (${userId}, ${postId}::uuid, ${urlStr}, ${media.media_type || media.type || inferMediaType(urlStr)},
-                    ${Math.max(0, Math.round(Number(media.file_size_bytes ?? media.size ?? 0) || 0))},
-                    ${media.alt_text || media.alt || ""})
-            RETURNING id, url, media_type, file_size_bytes, alt_text
-          `;
+          const position = Number.isFinite(Number(mediaPositions[mi])) ? Number(mediaPositions[mi]) : mi;
+          let res: any[] = [];
+          try {
+            res = await sql`
+              INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text, position)
+              VALUES (${userId}, ${postId}::uuid, ${urlStr}, ${media.media_type || media.type || inferMediaType(urlStr)},
+                      ${Math.max(0, Math.round(Number(media.file_size_bytes ?? media.size ?? 0) || 0))},
+                      ${media.alt_text || media.alt || ""}, ${position})
+              RETURNING id, url, media_type, file_size_bytes, alt_text, position
+            `;
+          } catch {
+            // Colonne position absente (base ancienne) : insertion sans ordre
+            res = await sql`
+              INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text)
+              VALUES (${userId}, ${postId}::uuid, ${urlStr}, ${media.media_type || media.type || inferMediaType(urlStr)},
+                      ${Math.max(0, Math.round(Number(media.file_size_bytes ?? media.size ?? 0) || 0))},
+                      ${media.alt_text || media.alt || ""})
+              RETURNING id, url, media_type, file_size_bytes, alt_text
+            `;
+          }
           if (res && res[0]) insertedMediaList.push(res[0]);
         }
       }
@@ -876,6 +1114,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         quoted_post: null,
       };
       await attachQuotedPosts([updatedPost]);
+      await attachBookRefs([updatedPost], userId).catch(() => {});
 
       return c.json({ success: true, post: updatedPost });
     } catch (err: any) {

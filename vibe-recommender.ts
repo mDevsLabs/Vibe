@@ -75,6 +75,19 @@ export function interestFactor(interestSignal: number | undefined): number {
   return 1 + 0.35 * clamped;
 }
 
+/** Score dwell 0..1 : temps passé sur un post (profil temporel). */
+export function dwellScore(ms?: number): number {
+  if (!ms || ms <= 0) return 0;
+  return Math.min(1, Math.log10(ms / 1000 + 1) / 1.5);
+}
+
+/** Boost contexte temporel : +10% si même partie de journée (matin/midi/soir/nuit). */
+export function dayPartBoost(publishedAt: Date, now: number = Date.now()): number {
+  const h = (t: Date) => t.getHours();
+  const part = (hh: number) => (hh < 6 ? 0 : hh < 12 ? 1 : hh < 18 ? 2 : 3);
+  return part(h(publishedAt)) === part(h(new Date(now))) ? 0.1 : 0;
+}
+
 /** Multiplicateurs de qualité : comptes vérifiés ×1.15, médias ×1.10. */
 export function qualityBoost(isVerifiedAuthor?: boolean, hasMedia?: boolean): number {
   let boost = 1.0;
@@ -93,6 +106,7 @@ export interface FeedTunerWeights {
   popularity: number;
   serendipity: number;
   proximity: number;
+  dwell: number;
 }
 
 export interface PostCandidate {
@@ -116,6 +130,10 @@ export interface PostCandidate {
   interestSignal?: number;
   matchedInterestTags?: string[];
   tuner?: FeedTunerWeights;
+  /** Temps passé utilisateur sur ce post (ms) — profil temporel. */
+  userDwellMs?: number;
+  /** Temps moyen passé par tous sur ce post (ms). */
+  avgDwellMs?: number;
 }
 
 export interface RecommendationSignal {
@@ -131,6 +149,8 @@ export interface RecommendationSignal {
     safetyFactor: number;
     boostFactor: number;
     interestFactor: number;
+    dwellScore: number;
+    timeContextBoost: number;
   };
 }
 
@@ -140,15 +160,17 @@ export interface RecommendationSignal {
 
 export class HybridRecommender {
   private static readonly DEFAULT_TUNER: FeedTunerWeights = {
-    freshness: 0.35,
-    novelty: 0.20,
-    popularity: 0.25,
-    serendipity: 0.10,
-    proximity: 0.10,
+    freshness: 0.30,
+    novelty: 0.18,
+    popularity: 0.22,
+    serendipity: 0.08,
+    proximity: 0.09,
+    dwell: 0.13,
   };
 
   public static scorePost(candidate: PostCandidate): RecommendationSignal {
     const tuner = candidate.tuner || this.DEFAULT_TUNER;
+    const dwellW = (tuner as any).dwell ?? 0.13;
     const ageHours = ageInHours(candidate.publishedAt);
 
     // Récence : demi-vie de 18 h (50 % de fraîcheur restante après 18 h).
@@ -169,13 +191,17 @@ export class HybridRecommender {
     const safety = safetyFactor(candidate.toxicityScore);
     const boost = qualityBoost(candidate.isVerifiedAuthor, candidate.hasMedia);
     const interest = interestFactor(candidate.interestSignal);
+    const dwell = dwellScore(candidate.userDwellMs ?? candidate.avgDwellMs);
+    const timeBoost = dayPartBoost(candidate.publishedAt);
 
     const rawScore =
       tuner.freshness * freshness +
       tuner.popularity * engagement +
       tuner.proximity * proximity +
       tuner.novelty * velocity +
-      tuner.serendipity * (1 - semanticScore * 0.4);
+      tuner.serendipity * (1 - semanticScore * 0.4) +
+      dwellW * dwell +
+      0.05 * timeBoost;
 
     const totalScore = Math.max(
       0,
@@ -187,6 +213,8 @@ export class HybridRecommender {
       explanationText = "🎯 Affiné d'après vos retours « Cela m'intéresse ».";
     } else if ((candidate.interestSignal || 0) <= -0.4) {
       explanationText = "📉 Moins mis en avant : retour « Cela ne m'intéresse pas ».";
+    } else if ((candidate.userDwellMs || 0) >= 8000) {
+      explanationText = "⏱️ Vous passez du temps sur ce type de contenu.";
     } else if (candidate.isFollowedAuthor) {
       explanationText = "Publication d'un créateur que vous suivez.";
     } else if (velocity > 0.6) {
@@ -215,6 +243,8 @@ export class HybridRecommender {
         safetyFactor: Number(safety.toFixed(2)),
         boostFactor: Number(boost.toFixed(2)),
         interestFactor: Number(interest.toFixed(2)),
+        dwellScore: Math.round(dwell * 100),
+        timeContextBoost: Math.round(timeBoost * 100),
       },
     };
   }

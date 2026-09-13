@@ -108,6 +108,10 @@ async function migrate() {
     'user_settings.ui_language',
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS ui_language TEXT`
   );
+  await runAlter(
+    'user_settings.hide_verified_badge',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS hide_verified_badge BOOLEAN DEFAULT FALSE`
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. usage_logs — Ajouter colonne endpoint (manquante selon schéma)
@@ -453,6 +457,94 @@ async function migrate() {
   await runAlter('idx_vibe_audience_user', `CREATE INDEX IF NOT EXISTS idx_vibe_audience_user ON vibe_audience_preferences(user_id)`);
 
   // ─────────────────────────────────────────────────────────────
+  // 16. STATS CRÉATEUR 017 (sources vues + visites profil)
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n📊 STATS CRÉATEUR 017:');
+  await runAlter(
+    'TABLE post_views',
+    `CREATE TABLE IF NOT EXISTS post_views (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id BIGINT,
+      post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      duration_ms INT NOT NULL DEFAULT 1000,
+      dwell_ms INT NOT NULL DEFAULT 1000,
+      visible_ratio FLOAT DEFAULT 0.5,
+      completed BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`
+  );
+  await runAlter('post_views.source', `ALTER TABLE post_views ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'feed'`);
+  await runAlter('idx_views_post_created', `CREATE INDEX IF NOT EXISTS idx_views_post_created ON post_views(post_id, created_at DESC)`);
+  await runAlter('idx_views_created', `CREATE INDEX IF NOT EXISTS idx_views_created ON post_views(created_at DESC)`);
+  await runAlter(
+    'TABLE profile_views',
+    `CREATE TABLE IF NOT EXISTS profile_views (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      profile_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      viewer_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      source TEXT DEFAULT 'profile',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`
+  );
+  await runAlter('idx_profile_views_profile', `CREATE INDEX IF NOT EXISTS idx_profile_views_profile ON profile_views(profile_user_id, created_at DESC)`);
+  await runAlter('idx_profile_views_viewer', `CREATE INDEX IF NOT EXISTS idx_profile_views_viewer ON profile_views(viewer_id, created_at DESC)`);
+  await runAlter('idx_profile_views_created', `CREATE INDEX IF NOT EXISTS idx_profile_views_created ON profile_views(created_at DESC)`);
+
+  // ─────────────────────────────────────────────────────────────
+  // 17. PROFIL ENRICHI + ÉPINGLAGE PROFIL + LIVRES PUBLICS (021/022)
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n✨ PROFIL, ÉPINGLAGE & LIVRES PUBLICS:');
+  await runAlter('profiles.website', `ALTER TABLE profiles ADD COLUMN IF NOT EXISTS website VARCHAR(255)`);
+  await runAlter('profiles.location', `ALTER TABLE profiles ADD COLUMN IF NOT EXISTS location VARCHAR(100)`);
+  await runAlter(
+    'TABLE profile_pinned_posts',
+    `CREATE TABLE IF NOT EXISTS profile_pinned_posts (
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, post_id)
+    )`
+  );
+  await runAlter('idx_profile_pinned_user', `CREATE INDEX IF NOT EXISTS idx_profile_pinned_user ON profile_pinned_posts(user_id, created_at DESC)`);
+  await runAlter('vibe_books.is_public', `ALTER TABLE vibe_books ADD COLUMN IF NOT EXISTS is_public BOOLEAN DEFAULT FALSE`);
+  await runAlter(
+    'TABLE post_book_refs',
+    `CREATE TABLE IF NOT EXISTS post_book_refs (
+      post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      book_id UUID NOT NULL REFERENCES vibe_books(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (post_id, book_id)
+    )`
+  );
+  await runAlter('idx_post_book_refs_book', `CREATE INDEX IF NOT EXISTS idx_post_book_refs_book ON post_book_refs(book_id)`);
+
+  // ─────────────────────────────────────────────────────────────
+  // 18. CONVERSATIONS DES LIVRES DANS MESSAGES (025) + INDEX mAI
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n📚 CONVERSATIONS DES LIVRES:');
+  await runAlter('dm_conversations.book_id', `ALTER TABLE dm_conversations ADD COLUMN IF NOT EXISTS book_id UUID`);
+  await runAlter('idx_dm_conversations_book', `CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_conversations_book ON dm_conversations(book_id) WHERE book_id IS NOT NULL`);
+  await runAlter('direct_messages.attached_post_id', `ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS attached_post_id UUID`);
+  await runAlter('idx_dm_attached_post', `CREATE INDEX IF NOT EXISTS idx_dm_attached_post ON direct_messages(attached_post_id) WHERE attached_post_id IS NOT NULL`);
+  await runAlter('idx_mai_messages_conv', `CREATE INDEX IF NOT EXISTS idx_mai_messages_conv ON mai_messages(conversation_id, created_at DESC)`);
+  await runAlter('idx_mai_conversations_user', `CREATE INDEX IF NOT EXISTS idx_mai_conversations_user ON mai_conversations(user_id, updated_at DESC)`);
+  await runAlter('backfill_book_conversations',
+    `INSERT INTO dm_conversations (participant_one_id, participant_two_id, is_group, group_name, created_by, book_id, last_message_preview, last_message_at)
+     SELECT b.user_id, NULL, TRUE, b.title, b.user_id, b.id, 'Conversation du Livre', COALESCE(b.updated_at, NOW())
+     FROM vibe_books b WHERE NOT EXISTS (SELECT 1 FROM dm_conversations dm WHERE dm.book_id = b.id)`);
+  await runAlter('backfill_book_conversation_members',
+    `INSERT INTO dm_group_members (conversation_id, user_id, role, added_by)
+     SELECT dm.id, m.user_id, CASE WHEN m.role = 'owner' THEN 'admin' ELSE 'member' END, b.user_id
+     FROM dm_conversations dm JOIN vibe_books b ON b.id = dm.book_id
+     JOIN vibe_book_members m ON m.book_id = dm.book_id
+     ON CONFLICT (conversation_id, user_id) DO NOTHING`);
+  await runAlter('backfill_book_conversation_admin_roles',
+    `UPDATE dm_group_members gm SET role = 'admin'
+     WHERE gm.role <> 'admin'
+       AND EXISTS (SELECT 1 FROM dm_conversations dm JOIN vibe_books b ON b.id = dm.book_id
+                   WHERE dm.id = gm.conversation_id AND b.user_id = gm.user_id)`);
+
+  // ─────────────────────────────────────────────────────────────
   // VÉRIFICATION FINALE
   // ─────────────────────────────────────────────────────────────
   console.log('\n═'.repeat(60));
@@ -474,6 +566,17 @@ async function migrate() {
     ['vibe_audience_preferences', `SELECT 1 FROM information_schema.tables WHERE table_name='vibe_audience_preferences'`],
     ['circle_members', `SELECT 1 FROM information_schema.tables WHERE table_name='circle_members'`],
     ['comment_translations', `SELECT 1 FROM information_schema.tables WHERE table_name='comment_translations'`],
+    ['profile_views', `SELECT 1 FROM information_schema.tables WHERE table_name='profile_views'`],
+    ['post_views.source', `SELECT 1 FROM information_schema.columns WHERE table_name='post_views' AND column_name='source'`],
+    ['profiles.website', `SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='website'`],
+    ['profiles.location', `SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='location'`],
+    ['profile_pinned_posts', `SELECT 1 FROM information_schema.tables WHERE table_name='profile_pinned_posts'`],
+    ['vibe_books.is_public', `SELECT 1 FROM information_schema.columns WHERE table_name='vibe_books' AND column_name='is_public'`],
+    ['post_book_refs', `SELECT 1 FROM information_schema.tables WHERE table_name='post_book_refs'`],
+    ['dm_conversations.book_id', `SELECT 1 FROM information_schema.columns WHERE table_name='dm_conversations' AND column_name='book_id'`],
+    ['direct_messages.attached_post_id', `SELECT 1 FROM information_schema.columns WHERE table_name='direct_messages' AND column_name='attached_post_id'`],
+    ['mai_messages', `SELECT 1 FROM information_schema.tables WHERE table_name='mai_messages'`],
+    ['idx_mai_messages_conv', `SELECT 1 FROM pg_indexes WHERE indexname='idx_mai_messages_conv'`],
   ];
 
   for (const [name, q] of checks) {

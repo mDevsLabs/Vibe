@@ -8,6 +8,7 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { haptics } from '../../services/haptics';
+import { useMotionPrefs } from '../../hooks/useMotionPrefs';
 import {
   Image as ImageIcon,
   Mic,
@@ -27,13 +28,16 @@ import {
   Undo2,
   FileText,
   BarChart2,
+  BookHeart,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { getPostCharLimit, getMediaBytesLimit, formatMediaLimit } from '../../services/tierLimits';
 import { ApiService } from '../../services/api';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { NotificationService } from '../../services/notificationService';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { RichTextEditor, RichTextEditorHandle } from '../common/RichTextEditor';
+import { BookAttachModal } from './BookAttachModal';
 import { htmlToPlainText } from '../common/RichContent';
 import {
   readVibeDraft,
@@ -76,7 +80,6 @@ interface UploadedMedia {
   alt_text?: string;
 }
 
-const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50 Mo
 const SCHEDULED_TIERS = ['Plus', 'Pro', 'Max'];
 
 /** Options d'audience d'une publication. */
@@ -135,6 +138,12 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   editingPost,
 }) => {
   const { user, profile } = useAuth();
+
+  // Limites par forfait : Vibe 1 000 caractères (Free), médias 50 Mo (Free) / 1 Go (Plus+)
+  const postCharLimit = getPostCharLimit(user?.tier);
+  const postCharUnlimited = !Number.isFinite(postCharLimit);
+  const mediaBytesLimit = getMediaBytesLimit(user?.tier);
+  const mediaLimitLabel = formatMediaLimit(mediaBytesLimit);
   const isEditing = Boolean(editingPost);
   const [contentText, setContentText] = useState(htmlToPlainText(initialContent || editingPost?.content || ''));
   const [mediaList, setMediaList] = useState<UploadedMedia[]>(
@@ -153,6 +162,8 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [justSent, setJustSent] = useState(false);
+  const { play: playMotion } = useMotionPrefs();
   // Badge « Créé avec l'IA » : défaut issu des réglages utilisateur
   const [isAIGenerated, setIsAIGenerated] = useState(false);
   const [quotedPost, setQuotedPost] = useState<Post | null>(initialQuotedPost || null);
@@ -325,6 +336,21 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<RichTextEditorHandle>(null);
+  // Référencement d'un Livre (@livre) : carte affichée sous la Vibe publiée
+  const [showBookAttach, setShowBookAttach] = useState(false);
+
+  const handleAttachBook = (book: { id: string; title: string }) => {
+    const safeTitle = String(book.title || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    editorRef.current?.insertHtml(
+      `<a data-book-id="${book.id}" href="/books/${book.id}" class="rich-link">@${safeTitle}</a>&nbsp;`
+    );
+    editorRef.current?.focus();
+  };
 
   useEffect(() => {
     NotificationService.requestPermission().catch(() => {});
@@ -446,24 +472,8 @@ export const PostComposer: React.FC<PostComposerProps> = ({
     const currentTotalBytes = mediaList.reduce((acc, m) => acc + (m.size || 0), 0);
     const newFilesBytes = files.reduce((acc, f) => acc + f.size, 0);
 
-    if (currentTotalBytes + newFilesBytes > MAX_TOTAL_BYTES) {
-      setError(`La taille totale des médias ne peut pas dépasser 50 Mo par publication (sélection actuelle : ${((currentTotalBytes + newFilesBytes) / (1024 * 1024)).toFixed(1)} Mo).`);
-      return;
-    }
-
-    let newImages = 0;
-    let newVideos = 0;
-    for (const f of files) {
-      if (f.type.startsWith('image/')) newImages++;
-      else if (f.type.startsWith('video/')) newVideos++;
-    }
-
-    if (imagesCount + newImages > 5) {
-      setError(`Limite de 5 images par publication atteinte (actuel: ${imagesCount}).`);
-      return;
-    }
-    if (videosCount + newVideos > 2) {
-      setError(`Limite de 2 vidéos par publication atteinte (actuel: ${videosCount}).`);
+    if (currentTotalBytes + newFilesBytes > mediaBytesLimit) {
+      setError(`La taille totale des médias ne peut pas dépasser ${mediaLimitLabel} par publication (sélection actuelle : ${((currentTotalBytes + newFilesBytes) / (1024 * 1024)).toFixed(1)} Mo).`);
       return;
     }
 
@@ -472,8 +482,8 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
     try {
       for (const file of files) {
-        if (file.size > MAX_TOTAL_BYTES) {
-          throw new Error(`Le fichier ${file.name} dépasse la taille maximale autorisée de 50 Mo.`);
+        if (file.size > mediaBytesLimit) {
+          throw new Error(`Le fichier ${file.name} dépasse la limite de ${mediaLimitLabel}.`);
         }
         const res = await ApiService.uploadFile(file);
         if (res.url) {
@@ -596,6 +606,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
         const res = await ApiService.updatePost(editingPost.id, html, mediaAssets, {
           scheduledAt: scheduledForPublish,
           visibility,
+          mediaPositions: mediaList.map((_, i) => i),
         });
         NotificationService.showInAppToast(
           res.post?.status === 'scheduled' ? 'Planification mise à jour' : 'Vibe modifiée',
@@ -676,12 +687,16 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       setAiSnapshot(null);
       setAiError(null);
       haptics.success();
+      playMotion('success');
+      setJustSent(true);
+      setTimeout(() => setJustSent(false), 1400);
       onPostCreated();
       if (isModal && onClose) {
         onClose();
       }
     } catch (err: any) {
       haptics.error();
+      playMotion('error');
       setError(err.message || 'Erreur lors de la publication.');
     } finally {
       setIsSubmitting(false);
@@ -689,7 +704,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
   };
 
   const avatarSrc = profile?.avatarUrl || user?.avatar_url || null;
-  const submitDisabled = isSubmitting || isUploading || aiBusy || (!contentText.trim() && mediaList.length === 0);
+  const submitDisabled = isSubmitting || isUploading || aiBusy || contentText.length > postCharLimit || (!contentText.trim() && mediaList.length === 0);
   const activeVisibility = VISIBILITY_OPTIONS.find((v) => v.value === visibility) || VISIBILITY_OPTIONS[0];
 
   /** Tab accepte la continuation mAI, Échap la rejette. */
@@ -713,7 +728,7 @@ export const PostComposer: React.FC<PostComposerProps> = ({
       }`}
     >
       {error && (
-        <div className="mb-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 flex items-center gap-2 shrink-0">
+        <div key={error} className="mb-3 p-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 flex items-center gap-2 shrink-0 animate-shake">
           <AlertCircle className="w-4 h-4 text-white shrink-0" />
           <span>{error}</span>
         </div>
@@ -781,7 +796,19 @@ export const PostComposer: React.FC<PostComposerProps> = ({
             }}
             placeholder={isListening ? 'Parlez, dictée vocale en cours…' : isEditing ? 'Modifiez votre vibe…' : placeholder}
             disabled={isSubmitting || aiBusy}
+            maxChars={postCharUnlimited ? undefined : postCharLimit}
           />
+
+          {/* Compteur de caractères (forfait Free : 1 000 max) */}
+          {!postCharUnlimited && (
+            <div
+              className={`text-right text-[10px] font-mono shrink-0 ${
+                contentText.length > postCharLimit ? 'text-red-500 font-bold' : 'text-zinc-500'
+              }`}
+            >
+              {contentText.length}/{postCharLimit.toLocaleString('fr-FR')}
+            </div>
+          )}
 
           {/* Continuation mAI (ghost text) : « Tab » pour l'ajouter au post */}
           {ghostSuggestion && (
@@ -857,11 +884,11 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           {isUploading && (
             <div className="p-3 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-center gap-2 text-xs text-zinc-300 shrink-0">
               <Loader2 className="w-4 h-4 animate-spin text-white" />
-              <span>Téléversement des médias ({imagesCount}/5 images, {videosCount}/2 vidéos)...</span>
+              <span>Téléversement des médias ({imagesCount + videosCount} fichier(s))...</span>
             </div>
           )}
 
-          {/* Multi-Media Previews (Up to 5 images / 2 videos) + légendes */}
+          {/* Multi-Media Previews (images / vidéos, budget de taille par forfait) + légendes */}
           {mediaList.length > 0 && (
             <div className="space-y-2 shrink-0">
               {mediaList.length > 1 && (
@@ -1119,11 +1146,21 @@ export const PostComposer: React.FC<PostComposerProps> = ({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading || (imagesCount >= 5 && videosCount >= 2)}
+                disabled={isUploading}
                 className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
-                title="Ajouter photos ou vidéos (max 5 photos, 2 vidéos)"
+                title={`Ajouter photos ou vidéos (max ${mediaLimitLabel} au total)`}
               >
                 <ImageIcon className="w-4 h-4" />
+              </button>
+
+              {/* Référencer un Livre public (@livre) — carte sous la Vibe */}
+              <button
+                type="button"
+                onClick={() => setShowBookAttach(true)}
+                className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+                title="Référencer un Livre (@livre) : carte affichée sous la Vibe"
+              >
+                <BookHeart className="w-4 h-4" />
               </button>
 
               {/* Outils mAI : continuation Tab + actions rapides sur le brouillon */}
@@ -1347,11 +1384,13 @@ export const PostComposer: React.FC<PostComposerProps> = ({
 
               <button
                 onClick={handleSubmit}
-                disabled={submitDisabled}
-                style={{ backgroundColor: 'var(--vibe-accent, #ffffff)' }}
-                className="py-2 px-5 rounded-full bg-white text-black font-bold text-xs hover:brightness-90 transition-all flex items-center gap-1.5 shadow-lg disabled:opacity-40"
+                disabled={submitDisabled && !justSent}
+                style={{ backgroundColor: justSent ? '#22c55e' : 'var(--vibe-accent, #ffffff)' }}
+                className={`py-2 px-5 rounded-full bg-white text-black font-bold text-xs hover:brightness-90 transition-all flex items-center gap-1.5 shadow-lg disabled:opacity-40 ${justSent ? 'animate-pop' : ''}`}
               >
-                {isSubmitting ? (
+                {justSent ? (
+                  <Check className="w-3.5 h-3.5" />
+                ) : isSubmitting ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : scheduledAt && canSchedule ? (
                   <CalendarClock className="w-3.5 h-3.5" />
@@ -1359,7 +1398,9 @@ export const PostComposer: React.FC<PostComposerProps> = ({
                   <Send className="w-3.5 h-3.5" />
                 )}
                 <span>
-                  {isEditing
+                  {justSent
+                    ? 'Publié !'
+                    : isEditing
                     ? 'Enregistrer'
                     : scheduledAt && canSchedule
                     ? 'Planifier'
@@ -1370,6 +1411,13 @@ export const PostComposer: React.FC<PostComposerProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Modale de référencement d'un Livre (@livre) */}
+      <BookAttachModal
+        isOpen={showBookAttach}
+        onClose={() => setShowBookAttach(false)}
+        onSelect={handleAttachBook}
+      />
     </div>
   );
 };

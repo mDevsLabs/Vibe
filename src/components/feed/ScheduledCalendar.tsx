@@ -11,16 +11,7 @@ import { ChevronLeft, ChevronRight, Loader2, CalendarClock } from 'lucide-react'
 import { ApiService } from '../../services/api';
 import type { Post } from '../../types/vibe';
 import { haptics } from '../../services/haptics';
-
-const stripHtml = (html: string): string => {
-  try {
-    const el = document.createElement('div');
-    el.innerHTML = html || '';
-    return (el.textContent || '').trim();
-  } catch {
-    return String(html || '');
-  }
-};
+import { makeExcerpt } from '../common/richTextUtils';
 
 const toLocalInputValue = (iso: string): string => {
   try {
@@ -165,11 +156,11 @@ export const ScheduledCalendar: React.FC = () => {
                           e.stopPropagation();
                           setDragPostId(String(p.id));
                         }}
-                        title={`${stripHtml(p.content).slice(0, 120)} — ${p.scheduled_at ? toLocalInputValue(p.scheduled_at).slice(11) : ''} (glisser pour replanifier)`}
+                        title={`${makeExcerpt(p.content, 120)} — ${p.scheduled_at ? toLocalInputValue(p.scheduled_at).slice(11) : ''} (glisser pour replanifier)`}
                         className="w-full text-left px-1 py-0.5 rounded-md bg-zinc-800 hover:bg-zinc-700 transition-colors cursor-grab active:cursor-grabbing"
                       >
                         <span className="block text-[10px] text-zinc-200 truncate">
-                          {stripHtml(p.content).slice(0, 30) || '(sans texte)'}
+                          {makeExcerpt(p.content, 30) || '(sans texte)'}
                         </span>
                       </button>
                     ))}

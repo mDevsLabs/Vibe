@@ -5,6 +5,7 @@
  * ============================================================================
  */
 
+import type { ComponentType, SVGProps } from 'react';
 import {
   BookHeart,
   BookMarked,
@@ -38,10 +39,11 @@ import {
   Gem,
   Library,
   PenLine,
-  type LucideIcon,
 } from 'lucide-react';
 
-export const BOOK_ICON_OPTIONS: { name: string; Component: LucideIcon }[] = [
+export type BookIconComponent = ComponentType<SVGProps<SVGSVGElement>>;
+
+export const BOOK_ICON_OPTIONS: { name: string; Component: BookIconComponent }[] = [
   { name: 'BookHeart', Component: BookHeart },
   { name: 'BookMarked', Component: BookMarked },
   { name: 'BookOpen', Component: BookOpen },
@@ -77,6 +79,6 @@ export const BOOK_ICON_OPTIONS: { name: string; Component: LucideIcon }[] = [
 ];
 
 /** Retourne le composant lucide correspondant à un nom d'icône stocké. */
-export function getBookIcon(name: string): LucideIcon {
+export function getBookIcon(name: string): BookIconComponent {
   return BOOK_ICON_OPTIONS.find((o) => o.name === name)?.Component || BookHeart;
 }

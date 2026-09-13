@@ -27,9 +27,16 @@ import {
   X,
   Check,
   CornerDownLeft,
+  Highlighter,
+  Palette,
+  Sigma,
+  Braces,
 } from 'lucide-react';
 import { ApiService } from '../../services/api';
-import { MentionAutocomplete, type MentionUser } from '../feed/MentionAutocomplete';
+import { MentionAutocomplete, type MentionUser, type MentionBook } from '../feed/MentionAutocomplete';
+import { prepareEditorHtml } from './richSanitizer';
+import { VIBE_COLORS } from './richMarkdown';
+import { tryApplyInlineMarkdown } from './richTextUtils';
 
 export interface RichTextEditorHandle {
   getHTML: () => string;
@@ -38,6 +45,8 @@ export interface RichTextEditorHandle {
   setHTML: (html: string) => void;
   /** Insertion de texte (dictée vocale) à la position du curseur ou en fin. */
   insertText: (text: string) => void;
+  /** Insertion de HTML (références de Livres, cartes) à la position du curseur ou en fin. */
+  insertHtml: (html: string) => void;
   focus: () => void;
   clear: () => void;
 }
@@ -53,6 +62,8 @@ interface RichTextEditorProps {
   className?: string;
   /** Mode étendu (modal) : remplit toute la hauteur disponible */
   fillHeight?: boolean;
+  /** Cap de caractères (texte brut) : bloque la frappe et tronque le collage au-delà. */
+  maxChars?: number;
 }
 
 interface LinkDraft {
@@ -67,6 +78,19 @@ const URL_RE = /^https?:\/\/[^\s<>"']+$/i;
 const escapeAttr = (v: string) =>
   v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** Teintes des pastilles de la palette (miroir des classes .vibe-color-*). */
+const COLOR_SWATCHES: Record<string, string> = {
+  rouge: '#ef4444',
+  orange: '#f97316',
+  ambre: '#eab308',
+  vert: '#22c55e',
+  emeraude: '#10b981',
+  bleu: '#3b82f6',
+  violet: '#8b5cf6',
+  rose: '#ec4899',
+  gris: '#71717a',
+};
+
 export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(
   (
     {
@@ -77,6 +101,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       disabled = false,
       className = '',
       fillHeight = false,
+      maxChars,
     },
     ref
   ) => {
@@ -84,14 +109,25 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     const wrapperRef = useRef<HTMLDivElement>(null);
     const savedRangeRef = useRef<Range | null>(null);
     const [_isEmpty, setIsEmpty] = useState(true);
-    const [activeStates, setActiveStates] = useState({
+    const [activeStates, setActiveStates] = useState<{
+      bold: boolean;
+      italic: boolean;
+      underline: boolean;
+      strikeThrough: boolean;
+      mark: boolean;
+      color: string | null;
+    }>({
       bold: false,
       italic: false,
       underline: false,
       strikeThrough: false,
+      mark: false,
+      color: null,
     });
     const [linkDraft, setLinkDraft] = useState<LinkDraft | null>(null);
     const linkTextInputRef = useRef<HTMLInputElement>(null);
+    const [paletteOpen, setPaletteOpen] = useState(false);
+    const paletteRef = useRef<HTMLSpanElement>(null);
 
     // ── Autocomplete de mentions « @ » (posts & commentaires) ────────────
     // Même mécanique que ToolAutocomplete pour les outils mAI : détection du
@@ -99,12 +135,14 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     // navigation clavier, insertion « @username » remplaçant le token.
     const [mention, setMention] = useState<{ query: string } | null>(null);
     const [mentionUsers, setMentionUsers] = useState<MentionUser[]>([]);
+    const [mentionBooks, setMentionBooks] = useState<MentionBook[]>([]);
     const [mentionIndex, setMentionIndex] = useState(0);
     const mentionRangeRef = useRef<Range | null>(null);
 
     const closeMention = useCallback(() => {
       setMention(null);
       setMentionUsers([]);
+      setMentionBooks([]);
       setMentionIndex(0);
     }, []);
 
@@ -137,16 +175,21 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     useEffect(() => {
       if (!mention || mentionQuery.length < 1) {
         setMentionUsers([]);
+        setMentionBooks([]);
         return;
       }
       let cancelled = false;
       const timer = setTimeout(async () => {
-        try {
-          const res = await ApiService.searchUsers(mentionQuery);
-          if (!cancelled) setMentionUsers((res?.users || []).slice(0, 6));
-        } catch {
-          if (!cancelled) setMentionUsers([]);
-        }
+        // Recherche parallèle : comptes Vibe + Livres publics (dès 2 caractères)
+        const [usersRes, booksRes] = await Promise.all([
+          ApiService.searchUsers(mentionQuery).catch(() => null),
+          mentionQuery.length >= 2
+            ? ApiService.searchPublicBooks(mentionQuery).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        setMentionUsers((usersRes?.users || []).slice(0, 6));
+        setMentionBooks(((booksRes as any)?.books || []).slice(0, 4));
       }, 250);
       return () => {
         cancelled = true;
@@ -172,6 +215,19 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       onChange?.(el.innerHTML, el.textContent || '');
     }, [onChange, syncEmptyState]);
 
+    // Cap de caractères (texte brut) : refuse les insertions au-delà de maxChars
+    useEffect(() => {
+      const el = editorRef.current;
+      if (!el || !maxChars || !Number.isFinite(maxChars)) return;
+      const onBeforeInput = (e: InputEvent) => {
+        if (e.inputType && e.inputType.startsWith('insert') && e.data) {
+          if ((el.textContent || '').length >= maxChars) e.preventDefault();
+        }
+      };
+      el.addEventListener('beforeinput', onBeforeInput);
+      return () => el.removeEventListener('beforeinput', onBeforeInput);
+    }, [maxChars]);
+
     const selectMention = useCallback(
       (user: MentionUser) => {
         const el = editorRef.current;
@@ -191,25 +247,61 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       [closeMention, emitChange]
     );
 
+    /** Ancre de référence de Livre (@livre) insérée dans le contenu. */
+    const bookAnchorHtml = useCallback((book: MentionBook) => {
+      const safeTitle = String(book.title || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      return `<a data-book-id="${book.id}" href="/books/${book.id}" class="rich-link">@${safeTitle}</a>&nbsp;`;
+    }, []);
+
+    const selectBookMention = useCallback(
+      (book: MentionBook) => {
+        const el = editorRef.current;
+        const range = mentionRangeRef.current;
+        if (!el || !range) {
+          closeMention();
+          return;
+        }
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        el.focus();
+        document.execCommand('insertHTML', false, bookAnchorHtml(book));
+        emitChange();
+        closeMention();
+      },
+      [bookAnchorHtml, closeMention, emitChange]
+    );
+
     const handleMentionKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
-        if (!mention || mentionUsers.length === 0) return;
+        const total = mentionUsers.length + mentionBooks.length;
+        if (!mention || total === 0) return;
         if (e.key === 'ArrowDown') {
           e.preventDefault();
-          setMentionIndex((i) => (i + 1) % mentionUsers.length);
+          setMentionIndex((i) => (i + 1) % total);
         } else if (e.key === 'ArrowUp') {
           e.preventDefault();
-          setMentionIndex((i) => (i - 1 + mentionUsers.length) % mentionUsers.length);
+          setMentionIndex((i) => (i - 1 + total) % total);
         } else if (e.key === 'Enter' || e.key === 'Tab') {
           e.preventDefault();
-          const user = mentionUsers[mentionIndex];
-          if (user) selectMention(user);
+          if (mentionIndex < mentionUsers.length) {
+            const user = mentionUsers[mentionIndex];
+            if (user) selectMention(user);
+          } else {
+            const book = mentionBooks[mentionIndex - mentionUsers.length];
+            if (book) selectBookMention(book);
+          }
         } else if (e.key === 'Escape') {
           e.preventDefault();
           closeMention();
         }
       },
-      [mention, mentionUsers, mentionIndex, selectMention, closeMention]
+      [mention, mentionUsers, mentionBooks, mentionIndex, selectMention, selectBookMention, closeMention]
     );
 
     const focusEditor = useCallback(() => {
@@ -227,11 +319,25 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
 
     const readActiveStates = useCallback(() => {
       try {
+        const sel = window.getSelection();
+        const anchorEl = sel?.anchorNode
+          ? sel.anchorNode instanceof HTMLElement
+            ? sel.anchorNode
+            : sel.anchorNode.parentElement
+          : null;
+        const colorSpan = anchorEl?.closest('span[class*="vibe-color-"]') as HTMLElement | null;
+        const activeColor = colorSpan
+          ? Array.from(colorSpan.classList)
+              .find((cls) => cls.startsWith('vibe-color-'))
+              ?.slice('vibe-color-'.length) || null
+          : null;
         setActiveStates({
           bold: document.queryCommandState('bold'),
           italic: document.queryCommandState('italic'),
           underline: document.queryCommandState('underline'),
           strikeThrough: document.queryCommandState('strikeThrough'),
+          mark: Boolean(anchorEl?.closest('mark')),
+          color: activeColor,
         });
       } catch {
         /* navigateur sans queryCommandState */
@@ -258,39 +364,9 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     // ── Règles Markdown à la frappe ─────────────────────────────────────
 
     const applyInlineMarkdown = useCallback(() => {
-      const sel = window.getSelection();
       const el = editorRef.current;
-      if (!sel || !sel.isCollapsed || !el || !el.contains(sel.anchorNode)) return;
-      const node = sel.anchorNode;
-      if (!node || node.nodeType !== Node.TEXT_NODE) return;
-      const text = node.textContent || '';
-      const offset = sel.anchorOffset;
-      const before = text.slice(0, offset);
-
-      const inlineRules: Array<{ re: RegExp; html: (inner: string, url?: string) => string }> = [
-        { re: /\*\*([^*\s][^*]*)\*\*$/, html: (t) => `<b>${t}</b>&nbsp;` },
-        { re: /(?<![*\w])\*([^*\s][^*]*)\*$/, html: (t) => `<i>${t}</i>&nbsp;` },
-        { re: /__([^_\s][^_]*)__$/, html: (t) => `<u>${t}</u>&nbsp;` },
-        { re: /~~([^~\s][^~]*)~~$/, html: (t) => `<s>${t}</s>&nbsp;` },
-        { re: /`([^`\s][^`]*)`$/, html: (t) => `<code>${t}</code>&nbsp;` },
-        { re: /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/, html: (t, url?) => `<a href="${escapeAttr(url || '')}">${t}</a>&nbsp;` },
-      ];
-
-      for (const rule of inlineRules) {
-        const m = before.match(rule.re);
-        if (!m) continue;
-        const start = offset - m[0].length;
-        const range = document.createRange();
-        range.setStart(node, start);
-        range.setEnd(node, offset);
-        sel.removeAllRanges();
-        sel.addRange(range);
-        const inner = m[1];
-        const url = m[2];
-        document.execCommand('insertHTML', false, rule.html(inner, url));
-        emitChange();
-        return;
-      }
+      if (!el) return;
+      if (tryApplyInlineMarkdown(el)) emitChange();
     }, [emitChange]);
 
     const applyBlockMarkdown = useCallback(() => {
@@ -336,6 +412,194 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       }
     }, [emitChange]);
 
+    // ── Enrichissements : surlignage, couleur, formule, bloc de code ────
+
+    /** Remonte l'arbre jusqu'au premier élément vérifiant le prédicat (borné à l'éditeur). */
+    const closestInlineWrapper = useCallback(
+      (node: Node | null, predicate: (el: HTMLElement) => boolean): HTMLElement | null => {
+        const el = editorRef.current;
+        let current: Node | null = node;
+        while (current && current !== el) {
+          if (current instanceof HTMLElement && predicate(current)) return current;
+          current = current.parentNode;
+        }
+        return null;
+      },
+      []
+    );
+
+    const unwrapElement = useCallback((wrapper: HTMLElement) => {
+      const parent = wrapper.parentNode;
+      if (!parent) return;
+      while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
+      parent.removeChild(wrapper);
+    }, []);
+
+    const isColorSpan = (el: HTMLElement) =>
+      el.tagName === 'SPAN' && Array.from(el.classList).some((cls) => cls.startsWith('vibe-color-'));
+
+    /**
+     * Applique (ou retire, en toggle) un wrapper inline sur la sélection.
+     * Le contenu est extrait puis réenveloppé : les enrichissements existants
+     * (mark dans une couleur, couleur dans un mark…) sont préservés, et un
+     * second clic sur le même style retire le wrapper englobant.
+     */
+    const applyWrapper = useCallback(
+      (tagName: 'mark' | 'span', className?: string) => {
+        const sel = window.getSelection();
+        const el = editorRef.current;
+        if (!sel || !el || !el.contains(sel.anchorNode)) return;
+
+        const findWrapper = (node: Node | null) =>
+          tagName === 'mark'
+            ? closestInlineWrapper(node, (n) => n.tagName === 'MARK')
+            : closestInlineWrapper(node, isColorSpan);
+
+        // Curseur simple : retire le surlignage / la couleur englobante
+        if (sel.isCollapsed) {
+          const enclosing = findWrapper(sel.anchorNode);
+          if (!enclosing) return;
+          unwrapElement(enclosing);
+          emitChange();
+          return;
+        }
+
+        const range = sel.getRangeAt(0);
+        const startWrapper = findWrapper(range.startContainer);
+        const endWrapper = findWrapper(range.endContainer);
+
+        // Toggle OFF : toute la sélection est déjà dans le même wrapper
+        if (startWrapper && startWrapper === endWrapper) {
+          if (tagName === 'span' && className && !startWrapper.classList.contains(className)) {
+            // Même famille (couleur) mais teinte différente : remplacement direct
+            Array.from(startWrapper.classList)
+              .filter((cls) => cls.startsWith('vibe-color-'))
+              .forEach((cls) => startWrapper.classList.remove(cls));
+            startWrapper.classList.add(className);
+          } else {
+            unwrapElement(startWrapper);
+          }
+          emitChange();
+          return;
+        }
+
+        el.focus();
+        const frag = range.extractContents();
+        const node = document.createElement(tagName);
+        if (className) node.className = className;
+        node.appendChild(frag);
+        range.insertNode(node);
+        sel.removeAllRanges();
+        const next = document.createRange();
+        next.selectNodeContents(node);
+        sel.addRange(next);
+        emitChange();
+      },
+      [closestInlineWrapper, emitChange, unwrapElement]
+    );
+
+    const clearColor = useCallback(() => {
+      const sel = window.getSelection();
+      const el = editorRef.current;
+      if (!sel || !el || !el.contains(sel.anchorNode)) return;
+      let node: Node | null = sel.anchorNode;
+      while (node && node !== el) {
+        if (
+          node instanceof HTMLElement &&
+          node.tagName === 'SPAN' &&
+          Array.from(node.classList).some((cls) => cls.startsWith('vibe-color-'))
+        ) {
+          const parent = node.parentNode;
+          if (parent) {
+            while (node.firstChild) parent.insertBefore(node.firstChild, node);
+            parent.removeChild(node);
+          }
+          emitChange();
+          return;
+        }
+        node = node.parentNode;
+      }
+    }, [emitChange]);
+
+    const insertFormula = useCallback(() => {
+      const el = editorRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      if (!sel || !el.contains(sel.anchorNode)) focusEditor();
+
+      // Sélection : l'entoure de $…$ (formule en ligne)
+      const s = window.getSelection();
+      if (s && !s.isCollapsed && s.rangeCount > 0 && el.contains(s.anchorNode)) {
+        const tex = s.toString().replace(/\$/g, '').trim();
+        if (tex) document.execCommand('insertText', false, `$${tex}$`);
+        emitChange();
+        return;
+      }
+
+      document.execCommand('insertText', false, '$$');
+      // Place le curseur entre les deux $ pour taper la formule
+      const after = window.getSelection();
+      const range = after && after.rangeCount > 0 ? after.getRangeAt(0) : null;
+      if (after && range && range.startContainer.nodeType === Node.TEXT_NODE) {
+        const inner = document.createRange();
+        inner.setStart(range.startContainer, Math.max(0, range.startOffset - 1));
+        inner.collapse(true);
+        after.removeAllRanges();
+        after.addRange(inner);
+      }
+      emitChange();
+    }, [emitChange, focusEditor]);
+
+    const insertCodeBlock = useCallback(() => {
+      const el = editorRef.current;
+      if (!el) return;
+      el.focus();
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      if (!el.contains(sel.anchorNode)) {
+        // Curseur en fin d'éditeur
+        const end = document.createRange();
+        end.selectNodeContents(el);
+        end.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(end);
+      }
+      const s = window.getSelection();
+      if (!s || s.rangeCount === 0) return;
+      const range = s.getRangeAt(0);
+      const hasContent = !s.isCollapsed;
+      const codeText = hasContent ? range.toString() : 'code';
+      range.deleteContents();
+      const pre = document.createElement('pre');
+      pre.className = 'hljs-block';
+      const code = document.createElement('code');
+      code.textContent = codeText;
+      pre.appendChild(code);
+      const frag = document.createDocumentFragment();
+      frag.appendChild(pre);
+      frag.appendChild(document.createElement('br'));
+      range.insertNode(frag);
+      // Placeholder sélectionné (frappe directe) ou curseur en fin de code
+      const next = document.createRange();
+      next.selectNodeContents(code);
+      if (hasContent) next.collapse(false);
+      s.removeAllRanges();
+      s.addRange(next);
+      emitChange();
+    }, [emitChange]);
+
+    // Ferme la palette de couleurs au clic extérieur
+    useEffect(() => {
+      if (!paletteOpen) return;
+      const onMouseDown = (e: MouseEvent) => {
+        if (paletteRef.current && !paletteRef.current.contains(e.target as Node)) {
+          setPaletteOpen(false);
+        }
+      };
+      document.addEventListener('mousedown', onMouseDown);
+      return () => document.removeEventListener('mousedown', onMouseDown);
+    }, [paletteOpen]);
+
     // ── Synchronisation de la sélection avec la barre d'outils ─────────
     const handleSelectionUpdate = useCallback(() => {
       readActiveStates();
@@ -363,10 +627,15 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
         // Collage en texte brut : évite tout HTML parasite copié ailleurs
         if (pasted) {
           e.preventDefault();
-          document.execCommand('insertText', false, pasted);
+          const remaining =
+            maxChars && Number.isFinite(maxChars)
+              ? Math.max(0, maxChars - (editorRef.current?.textContent || '').length)
+              : pasted.length;
+          const clipped = pasted.slice(0, remaining);
+          if (clipped) document.execCommand('insertText', false, clipped);
         }
       },
-      [disabled, saveSelection]
+      [disabled, maxChars, saveSelection]
     );
 
     const insertLinkHTML = useCallback(
@@ -448,7 +717,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       setHTML: (html: string) => {
         const el = editorRef.current;
         if (!el) return;
-        el.innerHTML = html || '';
+        el.innerHTML = prepareEditorHtml(html);
         syncEmptyState();
       },
       insertText: (text: string) => {
@@ -467,6 +736,22 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
         document.execCommand('insertText', false, text);
         emitChange();
       },
+      insertHtml: (html: string) => {
+        const el = editorRef.current;
+        if (!el) return;
+        el.focus();
+        const sel = window.getSelection();
+        if (!sel || !el.contains(sel.anchorNode)) {
+          // Curseur en fin d'éditeur
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          range.collapse(false);
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        }
+        document.execCommand('insertHTML', false, html);
+        emitChange();
+      },
       focus: () => editorRef.current?.focus(),
       clear: () => {
         const el = editorRef.current;
@@ -480,7 +765,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     useEffect(() => {
       const el = editorRef.current;
       if (el && initialHTML) {
-        el.innerHTML = initialHTML;
+        el.innerHTML = prepareEditorHtml(initialHTML);
       }
       syncEmptyState();
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -535,7 +820,7 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
         <div className="flex items-center gap-0.5 flex-wrap pb-1.5 border-b border-zinc-200 dark:border-zinc-800 mb-1 shrink-0">
           {toolbarBtn(<Bold className="w-3.5 h-3.5" />, 'Gras (**texte**)', () => exec('bold'), activeStates.bold)}
           {toolbarBtn(<Italic className="w-3.5 h-3.5" />, 'Italique (*texte*)', () => exec('italic'), activeStates.italic)}
-          {toolbarBtn(<UnderlineIcon className="w-3.5 h-3.5" />, 'Souligné (__texte__)', () => exec('underline'), activeStates.underline)}
+          {toolbarBtn(<UnderlineIcon className="w-3.5 h-3.5" />, 'Souligné', () => exec('underline'), activeStates.underline)}
           {toolbarBtn(<Strikethrough className="w-3.5 h-3.5" />, 'Barré (~~texte~~)', () => exec('strikeThrough'), activeStates.strikeThrough)}
           {!compact && (
             <>
@@ -550,6 +835,49 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
             </>
           )}
           <span className="w-px h-4 bg-zinc-300 dark:bg-zinc-800 mx-1" />
+          {toolbarBtn(<Highlighter className="w-3.5 h-3.5" />, 'Surligner / retirer le surlignage (==texte==)', () => applyWrapper('mark'), activeStates.mark)}
+          <span ref={paletteRef} className="relative">
+            {toolbarBtn(
+              <Palette className="w-3.5 h-3.5" />,
+              'Couleur du texte ({rouge}texte{/})',
+              () => setPaletteOpen((open) => !open),
+              paletteOpen || Boolean(activeStates.color)
+            )}
+            {paletteOpen && (
+              <div className="absolute z-40 top-full left-1/2 -translate-x-1/2 mt-1.5 p-2 rounded-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 shadow-2xl flex items-center gap-1.5 animate-fadeIn">
+                {VIBE_COLORS.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      applyWrapper('span', `vibe-color-${color}`);
+                      setPaletteOpen(false);
+                    }}
+                    title={color}
+                    aria-label={`Couleur ${color}`}
+                    className="w-5 h-5 rounded-full border border-black/10 dark:border-white/25 hover:scale-110 transition-transform"
+                    style={{ backgroundColor: COLOR_SWATCHES[color] }}
+                  />
+                ))}
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    clearColor();
+                    setPaletteOpen(false);
+                  }}
+                  title="Aucune couleur"
+                  aria-label="Retirer la couleur"
+                  className="w-5 h-5 rounded-full border border-zinc-300 dark:border-zinc-600 text-zinc-500 hover:text-black dark:hover:text-white flex items-center justify-center"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+          </span>
+          {toolbarBtn(<Sigma className="w-3.5 h-3.5" />, 'Formule mathématique ($…$)', insertFormula)}
+          {!compact && toolbarBtn(<Braces className="w-3.5 h-3.5" />, 'Bloc de code', insertCodeBlock)}
           {toolbarBtn(<Link2 className="w-3.5 h-3.5" />, 'Insérer un lien', openLinkPopover)}
         </div>
 
@@ -579,12 +907,14 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
           }`}
         />
 
-        {/* Popover d'autocomplete de mentions « @ » */}
-        {mention && mentionUsers.length > 0 && (
+        {/* Popover d'autocomplete de mentions « @ » (comptes + Livres publics) */}
+        {mention && (mentionUsers.length > 0 || mentionBooks.length > 0) && (
           <MentionAutocomplete
             users={mentionUsers}
+            books={mentionBooks}
             highlightedIndex={mentionIndex}
             onSelect={selectMention}
+            onSelectBook={selectBookMention}
           />
         )}
 

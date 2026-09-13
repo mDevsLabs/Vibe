@@ -302,8 +302,158 @@ export const ensurePostColumns = async () => {
     await sql`CREATE INDEX IF NOT EXISTS idx_drafts_user ON post_drafts(user_id, updated_at DESC)`.catch(() => {});
     // Ordre d'affichage des médias (carrousel + drag & drop)
     await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS position INT DEFAULT 0`.catch(() => {});
+    // Profil temporel utilisateur : vues détaillées + affinité topic implicite
+    await sql`
+      CREATE TABLE IF NOT EXISTS post_views (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id BIGINT,
+        post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        duration_ms INT NOT NULL DEFAULT 1000,
+        dwell_ms INT NOT NULL DEFAULT 1000,
+        visible_ratio FLOAT DEFAULT 0.5,
+        completed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_views_user ON post_views(user_id, created_at DESC)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_views_post ON post_views(post_id)`.catch(() => {});
+    // Migration 017 : source de trafic + index temporels pour les séries stats
+    await sql`ALTER TABLE post_views ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'feed'`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_views_post_created ON post_views(post_id, created_at DESC)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_views_created ON post_views(created_at DESC)`.catch(() => {});
+    // Migration 017 : visites profil (distinct des vues posts)
+    await sql`
+      CREATE TABLE IF NOT EXISTS profile_views (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        profile_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        viewer_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+        source TEXT DEFAULT 'profile',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_profile_views_profile ON profile_views(profile_user_id, created_at DESC)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_profile_views_viewer ON profile_views(viewer_id, created_at DESC)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_profile_views_created ON profile_views(created_at DESC)`.catch(() => {});
+    await sql`
+      CREATE TABLE IF NOT EXISTS user_topic_affinity (
+        user_id BIGINT NOT NULL,
+        topic TEXT NOT NULL,
+        total_time_ms BIGINT DEFAULT 0,
+        views INT DEFAULT 0,
+        likes INT DEFAULT 0,
+        score FLOAT DEFAULT 0,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (user_id, topic)
+      )
+    `.catch(() => {});
     postColumnsReady = true;
   } catch (err) {
     console.warn("[vibe-posts] ensurePostColumns skipped:", (err as any)?.message);
   }
 };
+
+// Épinglage sur son profil de posts (y compris d'autres comptes), max 2 au total
+let profilePinnedReady = false;
+export const ensureProfilePinnedPostsTable = async () => {
+  if (profilePinnedReady) return;
+  try {
+    const sql = getDb();
+    await sql`
+      CREATE TABLE IF NOT EXISTS profile_pinned_posts (
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (user_id, post_id)
+      )
+    `.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_profile_pinned_user ON profile_pinned_posts(user_id, created_at DESC)`.catch(() => {});
+    profilePinnedReady = true;
+  } catch (err) {
+    console.warn("[vibe-posts] ensureProfilePinnedPostsTable skipped:", (err as any)?.message);
+  }
+};
+
+// ── Références de Livres dans les posts (attachement / mention @livre) ───────
+const BOOK_REF_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Extrait les identifiants de Livres référencés en HTML (<a data-book-id="…">), max 5. */
+export function extractBookRefIds(html: string): string[] {
+  if (!html) return [];
+  const ids = new Set<string>();
+  const matches = String(html).matchAll(/<a\b[^>]*data-book-id="([^"]+)"/gi);
+  for (const match of matches) {
+    const id = String(match[1] || "").trim();
+    if (BOOK_REF_UUID_RE.test(id)) ids.add(id.toLowerCase());
+    if (ids.size >= 5) break;
+  }
+  return Array.from(ids);
+}
+
+/** Remplace intégralement les références de Livres d'un post. */
+export async function syncPostBookRefs(sql: any, postId: string, bookIds: string[]): Promise<void> {
+  try {
+    await sql`DELETE FROM post_book_refs WHERE post_id = ${postId}::uuid`;
+    for (const bookId of bookIds) {
+      await sql`
+        INSERT INTO post_book_refs (post_id, book_id)
+        VALUES (${postId}::uuid, ${bookId}::uuid)
+        ON CONFLICT DO NOTHING
+      `.catch(() => {});
+    }
+  } catch (err) {
+    console.warn("[vibe-posts] syncPostBookRefs skipped:", (err as any)?.message);
+  }
+}
+
+/** Hydrate les posts avec leurs Livres référencés (carte livre). */
+export async function attachBookRefs(posts: any[], viewerId: number | null = null): Promise<void> {
+  if (!Array.isArray(posts) || posts.length === 0) return;
+  try {
+    const sql = getDb();
+    const postIds = posts.map((p) => String(p.id));
+    const refRows = await sql`
+      SELECT post_id, book_id FROM post_book_refs WHERE post_id = ANY(${postIds}::uuid[])
+    `;
+    if (refRows.length === 0) {
+      for (const p of posts) p.book_refs = [];
+      return;
+    }
+    const bookIds = Array.from(new Set(refRows.map((r: any) => String(r.book_id))));
+    const books = await sql`
+      SELECT b.id, b.title, b.icon, COALESCE(b.is_public, FALSE) AS is_public, b.user_id,
+             u.username AS owner_username, pr.display_name AS owner_display_name,
+             (SELECT COUNT(*) FROM vibe_book_members bm WHERE bm.book_id = b.id) AS members_count,
+             (SELECT COUNT(*) FROM vibe_book_items bi WHERE bi.book_id = b.id) AS items_count,
+             ${viewerId !== null ? sql`(b.user_id = ${viewerId} OR EXISTS (SELECT 1 FROM vibe_book_members bm2 WHERE bm2.book_id = b.id AND bm2.user_id = ${viewerId}))` : sql`FALSE`} AS viewer_is_member
+      FROM vibe_books b
+      JOIN users u ON u.id = b.user_id
+      LEFT JOIN profiles pr ON pr.user_id = u.id
+      WHERE b.id = ANY(${bookIds}::uuid[])
+    `;
+    const byId = new Map<string, any>(books.map((b: any) => [String(b.id), b]));
+    const byPost = new Map<string, any[]>();
+    for (const r of refRows) {
+      const book = byId.get(String(r.book_id));
+      if (!book) continue;
+      const canView = Boolean(book.is_public) || Boolean(book.viewer_is_member);
+      const entry = {
+        id: String(book.id),
+        title: book.title,
+        icon: book.icon,
+        owner_username: book.owner_username,
+        owner_display_name: book.owner_display_name,
+        members_count: Number(book.members_count || 0),
+        items_count: Number(book.items_count || 0),
+        can_view: canView,
+      };
+      const key = String(r.post_id);
+      if (!byPost.has(key)) byPost.set(key, []);
+      byPost.get(key)!.push(entry);
+    }
+    for (const p of posts) {
+      p.book_refs = byPost.get(String(p.id)) || [];
+    }
+  } catch (err) {
+    console.warn("[vibe-posts] attachBookRefs skipped:", (err as any)?.message);
+  }
+}

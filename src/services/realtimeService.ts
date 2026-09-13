@@ -14,7 +14,7 @@ import { API_BASE } from './api';
 
 export type RealtimeHandler = (type: string, payload: any) => void;
 
-const EVENT_TYPES = ['connected', 'unread_counts', 'notification', 'dm_message', 'dm_typing', 'post_stats', 'dm_pin_updated', 'dm_message_edited'];
+const EVENT_TYPES = ['connected', 'unread_counts', 'notification', 'dm_message', 'dm_typing', 'post_stats', 'dm_pin_updated', 'dm_message_edited', 'dm_message_deleted', 'group_updated'];
 const MAX_RECONNECT_DELAY = 30_000;
 
 class RealtimeClient {

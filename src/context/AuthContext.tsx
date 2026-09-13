@@ -24,6 +24,7 @@ interface AuthContextType {
   refreshProfile: () => Promise<void>;
   showOnboarding: boolean;
   dismissOnboarding: () => void;
+  restartOnboarding: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -47,6 +48,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const dismissOnboarding = () => setShowOnboarding(false);
+
+  /** Rejoue l'intro 3 étapes sans toucher au flag serveur (refermable à tout moment). */
+  const restartOnboarding = () => setShowOnboarding(true);
 
   const fetchSession = async () => {
     const currentToken = ApiService.getToken();
@@ -148,6 +152,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         refreshProfile,
         showOnboarding,
         dismissOnboarding,
+        restartOnboarding,
       }}
     >
       {children}

@@ -122,7 +122,13 @@ export function registerRealtimeRoutes(app: Hono) {
             const counts = await sql`
               SELECT
                 (SELECT COUNT(*) FROM notifications WHERE recipient_id = ${userId} AND is_read = FALSE) AS unread_notifications,
-                (SELECT COUNT(*) FROM direct_messages WHERE recipient_id = ${userId} AND is_read = FALSE) AS unread_messages
+                (
+                  (SELECT COUNT(*) FROM direct_messages WHERE recipient_id = ${userId} AND is_read = FALSE) +
+                  (SELECT COUNT(*) FROM direct_messages m
+                    JOIN dm_group_members gm ON gm.conversation_id = m.conversation_id AND gm.user_id = ${userId}
+                    WHERE m.sender_id <> ${userId}
+                      AND NOT COALESCE((m.read_by ? ${userId}::text), FALSE))
+                ) AS unread_messages
             `;
             await sse.writeSSE({
               event: "unread_counts",

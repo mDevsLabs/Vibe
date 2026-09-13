@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import { AlertCircle, PenSquare, TrendingUp, X, ArrowUp } from 'lucide-react';
 import { PostComposer } from '../components/feed/PostComposer';
 import { PostCard } from '../components/feed/PostCard';
@@ -17,6 +18,7 @@ import type { Post } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { useInfiniteFeed } from '../hooks/useInfiniteFeed';
 import { haptics } from '../services/haptics';
+import { useMotionPrefs } from '../hooks/useMotionPrefs';
 
 interface HomePageProps {
   onOpenThread: (post: Post) => void;
@@ -85,6 +87,7 @@ function usePullToRefresh(onRefresh: () => void, enabled: boolean) {
 
 export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile }) => {
   const [feedType, setFeedType] = useState<'for_you' | 'stream' | 'trending'>('for_you');
+  const { animationsEnabled } = useMotionPrefs();
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [trends, setTrends] = useState<Array<{ tag: string; category?: string; posts: string }>>([]);
   const [selectedPostForExplain, setSelectedPostForExplain] = useState<Post | null>(null);
@@ -246,7 +249,11 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Pour Vous
             </span>
             {feedType === 'for_you' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
 
@@ -262,7 +269,11 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Abonnements
             </span>
             {feedType === 'stream' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
 
@@ -278,7 +289,11 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Tendances
             </span>
             {feedType === 'trending' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
         </div>
@@ -347,15 +362,20 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
 
         {isLoading && posts.length === 0
           ? [0, 1, 2, 3].map((i) => <PostCardSkeleton key={i} />)
-          : posts.map((post) => (
-              <PostCard
+          : posts.map((post, i) => (
+              <div
                 key={post.id}
-                post={post}
-                onOpenThread={onOpenThread}
-                onOpenProfile={onOpenProfile}
-                onPostDeleted={handlePostDeleted}
-                onOpenExplain={handleOpenExplain}
-              />
+                className="vibe-stagger-item"
+                style={{ '--vibe-delay': `${Math.min(i, 8) * 35}ms` } as React.CSSProperties}
+              >
+                <PostCard
+                  post={post}
+                  onOpenThread={onOpenThread}
+                  onOpenProfile={onOpenProfile}
+                  onPostDeleted={handlePostDeleted}
+                  onOpenExplain={handleOpenExplain}
+                />
+              </div>
             ))}
 
         {/* Sentinelle du scroll infini + loader de fin de liste */}

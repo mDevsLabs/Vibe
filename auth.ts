@@ -42,7 +42,13 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
-      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
+      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "");
+      if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
+        return c.json(
+          { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
+          400
+        );
+      }
 
       const sql = getDb();
       const existing =
@@ -70,7 +76,13 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
-      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
+      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "");
+      if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
+        return c.json(
+          { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
+          400
+        );
+      }
 
       const isValid = await verifyVerificationCode(cleanEmail, code, "register");
       if (!isValid) {
@@ -618,10 +630,10 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       if (username && username.trim()) {
-        const cleanUsername = username.trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
-        if (cleanUsername.length < 2) {
+        const cleanUsername = username.trim().toLowerCase().replace(/^@/, "");
+        if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
           return c.json(
-            { error: "Le nom d'utilisateur doit contenir au moins 2 caractères (lettres, chiffres, _)." },
+            { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
             400
           );
         }

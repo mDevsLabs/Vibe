@@ -8,13 +8,16 @@
  * ============================================================================
  */
 
-import { extractToken, getDb, verifyToken } from "./config.ts";
+import { extractToken, getDb, isPaidTier, rateLimit, verifyToken } from "./config.ts";
 import { isBlockEitherWay, type RegisterMultiFn } from "./vibe-common.ts";
 import { MAIAgentFleet } from "./vibe-mai-fleet.ts";
+import { generateMAICommentAnswer } from "./vibe-mai.ts";
+import { ensureMAIAccount, getMAIUserId } from "./vibe-dms.ts";
 import { pushRealtimeEvent } from "./realtime.ts";
 import { ensureCircleTable } from "./vibe-circle.ts";
 import {
   ensurePostColumns,
+  ensureProfilePinnedPostsTable,
   isUuid,
   stripHtmlTags,
 } from "./vibe-posts-core.ts";
@@ -78,7 +81,7 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
           const recipientId = Number(postAuthor[0].author_id);
           if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
-            const rawContent = (postAuthor[0].content || "").trim();
+            const rawContent = stripHtmlTags(postAuthor[0].content || "").trim();
             const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
             const msg = `a aimé votre publication${snippet}`;
             try {
@@ -158,7 +161,7 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
           const recipientId = Number(postAuthor[0].author_id);
           if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
-            const rawContent = (postAuthor[0].content || "").trim();
+            const rawContent = stripHtmlTags(postAuthor[0].content || "").trim();
             const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
             const msg = `a republié votre publication${snippet}`;
             try {
@@ -366,13 +369,34 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
   // 2ter. COMPTAGE D'IMPRESSIONS / VUES
   // Le client dédoublonne par session (IntersectionObserver + dwell 1 s,
   // cf. src/algorithms/viewTracking.ts) ; le serveur incrémente simplement.
+  // Nouveau : accepte {duration_ms, dwell_ms, visible_ratio} + auth optionnelle
+  // pour alimenter post_views (profil temporel) sans casser l'ancien flux anonyme.
   const handlePostView = async (c: any) => {
     try {
       const postId = c.req.param("id");
       if (!isUuid(postId)) {
         return c.json({ error: "Identifiant de post invalide." }, 400);
       }
+      const body = await c.req.json().catch(() => ({} as any));
+      const durationMs = Math.max(0, Math.min(600000, Number(body?.duration_ms ?? body?.dwell_ms ?? 1000) || 1000));
+      const dwellMs = Math.max(0, Math.min(600000, Number(body?.dwell_ms ?? durationMs) || durationMs));
+      const visibleRatio = Math.max(0, Math.min(1, Number(body?.visible_ratio ?? 0.5) || 0.5));
+      const completed = dwellMs >= 5000 || durationMs >= 8000;
+      const allowedSources = ["feed", "profile", "detail", "search", "dm", "trends"];
+      const rawSource = String(body?.source ?? "feed").toLowerCase().slice(0, 20);
+      const source = allowedSources.includes(rawSource) ? rawSource : "feed";
+
+      let viewerId: number | null = null;
+      try {
+        const token = extractToken(c.req.raw);
+        if (token) {
+          const payload = await verifyToken(token);
+          viewerId = Number(payload.sub || (payload as any).id) || null;
+        }
+      } catch {}
+
       const sql = getDb();
+      await ensurePostColumns().catch(() => {});
       const updated = await sql`
         UPDATE posts
         SET views_count = COALESCE(views_count, 0) + 1
@@ -382,6 +406,35 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (updated.length === 0) {
         return c.json({ error: "Publication introuvable." }, 404);
       }
+      // Persistance temporelle (best-effort, n'échoue jamais la vue)
+      try {
+        await sql`
+          INSERT INTO post_views (user_id, post_id, duration_ms, dwell_ms, visible_ratio, completed, source)
+          VALUES (${viewerId}, ${postId}::uuid, ${Math.round(durationMs)}, ${Math.round(dwellMs)}, ${visibleRatio}, ${completed}, ${source})
+        `;
+        // Mise à jour incrémentale de l'affinité topic (fire-and-forget)
+        if (viewerId) {
+          try {
+            const prow = await sql`SELECT content FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+            const content = String(prow[0]?.content || "");
+            const tags = Array.from(new Set(
+              Array.from(content.matchAll(/#([\p{L}\p{N}_]{2,30})/gu)).map((m: any) => String(m[1]).toLowerCase())
+            )).slice(0, 5);
+            for (const tag of tags) {
+              await sql`
+                INSERT INTO user_topic_affinity (user_id, topic, total_time_ms, views, score, updated_at)
+                VALUES (${viewerId}, ${tag}, ${Math.round(durationMs)}, 1, ${Math.min(1, durationMs / 30000)}, NOW())
+                ON CONFLICT (user_id, topic)
+                DO UPDATE SET
+                  total_time_ms = user_topic_affinity.total_time_ms + ${Math.round(durationMs)},
+                  views = user_topic_affinity.views + 1,
+                  score = LEAST(1, user_topic_affinity.score * 0.95 + ${Math.min(1, durationMs / 30000)} * 0.2),
+                  updated_at = NOW()
+              `.catch(() => {});
+            }
+          } catch {}
+        }
+      } catch {}
       return c.json({ success: true, views_count: Number(updated[0].views_count || 0) });
     } catch (err: any) {
       console.warn("[Post View Error]:", err);
@@ -391,8 +444,8 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
   registerMulti("post", ["/api/vibe/posts/:id/view", "/vibe/posts/:id/view", "/v1/posts/:id/view"], handlePostView);
 
-  // 2quater. ÉPINGLAGE SUR LE PROFIL (maximum 3 posts épinglés par auteur)
-  const MAX_PINNED_POSTS = 3;
+  // 2quater. ÉPINGLAGE SUR LE PROFIL (maximum 2 posts épinglés par auteur)
+  const MAX_PINNED_POSTS = 2;
   const handlePinPost = async (c: any) => {
     try {
       const token = extractToken(c.req.raw);
@@ -448,6 +501,84 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
   registerMulti("post", ["/api/vibe/posts/:id/pin", "/vibe/posts/:id/pin", "/v1/posts/:id/pin"], handlePinPost);
 
+  // 2quinquies. MISE EN AVANT D'UN POST (Y COMPRIS D'AUTRES COMPTES) SUR SON PROFIL
+  // La limite de 2 épinglages compte à la fois les posts de l'auteur et ceux mis en avant.
+  const handleProfilePinPost = async (c: any) => {
+    try {
+      const token = extractToken(c.req.raw);
+      if (!token) return c.json({ error: "Non authentifié." }, 401);
+      const payload = await verifyToken(token);
+      const userId = Number(payload.sub || (payload as any).id);
+
+      const postId = c.req.param("id");
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
+      const body = await c.req.json().catch(() => ({} as any));
+      const pinned = Boolean(body.pinned);
+
+      const sql = getDb();
+      await ensureProfilePinnedPostsTable();
+
+      const ownCountRows = await sql`
+        SELECT COUNT(*)::int AS n FROM posts WHERE author_id = ${userId} AND is_pinned = TRUE
+      `;
+      const ownCount = Number(ownCountRows[0]?.n || 0);
+
+      if (!pinned) {
+        await sql`DELETE FROM profile_pinned_posts WHERE user_id = ${userId} AND post_id = ${postId}::uuid`;
+        const foreignCountRows = await sql`
+          SELECT COUNT(*)::int AS n FROM profile_pinned_posts WHERE user_id = ${userId}
+        `;
+        return c.json({ success: true, pinned: false, pinned_count: ownCount + Number(foreignCountRows[0]?.n || 0) });
+      }
+
+      const postRows = await sql`
+        SELECT author_id, visibility, COALESCE(status, 'published') AS status
+        FROM posts WHERE id = ${postId}::uuid LIMIT 1
+      `;
+      if (postRows.length === 0) {
+        return c.json({ error: "Publication introuvable." }, 404);
+      }
+      const target = postRows[0];
+      if (Number(target.author_id) === userId) {
+        return c.json({
+          error: "Vos propres publications s'épinglent via « Épingler sur votre profil ».",
+          code: "OWN_PIN",
+        }, 400);
+      }
+      if (target.visibility !== "public" || target.status !== "published") {
+        return c.json({ error: "Seule une publication publique peut être mise en avant sur votre profil." }, 403);
+      }
+
+      // Insertion conditionnelle anti-course : la limite est réévaluée côté SQL
+      await sql`
+        INSERT INTO profile_pinned_posts (user_id, post_id)
+        SELECT ${userId}, ${postId}::uuid
+        WHERE ${ownCount} + (SELECT COUNT(*) FROM profile_pinned_posts WHERE user_id = ${userId}) < ${MAX_PINNED_POSTS}
+        ON CONFLICT DO NOTHING
+      `;
+      const existsRows = await sql`
+        SELECT 1 FROM profile_pinned_posts WHERE user_id = ${userId} AND post_id = ${postId}::uuid LIMIT 1
+      `;
+      if (existsRows.length === 0) {
+        return c.json({
+          error: `Vous ne pouvez épingler que ${MAX_PINNED_POSTS} publications sur votre profil.`,
+          code: "PIN_LIMIT",
+        }, 400);
+      }
+      const foreignCountRows = await sql`
+        SELECT COUNT(*)::int AS n FROM profile_pinned_posts WHERE user_id = ${userId}
+      `;
+      return c.json({ success: true, pinned: true, pinned_count: ownCount + Number(foreignCountRows[0]?.n || 0) });
+    } catch (err: any) {
+      console.error("[Profile Pin Error]:", err);
+      return c.json({ error: "Erreur lors de l'épinglage." }, 500);
+    }
+  };
+
+  registerMulti("post", ["/api/vibe/posts/:id/profile-pin", "/vibe/posts/:id/profile-pin", "/v1/posts/:id/profile-pin"], handleProfilePinPost);
+
   const handleAddComment = async (c: any) => {
     try {
       const token = extractToken(c.req.raw);
@@ -463,6 +594,9 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
       if ((!content || !String(content).trim()) && commentMedia.length === 0) {
         return c.json({ error: "Commentaire vide." }, 400);
+      }
+      if (String(content).length > 10000) {
+        return c.json({ error: "Commentaire trop long (10 000 caractères max)." }, 400);
       }
       if (!isUuid(postId)) {
         return c.json({ error: "Identifiant de post invalide." }, 400);
@@ -490,6 +624,31 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
       const sql = getDb();
       await ensurePostColumns();
+
+      // Commande /mai : réponse IA en commentaire (abonnés Plus, Pro et Max uniquement)
+      const plainStart = stripHtmlTags(String(content || "")).trim();
+      const isMaiCommand = /^\/mai\b/i.test(plainStart);
+      let maiQuestion = "";
+      if (isMaiCommand) {
+        const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
+        if (!isPaidTier(tierRows[0]?.tier)) {
+          return c.json(
+            {
+              error: "La commande /mai est réservée aux abonnés Plus, Pro et Max.",
+              plan_required: true,
+              code: "MAI_CMD",
+            },
+            403
+          );
+        }
+        maiQuestion = plainStart.replace(/^\/mai\b/i, "").trim();
+        if (!maiQuestion) {
+          return c.json({ error: "Ajoutez votre question après la commande /mai." }, 400);
+        }
+        if (!rateLimit(`mai-cmd:${userId}`, 5, 60_000)) {
+          return c.json({ error: "Trop de commandes /mai. Patientez une minute." }, 429);
+        }
+      }
 
       // Résoudre le parent (profondeur réelle, aplatie au niveau 4 max)
       let parentDepth = 0;
@@ -597,8 +756,55 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       const userRow = await sql`SELECT username FROM users WHERE id = ${userId} LIMIT 1`;
       const prRow = await sql`SELECT display_name, avatar_url FROM profiles WHERE user_id = ${userId} LIMIT 1`;
 
+      // Réponse mAI asynchrone (même pattern que les DMs) : commentaire de @mai
+      // sous le /mai, généré à partir du contenu de la publication uniquement.
+      if (isMaiCommand) {
+        const maiParentId = String(inserted[0]?.id);
+        const maiReplyDepth = Math.min(parentDepth + 2, 4);
+        setTimeout(async () => {
+          try {
+            await ensureMAIAccount();
+            const maiUserId = await getMAIUserId(sql);
+            if (!maiUserId) return;
+            const answer = await generateMAICommentAnswer(sql, {
+              postId,
+              question: maiQuestion,
+              requesterId: userId,
+            });
+            const replyContent = answer
+              || "Je n'ai pas pu générer de réponse pour le moment. Réessayez dans un instant.";
+            const aiInserted = await sql`
+              INSERT INTO comments (post_id, author_id, parent_comment_id, content, depth)
+              VALUES (${postId}::uuid, ${maiUserId}, ${maiParentId}::uuid, ${replyContent}, ${maiReplyDepth})
+              RETURNING id
+            `;
+            await sql`UPDATE posts SET replies_count = replies_count + 1 WHERE id = ${postId}::uuid`;
+            try {
+              const statsRows = await sql`SELECT author_id, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+              if (statsRows[0]) {
+                await pushRealtimeEvent(statsRows[0].author_id, "post_stats", {
+                  post_id: postId,
+                  likes_count: Number(statsRows[0].likes_count || 0),
+                  reposts_count: Number(statsRows[0].reposts_count || 0),
+                  replies_count: Number(statsRows[0].replies_count || 0),
+                });
+              }
+            } catch {}
+            try {
+              await sql`
+                INSERT INTO notifications (recipient_id, actor_id, type, post_id, comment_id, message)
+                VALUES (${userId}, ${maiUserId}, 'reply', ${postId}::uuid, ${aiInserted[0]?.id}::uuid, 'mAI a répondu à votre question /mai')
+              `;
+            } catch {}
+          } catch (aiErr) {
+            console.warn("[Vibe API] /mai async:", (aiErr as any)?.message);
+          }
+        }, 50);
+      }
+
       return c.json({
         success: true,
+        ai_pending: isMaiCommand,
         comment: {
           ...inserted[0],
           username: userRow[0]?.username,

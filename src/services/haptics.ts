@@ -20,6 +20,8 @@ export type HapticType =
 class HapticService {
   private storageKey = 'vibe_haptics_enabled';
   private enabled: boolean = true;
+  private lastAt: Partial<Record<HapticType, number>> = {};
+  private readonly minIntervalMs = 35;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -51,16 +53,23 @@ class HapticService {
   }
 
   /**
+   * Vérifie si l'environnement natif Capacitor (iOS/Android) expose le plugin Haptics.
+   */
+  public supportsNative(): boolean {
+    if (typeof window === 'undefined') return false;
+    return Boolean(
+      (window as any).Capacitor?.Plugins?.Haptics ||
+      (window as any).Capacitor?.isNativePlatform?.()
+    );
+  }
+
+  /**
    * Vérifie si l'appareil supporte les vibrations (Web API ou Capacitor).
    */
   public isSupported(): boolean {
     if (typeof window === 'undefined') return false;
-    const hasCapacitor = Boolean(
-      (window as any).Capacitor?.Plugins?.Haptics ||
-      (window as any).Capacitor?.isNativePlatform?.()
-    );
     const hasVibrate = typeof navigator !== 'undefined' && 'vibrate' in navigator;
-    return hasCapacitor || hasVibrate;
+    return this.supportsNative() || hasVibrate;
   }
 
   /**
@@ -69,14 +78,21 @@ class HapticService {
   public trigger(type: HapticType = 'light'): void {
     if (!this.enabled || typeof window === 'undefined') return;
 
+    // Anti-doublon : évite les vibrations en rafale sur taps rapprochés
+    const now = Date.now();
+    if (now - (this.lastAt[type] || 0) < this.minIntervalMs) return;
+    this.lastAt[type] = now;
+
     try {
       // 1. Support natif Capacitor (iOS / Android)
       const capHaptics = (window as any).Capacitor?.Plugins?.Haptics;
       if (capHaptics) {
         switch (type) {
           case 'light':
-          case 'selection':
             capHaptics.impact?.({ style: 'LIGHT' }).catch(() => {});
+            return;
+          case 'selection':
+            capHaptics.selectionChanged?.().catch(() => {});
             return;
           case 'medium':
           case 'pullRefresh':

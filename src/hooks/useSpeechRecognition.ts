@@ -24,6 +24,12 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
   const [error, setError] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
+  // Le callback vient des consommateurs (lambda recréée à chaque rendu) : le
+  // garder dans une ref évite de recréer/abandonner le recognizer à chaque rendu.
+  const onResultRef = useRef(onResult);
+  useEffect(() => {
+    onResultRef.current = onResult;
+  });
 
   useEffect(() => {
     const SpeechRecognition =
@@ -56,7 +62,7 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
         if (currentFinal) {
           setTranscript((prev) => {
             const updated = (prev + ' ' + currentFinal).trim();
-            if (onResult) onResult(updated);
+            onResultRef.current?.(updated);
             return updated;
           });
         }
@@ -88,7 +94,7 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
         } catch {}
       }
     };
-  }, [language, continuous, onResult]);
+  }, [language, continuous]);
 
   const startListening = useCallback(() => {
     if (!recognitionRef.current) {

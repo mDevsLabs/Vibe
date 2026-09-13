@@ -11,6 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { Search, FileText, Users, BookHeart, MessageSquare, Loader2, X } from 'lucide-react';
 import { ApiService } from '../../services/api';
 import type { UnifiedSearchResult } from '../../types/vibe';
+import { makeExcerpt } from '../common/richTextUtils';
 
 interface GlobalSearchBarProps {
   autoFocus?: boolean;
@@ -148,7 +149,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({ autoFocus, onN
                   onClick={() => go(`/post/${p.id}`)}
                   className="w-full text-left px-2 py-1.5 rounded-xl hover:bg-zinc-900 transition-colors"
                 >
-                  <p className="text-xs text-white truncate">{String(p.content || '').slice(0, 80) || '(sans texte)'}</p>
+                  <p className="text-xs text-white truncate">{makeExcerpt(p.content, 80) || '(sans texte)'}</p>
                   <p className="text-[11px] text-zinc-500">@{p.username}</p>
                 </button>
               ))}
@@ -201,7 +202,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({ autoFocus, onN
                   onClick={() => go(`/messages?partner=${m.sender_id}`)}
                   className="w-full text-left px-2 py-1.5 rounded-xl hover:bg-zinc-900 transition-colors"
                 >
-                  <p className="text-xs text-white truncate">{String(m.content || '').slice(0, 80)}</p>
+                  <p className="text-xs text-white truncate">{makeExcerpt(m.content, 80)}</p>
                 </button>
               ))}
             </div>

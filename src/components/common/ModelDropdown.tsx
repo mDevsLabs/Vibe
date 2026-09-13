@@ -129,8 +129,8 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
             </div>
           </div>
 
-          {/* Model Options List */}
-          <div className="max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-900 p-1">
+          {/* Model Options List — minimalist : nom + petite coche, sans séparateurs */}
+          <div className="max-h-72 overflow-y-auto p-1 space-y-0.5">
             {filteredModels.map((model) => {
               const isSelected = model.id === selectedModelId;
 
@@ -142,29 +142,14 @@ export const ModelDropdown: React.FC<ModelDropdownProps> = ({
                     onSelectModel(model.id);
                     setIsOpen(false);
                   }}
-                  className={`w-full p-2.5 rounded-xl text-left transition-all flex items-center gap-2.5 group ${
+                  className={`w-full px-2.5 py-2 rounded-lg text-left transition-colors flex items-center justify-between gap-2 ${
                     isSelected
                       ? 'bg-zinc-100 dark:bg-zinc-900/90 text-zinc-900 dark:text-white font-semibold'
-                      : 'hover:bg-black/5 dark:hover:bg-zinc-900/50 text-zinc-700 dark:text-zinc-300'
+                      : 'font-medium hover:bg-black/5 dark:hover:bg-zinc-900/50 text-zinc-600 dark:text-zinc-400'
                   }`}
                 >
-                  <div className="shrink-0">
-                    <div
-                      className={`w-4 h-4 rounded-full flex items-center justify-center border ${
-                        isSelected
-                          ? 'border-zinc-900 dark:border-white bg-zinc-900 dark:bg-white text-white dark:text-black'
-                          : 'border-zinc-300 dark:border-zinc-700 bg-transparent text-transparent group-hover:border-zinc-500'
-                      }`}
-                    >
-                      <Check className="w-2.5 h-2.5 stroke-[3]" />
-                    </div>
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <span className="font-bold text-xs text-zinc-900 dark:text-white truncate block">
-                      {model.name}
-                    </span>
-                  </div>
+                  <span className="text-xs truncate">{model.name}</span>
+                  {isSelected && <Check className="w-3 h-3 shrink-0" />}
                 </button>
               );
             })}

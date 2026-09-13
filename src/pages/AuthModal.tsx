@@ -31,6 +31,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [otpCode, setOtpCode] = useState('');
+  const [acceptedCGU, setAcceptedCGU] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
@@ -83,6 +84,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       if (mode === 'register') {
         if (!email.trim() || !username.trim() || !password.trim()) {
           throw new Error('Tous les champs sont requis.');
+        }
+        if (!/^[a-z0-9_]{2,30}$/.test(username.trim())) {
+          throw new Error("Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _).");
+        }
+        if (!acceptedCGU) {
+          throw new Error("Vous devez accepter les Conditions d'utilisation pour créer un compte.");
         }
         const res: any = await ApiService.register(email.trim(), username.trim(), password);
         if (res?.token) {
@@ -254,7 +261,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <input
                   type="text"
                   value={username}
-                  onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/\s+/g, '_'))}
+                  maxLength={30}
+                  onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
                   placeholder="nom_utilisateur"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -263,6 +271,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   required
                 />
               </div>
+              <p className="text-[10px] text-zinc-500">2 à 30 caractères : lettres minuscules, chiffres et _.</p>
             </div>
           )}
 
@@ -302,9 +311,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           </div>
 
+          {mode === 'register' && (
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400 leading-relaxed cursor-pointer">
+              <input
+                type="checkbox"
+                checked={acceptedCGU}
+                onChange={(e) => setAcceptedCGU(e.target.checked)}
+                className="w-4 h-4 mt-0.5 accent-white shrink-0 cursor-pointer"
+                required
+              />
+              <span>
+                J'accepte les{' '}
+                <a
+                  href="https://mai-devs.vercel.app"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-white underline hover:text-zinc-200"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  conditions et politique de confidentialité
+                </a>
+                .
+              </span>
+            </label>
+          )}
+
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || (mode === 'register' && !acceptedCGU)}
             className="w-full py-3 rounded-xl bg-white text-black font-bold text-sm hover:bg-zinc-200 transition-all flex items-center justify-center gap-2 shadow-lg disabled:opacity-40"
           >
             {isLoading ? (
@@ -327,6 +361,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 setMode(mode === 'login' ? 'register' : 'login');
                 setError(null);
                 setNoticeMessage(null);
+                setAcceptedCGU(false);
               }}
               className="text-xs text-zinc-400 hover:text-white font-medium transition-colors"
             >

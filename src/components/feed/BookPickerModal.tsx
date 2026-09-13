@@ -7,7 +7,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Loader2, Plus, X, Check, AlertCircle } from 'lucide-react';
+import { Loader2, Plus, X, Check, AlertCircle, Users } from 'lucide-react';
 import type { VibeBook } from '../../types/vibe';
 import { ApiService } from '../../services/api';
 import { NotificationService } from '../../services/notificationService';
@@ -24,6 +24,7 @@ interface BookPickerModalProps {
 export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClose, onSavedBooksChange }) => {
   const [books, setBooks] = useState<VibeBook[]>([]);
   const [maxBooks, setMaxBooks] = useState(5);
+  const [ownedCount, setOwnedCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [busyBookId, setBusyBookId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -37,8 +38,10 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
     ApiService.getBooks(postId)
       .then((res) => {
         if (cancelled) return;
-        setBooks(res.books || []);
+        const list = res.books || [];
+        setBooks(list);
         setMaxBooks(res.maxBooks || 5);
+        setOwnedCount(res.ownedCount ?? list.filter((b) => b.is_owner !== false).length);
       })
       .catch(() => {
         if (!cancelled) setError('Impossible de charger vos Livres.');
@@ -92,6 +95,7 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
     try {
       const res = await ApiService.createBook(newTitle.trim(), newIcon);
       setBooks((list) => [...list, res.book]);
+      setOwnedCount((n) => n + 1);
       setShowCreate(false);
       setNewTitle('');
       setNewIcon('BookHeart');
@@ -105,7 +109,7 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
     }
   };
 
-  const canCreate = books.length < maxBooks;
+  const canCreate = ownedCount < maxBooks;
 
   return (
     <div
@@ -163,8 +167,19 @@ export const BookPickerModal: React.FC<BookPickerModalProps> = ({ postId, onClos
                       <IconComponent className="w-4 h-4" />
                     </span>
                     <span className="flex-1 min-w-0">
-                      <span className="block text-xs font-semibold text-white truncate">{book.title}</span>
-                      <span className="block text-[10px] text-zinc-500">{book.items_count || 0} Vibe</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="block text-xs font-semibold text-white truncate">{book.title}</span>
+                        {book.is_owner === false && (
+                          <span className="shrink-0 flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-300 border border-sky-500/30">
+                            <Users className="w-2.5 h-2.5" />
+                            Partagé
+                          </span>
+                        )}
+                      </span>
+                      <span className="block text-[10px] text-zinc-500">
+                        {book.items_count || 0} Vibe
+                        {(book.members_count || 0) > 1 && ` · ${book.members_count} membres`}
+                      </span>
                     </span>
                     {busyBookId === book.id ? (
                       <Loader2 className="w-4 h-4 animate-spin text-zinc-400" />

@@ -1,108 +1,77 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — RICH CONTENT (src/components/common/RichContent.tsx)
- * Rendu sécurisé du contenu riche (HTML WYSIWYG ou texte brut historique) :
- * sanitization DOMPurify, liens cliquables (@mentions, #hashtags, URLs).
+ * Rendu sécurisé du contenu riche (markdown, HTML WYSIWYG, formules KaTeX,
+ * code coloré, surlignage, couleurs) : pipeline markdown-it → DOMPurify →
+ * liens cliquables (@mentions, #hashtags, URLs).
  * ============================================================================
  */
 
 import React, { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import DOMPurify from 'dompurify';
+import { renderRichMarkdown } from './richMarkdown';
+import { sanitizeRichHtml } from './richSanitizer';
+import { isRichHtml, htmlToPlainText, escapeHtml } from './richTextUtils';
+
+export { isRichHtml, htmlToPlainText };
 
 const MENTION_RE = /^@[a-zA-Z0-9_]{1,30}$/;
 const HASHTAG_RE = /^#[\w\u00C0-\u017F]{1,50}$/;
 const URL_RE = /^https?:\/\/[^\s]+$/i;
-
-const ALLOWED_TAGS = [
-  'p', 'br', 'div', 'span',
-  'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del', 'mark',
-  'ul', 'ol', 'li',
-  'blockquote', 'code', 'pre',
-  'a',
-];
-const ALLOWED_ATTR = ['href', 'target', 'rel', 'class'];
+const URL_CORE_RE = /^https?:\/\/[^\s]+$/i;
 
 /**
- * Convertit le markdown textuel standard (gras, italique, barré, code, listes, titres, citations)
- * en balises HTML autorisées avant assainissement par DOMPurify.
+ * Sépare ponctuation de tête/queue d'un token (ex. « (https://x.com), ») pour
+ * que le lien ne l'avale pas. Retourne null si le cœur n'est pas une URL.
  */
-function parseMarkdownToHtml(raw: string): string {
-  if (!raw) return '';
+function extractUrlParts(token: string): { lead: string; core: string; tail: string } | null {
+  let lead = '';
+  const leadMatch = token.match(/^[(«"'\u201C[{-]+/);
+  let core = leadMatch ? token.slice(leadMatch[0].length) : token;
+  if (leadMatch) lead = leadMatch[0];
 
-  // 1. Sauvegarder les blocs de code multi-lignes ```lang ... ```
-  const codeBlocks: string[] = [];
-  let text = raw.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-    const idx = codeBlocks.length;
-    const escaped = code
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    codeBlocks.push(`<pre><code class="language-${lang || 'plaintext'}">${escaped}</code></pre>`);
-    return `<!--VIBE_CODE_BLOCK_${idx}-->`;
-  });
-
-  // 2. Sauvegarder le code en ligne `code`
-  const inlineCodes: string[] = [];
-  text = text.replace(/`([^`\n]+)`/g, (_m, code) => {
-    const idx = inlineCodes.length;
-    const escaped = code
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    inlineCodes.push(`<code>${escaped}</code>`);
-    return `<!--VIBE_INLINE_CODE_${idx}-->`;
-  });
-
-  // 3. Liens markdown [Label](url)
-  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="rich-link">$1</a>');
-
-  // 4. Titres markdown : ###, ##, #
-  text = text.replace(/^###[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
-  text = text.replace(/^##[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
-  text = text.replace(/^#[ \t]+([^\n]+)$/gm, '<strong>$1</strong>');
-
-  // 5. Citations : > texte
-  text = text.replace(/^>[ \t]+([^\n]+)$/gm, '<blockquote>$1</blockquote>');
-
-  // 6. Gras et italique combinés ***texte*** ou ___texte___
-  text = text.replace(/(\*\*\*|___)(.+?)\1/g, '<strong><em>$2</em></strong>');
-
-  // 7. Gras **texte** ou __texte__
-  text = text.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>');
-
-  // 8. Italique *texte* ou _texte_
-  text = text.replace(/(?<![\w*])\*([^*\n]+?)\*(?![\w*])/g, '<em>$1</em>');
-  text = text.replace(/(?<![\w_])_([^_\n]+?)_(?![\w_])/g, '<em>$1</em>');
-
-  // 9. Barré ~~texte~~
-  text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
-
-  // 10. Puces de listes standard (- item ou * item)
-  text = text.replace(/^[-*][ \t]+([^\n]+)$/gm, '• $1');
-
-  // 11. Restaurer le code en ligne et les blocs de code
-  text = text.replace(/<!--VIBE_INLINE_CODE_(\d+)-->/g, (_m, idx) => inlineCodes[Number(idx)] || '');
-  text = text.replace(/<!--VIBE_CODE_BLOCK_(\d+)-->/g, (_m, idx) => codeBlocks[Number(idx)] || '');
-
-  return text;
+  let tail = '';
+  const tailMatch = core.match(/[.,;:!?\u2026"'»\u201D]+$/);
+  if (tailMatch) {
+    tail = tailMatch[0];
+    core = core.slice(0, core.length - tailMatch[0].length);
+  }
+  while (core && /[)\]}]$/.test(core)) {
+    const close = core.slice(-1);
+    const open = close === ')' ? '(' : close === ']' ? '[' : '{';
+    if (core.includes(open)) break;
+    tail = close + tail;
+    core = core.slice(0, -1);
+  }
+  if (!URL_CORE_RE.test(core)) return null;
+  return { lead, core, tail };
 }
 
 /**
- * Transforme les @mentions / #hashtags / URLs présents dans les nœuds texte
- * en ancres cliquables (sur un élément DOM détaché, hors React).
+ * Transforme les @mentions / #hashtags / URLs présents dans les nœuds texte en
+ * ancres cliquables. Ignore le code (pre/code), les formules (katex) et les
+ * nœuds déjà situés dans un lien (pas d'ancres imbriquées).
  */
 function linkifyTextNodes(root: HTMLElement) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const parent = (node as Text).parentElement;
+      if (!parent || parent.closest('a, pre, code, .katex')) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
   const textNodes: Text[] = [];
-  while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+  let currentNode: Node | null;
+  while ((currentNode = walker.nextNode())) textNodes.push(currentNode as Text);
 
   for (const node of textNodes) {
     const raw = node.textContent || '';
-    if (!raw || !raw.trim()) continue;
+    if (!raw.trim()) continue;
     const parts = raw.split(/(\s+)/);
     const hasToken = parts.some(
-      (p) => MENTION_RE.test(p) || HASHTAG_RE.test(p) || URL_RE.test(p)
+      (p) => MENTION_RE.test(p) || HASHTAG_RE.test(p) || extractUrlParts(p)
     );
     if (!hasToken) continue;
 
@@ -125,16 +94,21 @@ function linkifyTextNodes(root: HTMLElement) {
         a.textContent = part;
         frag.appendChild(a);
         changed = true;
-      } else if (URL_RE.test(part)) {
-        const a = document.createElement('a');
-        a.setAttribute('href', part);
-        a.setAttribute('data-external', '1');
-        a.className = 'rich-link';
-        a.textContent = part;
-        frag.appendChild(a);
-        changed = true;
       } else {
-        frag.appendChild(document.createTextNode(part));
+        const urlParts = extractUrlParts(part);
+        if (urlParts) {
+          if (urlParts.lead) frag.appendChild(document.createTextNode(urlParts.lead));
+          const a = document.createElement('a');
+          a.setAttribute('href', urlParts.core);
+          a.setAttribute('data-external', '1');
+          a.className = 'rich-link';
+          a.textContent = urlParts.core;
+          frag.appendChild(a);
+          if (urlParts.tail) frag.appendChild(document.createTextNode(urlParts.tail));
+          changed = true;
+        } else {
+          frag.appendChild(document.createTextNode(part));
+        }
       }
     }
     if (changed && node.parentNode) {
@@ -146,14 +120,8 @@ function linkifyTextNodes(root: HTMLElement) {
 function buildSafeHtml(content: string): string {
   if (!content) return '';
   try {
-    const parsed = parseMarkdownToHtml(content);
-    // Sanitization stricte : seul un sous-ensemble de balises passe. Le texte
-    // brut historique (sans balise) est échappé par DOMPurify, sans perte des \n.
-    let clean = DOMPurify.sanitize(parsed, {
-      ALLOWED_TAGS,
-      ALLOWED_ATTR,
-      ALLOW_DATA_ATTR: false,
-    });
+    const rendered = renderRichMarkdown(content);
+    const clean = sanitizeRichHtml(rendered);
     const tpl = document.createElement('div');
     tpl.innerHTML = clean;
     linkifyTextNodes(tpl);
@@ -162,10 +130,10 @@ function buildSafeHtml(content: string): string {
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
     });
-    clean = tpl.innerHTML;
-    return clean;
+    return tpl.innerHTML;
   } catch {
-    return DOMPurify.sanitize(content);
+    // Fail-safe : jamais de HTML brut non assaini
+    return sanitizeRichHtml(escapeHtml(content));
   }
 }
 
@@ -192,9 +160,12 @@ export const RichContent: React.FC<RichContentProps> = ({
     if (!anchor) return;
     e.preventDefault();
     e.stopPropagation();
+    const bookId = anchor.getAttribute('data-book-id');
     const mention = anchor.getAttribute('data-mention');
     const hashtag = anchor.getAttribute('data-hashtag');
-    if (mention) {
+    if (bookId) {
+      navigate(`/books/${bookId}`);
+    } else if (mention) {
       if (onOpenProfile) onOpenProfile(mention);
       else navigate(`/@${mention}`);
     } else if (hashtag) {
@@ -212,26 +183,9 @@ export const RichContent: React.FC<RichContentProps> = ({
 
   return (
     <div
-      className={`rich-content whitespace-pre-wrap break-words ${className}`}
+      className={`rich-content break-words ${className}`}
       onClick={handleClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
-};
-
-/** Indique si un contenu est au format HTML riche (nouveau) ou texte brut. */
-export const isRichHtml = (content: string | undefined | null): boolean =>
-  Boolean(content && /<[a-z][\s\S]*>/i.test(content));
-
-/** Version texte brut d'un contenu riche (aperçus, snippets, dictée…). */
-export const htmlToPlainText = (content: string | undefined | null): string => {
-  if (!content) return '';
-  if (!isRichHtml(content)) return content;
-  try {
-    const tpl = document.createElement('div');
-    tpl.innerHTML = content;
-    return tpl.textContent || '';
-  } catch {
-    return content.replace(/<[^>]*>/g, ' ');
-  }
 };

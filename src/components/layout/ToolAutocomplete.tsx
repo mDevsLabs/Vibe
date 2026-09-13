@@ -11,9 +11,29 @@ import {
   BarChart3,
   Zap,
   Bell,
-  UserPlus
+  UserPlus,
+  Heart,
+  MessageCircle,
+  Settings,
+  Bookmark,
+  Repeat2,
+  MessageSquare,
+  Activity,
+  Trash2,
+  Lightbulb,
+  Search,
+  User,
+  Users,
+  Clock,
+  ArrowLeftRight,
+  Target,
+  LayoutGrid,
+  MessagesSquare,
+  BookOpen,
+  Hash
 } from 'lucide-react';
-import { AVAILABLE_MAI_TOOLS, MAITool } from '../../data/maiTools';
+import { type MAITool } from '../../data/maiTools';
+import { useAvailableMAITools } from '../../hooks/useAvailableMAITools';
 
 interface ToolAutocompleteProps {
   query: string;
@@ -24,9 +44,13 @@ interface ToolAutocompleteProps {
   specialAction?: {
     label: string;
     description: string;
+    /** Sous-titre affiché à côté du label (défaut : « Mentionner un post »). */
+    subtitle?: string;
     iconName?: string;
     onSelect: () => void;
   };
+  /** Masque la liste des outils mAI (ex : messages → uniquement l'action spéciale). */
+  showTools?: boolean;
 }
 
 const iconMap: Record<string, React.ElementType> = {
@@ -42,6 +66,25 @@ const iconMap: Record<string, React.ElementType> = {
   Zap: Zap,
   Bell: Bell,
   UserPlus: UserPlus,
+  Heart: Heart,
+  MessageCircle: MessageCircle,
+  Settings: Settings,
+  Bookmark: Bookmark,
+  Repeat2: Repeat2,
+  MessageSquare: MessageSquare,
+  Activity: Activity,
+  Trash2: Trash2,
+  Lightbulb: Lightbulb,
+  Search: Search,
+  User: User,
+  Users: Users,
+  Clock: Clock,
+  ArrowLeftRight: ArrowLeftRight,
+  Target: Target,
+  LayoutGrid: LayoutGrid,
+  MessagesSquare: MessagesSquare,
+  BookOpen: BookOpen,
+  Hash: Hash,
 };
 
 export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
@@ -49,31 +92,35 @@ export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
   trigger,
   onSelect,
   specialAction,
+  showTools = true,
 }) => {
+  const availableTools = useAvailableMAITools();
   const cleanQ = query.toLowerCase().replace(/^[/@]/, '');
 
-  const matches = AVAILABLE_MAI_TOOLS.filter((t) => {
-    if (!cleanQ) return true;
-    const tag = trigger === '/' ? t.slashCommand : t.mentionTag;
-    return (
-      tag.toLowerCase().includes(cleanQ) ||
-      t.name.toLowerCase().includes(cleanQ) ||
-      t.description.toLowerCase().includes(cleanQ)
-    );
-  }).slice(0, 6);
+  const matches = showTools
+    ? availableTools.filter((t) => {
+        if (!cleanQ) return true;
+        const tag = trigger === '/' ? t.slashCommand : t.mentionTag;
+        return (
+          tag.toLowerCase().includes(cleanQ) ||
+          t.name.toLowerCase().includes(cleanQ) ||
+          t.description.toLowerCase().includes(cleanQ)
+        );
+      }).slice(0, 6)
+    : [];
 
   const specialMatches =
     specialAction &&
     (!cleanQ ||
       specialAction.label.toLowerCase().replace(/^[/@]/, '').includes(cleanQ) ||
-      'post publication mentionner'.includes(cleanQ));
+      (showTools ? 'post publication mentionner'.includes(cleanQ) : specialAction.description.toLowerCase().includes(cleanQ)));
 
   if (matches.length === 0 && !specialMatches) return null;
 
   return (
     <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm vibe-menu rounded-2xl shadow-2xl overflow-hidden z-50 animate-scaleUp">
       <div className="p-2 border-b border-zinc-200 dark:border-zinc-800 bg-black/5 dark:bg-zinc-900/50 flex items-center justify-between text-[11px] font-mono text-zinc-600 dark:text-zinc-400">
-        <span>Outils & Actions mAI ({trigger === '/' ? 'Commandes /' : 'Mentions @'})</span>
+        <span>{showTools ? `Outils & Actions mAI (${trigger === '/' ? 'Commandes /' : 'Mentions @'})` : 'Actions du Livre'}</span>
         <span>{matches.length + (specialMatches ? 1 : 0)} suggéré(s)</span>
       </div>
 
@@ -90,7 +137,7 @@ export const ToolAutocomplete: React.FC<ToolAutocompleteProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono font-bold text-zinc-900 dark:text-white">{specialAction.label}</span>
-                <span className="text-[11px] text-zinc-600 dark:text-zinc-400 truncate font-semibold">Mentionner un post</span>
+                <span className="text-[11px] text-zinc-600 dark:text-zinc-400 truncate font-semibold">{specialAction.subtitle || 'Mentionner un post'}</span>
               </div>
               <p className="text-[11px] text-zinc-500 truncate mt-0.5">{specialAction.description}</p>
             </div>

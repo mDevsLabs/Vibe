@@ -12,15 +12,11 @@ import { ApiService } from '../../services/api';
 import { PostComposer } from '../feed/PostComposer';
 import { ProfileAvatar } from './ProfileAvatar';
 import { haptics } from '../../services/haptics';
+import { INTEREST_SUGGESTIONS, MAX_INTERESTS } from '../../data/interests';
 
 interface OnboardingModalProps {
   onDone: () => void;
 }
-
-const INTEREST_TAGS = [
-  'Tech', 'IA', 'Musique', 'Cinéma', 'Sport', 'Cuisine', 'Voyage', 'Photo',
-  'Gaming', 'Littérature', 'Science', 'Art', 'Mode', 'Humour', 'News', 'Crypto',
-];
 
 interface SuggestedUser {
   id: number;
@@ -52,7 +48,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onDone }) => {
 
   const toggleInterest = (tag: string) => {
     haptics.light();
-    setInterests((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));
+    setInterests((prev) => {
+      if (prev.includes(tag)) return prev.filter((t) => t !== tag);
+      if (prev.length >= MAX_INTERESTS) return prev;
+      return [...prev, tag];
+    });
   };
 
   const handleStep1Next = async () => {
@@ -117,20 +117,35 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onDone }) => {
 
           {step === 0 && (
             <>
-              <p className="text-sm text-zinc-300 mb-3">
-                Choisissez ce qui vous passionne — votre fil « Pour Vous » s'affinera.
-              </p>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <p className="text-sm text-zinc-300">
+                  Choisissez ce qui vous passionne — votre fil « Pour Vous » s'affinera.
+                </p>
+                <span
+                  aria-live="polite"
+                  className={`text-[11px] font-mono shrink-0 ${
+                    interests.length >= MAX_INTERESTS ? 'text-amber-400' : 'text-zinc-500'
+                  }`}
+                >
+                  {interests.length}/{MAX_INTERESTS}
+                </span>
+              </div>
               <div className="flex flex-wrap gap-2">
-                {INTEREST_TAGS.map((tag) => {
+                {INTEREST_SUGGESTIONS.map((tag) => {
                   const active = interests.includes(tag);
+                  const canToggle = active || interests.length < MAX_INTERESTS;
                   return (
                     <button
                       key={tag}
                       onClick={() => toggleInterest(tag)}
+                      disabled={!canToggle}
+                      aria-pressed={active}
                       className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-all active:scale-95 ${
                         active
                           ? 'border-transparent text-black'
-                          : 'border-zinc-700 text-zinc-300 hover:border-zinc-500'
+                          : canToggle
+                          ? 'border-zinc-700 text-zinc-300 hover:border-zinc-500'
+                          : 'border-zinc-800 text-zinc-600 cursor-not-allowed opacity-60'
                       }`}
                       style={active ? { backgroundColor: 'var(--vibe-accent, #ffffff)' } : undefined}
                     >
@@ -139,6 +154,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onDone }) => {
                   );
                 })}
               </div>
+              {interests.length >= MAX_INTERESTS && (
+                <p className="mt-2 text-[11px] text-amber-400">
+                  Maximum {MAX_INTERESTS} centres d’intérêt — décochez-en un pour en choisir un autre.
+                </p>
+              )}
               <button
                 onClick={handleStep1Next}
                 disabled={isSaving}
