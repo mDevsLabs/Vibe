@@ -92,6 +92,23 @@ export function StatsPage() {
   const avgViewsPerPost =
     stats && stats.posts_count > 0 ? Math.round(stats.total_views / stats.posts_count) : 0;
 
+  // Nombre de cartes d'insights affichées pour équilibrer la grille sur toute la largeur
+  const insightCardsCount = [
+    Boolean(bestDay),
+    Boolean(bestPublishDay),
+    stats?.posts_per_week !== undefined,
+    true, // vues par post toujours affiché
+  ].filter(Boolean).length;
+
+  const insightsGridClass =
+    insightCardsCount === 1
+      ? 'grid-cols-1'
+      : insightCardsCount === 2
+      ? 'grid-cols-1 sm:grid-cols-2'
+      : insightCardsCount === 3
+      ? 'grid-cols-1 sm:grid-cols-3'
+      : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4';
+
   /** Export JSON complet des statistiques affichées (données brutes incluses). */
   const handleExportStats = () => {
     if (!stats) return;
@@ -171,7 +188,7 @@ export function StatsPage() {
           {stats && (
             <button
               type="button"
-              onClick={() => navigate('/mai?prefill=' + encodeURIComponent(maiPrompt))}
+              onClick={() => navigate('/mai?new=' + Date.now() + '&prefill=' + encodeURIComponent(maiPrompt))}
               className="flex items-center gap-1.5 py-2 px-3.5 rounded-full bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors shrink-0"
               title="Envoyer les statistiques à mAI pour analyse"
             >
@@ -237,10 +254,10 @@ export function StatsPage() {
               ))}
             </section>
 
-            {/* Insights rapides : meilleur jour, heures optimales, fréquence, vues/post */}
-            <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+            {/* Insights rapides : meilleur jour, heures optimales, fréquence, vues/post (largeur équilibrée) */}
+            <section className={`grid ${insightsGridClass} gap-3`}>
               {bestDay && (
-                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3 w-full h-full">
                   <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center shrink-0">
                     <CalendarDays className="w-4 h-4" />
                   </div>
@@ -252,7 +269,7 @@ export function StatsPage() {
                 </div>
               )}
               {bestPublishDay && (
-                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3 w-full h-full">
                   <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center shrink-0">
                     <Flame className="w-4 h-4" />
                   </div>
@@ -266,7 +283,7 @@ export function StatsPage() {
                 </div>
               )}
               {stats.posts_per_week !== undefined && (
-                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+                <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3 w-full h-full">
                   <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center shrink-0">
                     <TrendingUp className="w-4 h-4" />
                   </div>
@@ -277,7 +294,7 @@ export function StatsPage() {
                   </div>
                 </div>
               )}
-              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-start gap-3 w-full h-full">
                 <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center shrink-0">
                   <Eye className="w-4 h-4" />
                 </div>

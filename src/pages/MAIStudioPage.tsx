@@ -30,12 +30,15 @@ import {
   MoreVertical,
   MessagesSquare
 } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ApiService } from '../services/api';
 import { ToolAutocomplete } from '../components/layout/ToolAutocomplete';
 import { type MAITool } from '../data/maiTools';
 import { ModelDropdown } from '../components/common/ModelDropdown';
 import { RichContent } from '../components/common/RichContent';
+import { renderInlineRichMarkdown, stripMarkdownText } from '../components/common/richMarkdown';
+import { sanitizeRichHtml } from '../components/common/richSanitizer';
 import { ShareToDMModal } from '../components/common/ShareToDMModal';
 import { MaiToolChips } from '../components/mai/MaiToolChips';
 import { useConfirmDialog } from '../components/common/ConfirmDialog';
@@ -44,6 +47,25 @@ import { NotificationService } from '../services/notificationService';
 import { downloadTextFile } from '../services/mediaActions';
 import { maiExportSlug, buildMAIConversationMarkdown, buildMAIConversationJSON } from '../algorithms';
 import type { MaiToolCall, MAIConversationSummary } from '../types/vibe';
+
+/** Formate le Markdown inline dans l'historique mAI (gras, code, etc.) sans astérisques bruts */
+const formatConversationPreview = (preview?: string, messageCount?: number): { __html: string } | string => {
+  if (!preview) {
+    const count = messageCount || 0;
+    return `${count} message${count > 1 ? 's' : ''}`;
+  }
+  const cleaned = preview
+    .replace(/```[\s\S]*?```/g, ' [code] ')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^>\s+/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const inlineHtml = renderInlineRichMarkdown(cleaned);
+  return { __html: sanitizeRichHtml(inlineHtml) };
+};
 
 interface ChatMessage {
   id: string;
@@ -85,6 +107,9 @@ const DEFAULT_MODELS = [
 
 export const MAIStudioPage: React.FC = () => {
   const { user, quotas, refreshQuotas } = useAuth();
+  const location = useLocation();
+  const isCreatingConvRef = useRef(false);
+  const lastHandledNewRef = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>('poolside/laguna-xs-2.1:free');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string; description: string; provider?: string }>>(DEFAULT_MODELS);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -188,28 +213,10 @@ export const MAIStudioPage: React.FC = () => {
     } catch {}
   };
 
-  useEffect(() => {
-    (async () => {
-      setConversationsLoading(true);
-      const list = await loadConversations();
-      await loadHistory(list[0]?.id);
-      // Aucune conversation existante : l'historique vient d'en créer une
-      if (list.length === 0) await loadConversations();
-      setConversationsLoading(false);
-    })();
-  }, []);
-
-  const handleSelectConversation = (conversationId: string) => {
-    haptics.light();
-    setActiveConversationId(conversationId);
-    setConvItemMenuId(null);
-    setSidebarOpen(false);
-    setPendingTool(null);
-    loadHistory(conversationId);
-  };
-
   // Démarrer une nouvelle conversation mAI (vide l'historique actif)
   const handleNewConversation = async () => {
+    if (isCreatingConvRef.current) return;
+    isCreatingConvRef.current = true;
     try {
       const res = await ApiService.newMAIConversation();
       if (res?.conversation_id) setActiveConversationId(res.conversation_id);
@@ -219,7 +226,64 @@ export const MAIStudioPage: React.FC = () => {
       setSidebarOpen(false);
       await loadConversations();
       inputRef.current?.focus();
-    } catch {}
+      haptics.selection();
+    } catch (err: any) {
+      NotificationService.showInAppToast(
+        'Nouvelle discussion',
+        err?.message || 'Impossible de créer une nouvelle discussion.',
+        'error'
+      );
+    } finally {
+      isCreatingConvRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    (async () => {
+      setConversationsLoading(true);
+      const params = new URLSearchParams(window.location.search);
+      const isNew = params.has('new');
+      if (isNew) {
+        lastHandledNewRef.current = params.get('new');
+        await handleNewConversation();
+      } else {
+        const list = await loadConversations();
+        await loadHistory(list[0]?.id);
+        // Aucune conversation existante : l'historique vient d'en créer une
+        if (list.length === 0) await loadConversations();
+      }
+      setConversationsLoading(false);
+    })();
+  }, []);
+
+  // Détection d'un clic sur mAI depuis la barre latérale quand on est déjà sur la page
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const newParam = params.get('new');
+    if (newParam && newParam !== lastHandledNewRef.current) {
+      lastHandledNewRef.current = newParam;
+      handleNewConversation();
+    }
+  }, [location.search]);
+
+  // Événement personnalisé émis par la Sidebar pour garantir une nouvelle discussion au clic
+  useEffect(() => {
+    const onNewConvEvent = () => {
+      handleNewConversation();
+    };
+    window.addEventListener('vibe:mai:new_conversation', onNewConvEvent);
+    return () => {
+      window.removeEventListener('vibe:mai:new_conversation', onNewConvEvent);
+    };
+  }, []);
+
+  const handleSelectConversation = (conversationId: string) => {
+    haptics.light();
+    setActiveConversationId(conversationId);
+    setConvItemMenuId(null);
+    setSidebarOpen(false);
+    setPendingTool(null);
+    loadHistory(conversationId);
   };
 
   /** Renomme une conversation (Entrée / perte de focus valident, Échap annule). */
@@ -622,12 +686,27 @@ export const MAIStudioPage: React.FC = () => {
                 ) : (
                   <button type="button" onClick={() => handleSelectConversation(c.id)} className="w-full text-left px-3 py-2 pr-9">
                     <span className="flex items-center gap-1.5">
-                      <span className="block text-[11px] font-bold text-white truncate flex-1">{c.title}</span>
+                      <span className="block text-[11px] font-bold text-white truncate flex-1">
+                        {stripMarkdownText(c.title)}
+                      </span>
                       <span className="text-[9px] text-zinc-600 font-mono shrink-0">{formatConvDate(c.updated_at)}</span>
                     </span>
-                    <span className="block text-[10px] text-zinc-600 truncate mt-0.5">
-                      {c.preview || `${c.message_count || 0} message${(c.message_count || 0) > 1 ? 's' : ''}`}
-                    </span>
+                    {(() => {
+                      const formatted = formatConversationPreview(c.preview, c.message_count);
+                      if (typeof formatted === 'string') {
+                        return (
+                          <span className="block text-[10px] text-zinc-600 truncate mt-0.5">
+                            {formatted}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span
+                          className="block text-[10px] text-zinc-500 truncate mt-0.5 [&_strong]:font-semibold [&_strong]:text-zinc-300 [&_b]:font-semibold [&_b]:text-zinc-300 [&_code]:bg-zinc-800 [&_code]:px-1 [&_code]:rounded [&_code]:text-[9px]"
+                          dangerouslySetInnerHTML={formatted}
+                        />
+                      );
+                    })()}
                   </button>
                 )}
                 {!isRenaming && (

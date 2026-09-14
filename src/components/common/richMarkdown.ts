@@ -154,3 +154,35 @@ md.renderer.rules.vibe_color = (tokens: Token[], idx: number) => tokens[idx].con
 export function renderRichMarkdown(content: string): string {
   return md.render(content);
 }
+
+/**
+ * Rendu inline : convertit le markdown en HTML inline (sans balise <p> englobante).
+ * Idéal pour les aperçus d'historique, titres et badges.
+ */
+export function renderInlineRichMarkdown(content: string): string {
+  return md.renderInline(content);
+}
+
+/**
+ * Nettoie la syntaxe markdown d'un texte pour obtenir une chaîne purement textuelle.
+ */
+export function stripMarkdownText(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/_([^_]+)_/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/==([^=]+)==/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\{[a-z]+\}([^{]*)\{\/\}/gi, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^>\s+/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}

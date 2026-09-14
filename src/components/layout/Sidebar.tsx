@@ -130,10 +130,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 ? unreadMessages
                 : 0;
 
+            const handleClick = (e: React.MouseEvent) => {
+              if (item.path === '/mai') {
+                e.preventDefault();
+                navigate(`/mai?new=${Date.now()}`);
+                window.dispatchEvent(new CustomEvent('vibe:mai:new_conversation'));
+              }
+            };
+
             return (
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={handleClick}
                 onMouseEnter={() => pageLoaders[item.path]?.()}
                 onFocus={() => pageLoaders[item.path]?.()}
                 className={`w-12 h-12 xl:w-full xl:h-auto p-0 xl:px-4 xl:py-3 rounded-full text-sm font-semibold transition-all flex items-center justify-center xl:justify-start gap-4 group relative ${
