@@ -27,14 +27,21 @@ import {
   Cpu,
   Languages,
   X,
-  MessageSquare,
-  CheckCheck,
   Search,
   UserPlus,
   Globe,
   Lock,
+  Smartphone,
+  FileText,
+  GraduationCap,
+  RotateCcw,
+  Wrench,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { startFullTour } from '../services/tutorialService';
 import { useAuth } from '../context/AuthContext';
+import { haptics } from '../services/haptics';
+import { getAnimationsEnabled, setAnimationsEnabled } from '../services/animationPrefs';
 import {
   useTheme,
   ACCENT_COLORS,
@@ -49,6 +56,8 @@ import { ApiService, TRANSLATION_LANGUAGES, browserToDeepLCode } from '../servic
 import { NotificationService } from '../services/notificationService';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { InstallAppHint } from '../components/common/InstallAppHint';
+import { ChatAppearanceSection } from '../components/settings/ChatAppearanceSection';
 
 /** Encart indiquant l'état réel de la permission notifications de l'appareil */
 const DevicePermissionHint: React.FC = () => {
@@ -82,7 +91,8 @@ const DevicePermissionHint: React.FC = () => {
 };
 
 export const SettingsPage: React.FC = () => {
-  const { user } = useAuth();
+  const { user, restartOnboarding } = useAuth();
+  const navigate = useNavigate();
   const {
     theme,
     setTheme,
@@ -96,6 +106,8 @@ export const SettingsPage: React.FC = () => {
     setChatBackgroundTheme,
     messageBubbleShape,
     setMessageBubbleShape,
+    scheduledTheme,
+    setScheduledTheme,
   } = useTheme();
 
   // Feed customization
@@ -105,6 +117,9 @@ export const SettingsPage: React.FC = () => {
 
   // Security & Privacy
   const [allowDms, setAllowDms] = useState<'everyone' | 'following' | 'nobody'>('everyone');
+  // Traduction automatique des messages reçus (DM)
+  const [dmAutoTranslate, setDmAutoTranslate] = useState(false);
+  const [dmTranslateLang, setDmTranslateLang] = useState('EN-US');
   const [dmsEnabled, setDmsEnabled] = useState(true);
   const [allowMentions, setAllowMentions] = useState<'everyone' | 'following' | 'nobody'>('everyone');
 
@@ -113,7 +128,16 @@ export const SettingsPage: React.FC = () => {
   const [blurSensitive, setBlurSensitive] = useState(true);
   const [emailNotifs, setEmailNotifs] = useState(true);
   const [pushNotifs, setPushNotifs] = useState(true);
+  const [hapticsEnabled, setHapticsEnabled] = useState(() => haptics.isEnabled());
+  const hapticsSupported = haptics.isSupported();
+  const [animationsEnabled, setAnimationsEnabledState] = useState(() => getAnimationsEnabled());
   const [maiAutoApproveTools, setMaiAutoApproveTools] = useState(false);
+  // Outils mAI disponibles (catalogue lib/tools, importé via GET /v1/mai/tools)
+  const [maiCatalog, setMaiCatalog] = useState<Array<{ id: string; name: string; description: string; category: string; sensitive: boolean; slash_command: string }>>([]);
+  const [maiEnabledTools, setMaiEnabledTools] = useState<string[]>([]);
+  const [maiToolsLoaded, setMaiToolsLoaded] = useState(false);
+  // Co-signatures acceptées automatiquement quand je suis désigné co-auteur
+  const [collabAutoAccept, setCollabAutoAccept] = useState(false);
   const [postsAIGeneratedByDefault, setPostsAIGeneratedByDefault] = useState(false);
   // mAI : modèle par défaut (toutes les requêtes mAI) + voix de lecture
   const [maiDefaultModel, setMaiDefaultModel] = useState('poolside/laguna-xs-2.1:free');
@@ -126,6 +150,12 @@ export const SettingsPage: React.FC = () => {
   const [circleMembers, setCircleMembers] = useState<Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string }>>([]);
   // Audience par défaut des publications Vibe ('public', 'followers', 'circle')
   const [defaultVibeAudience, setDefaultVibeAudience] = useState<'public' | 'followers' | 'circle'>('public');
+  // mAI — personnalisation du contexte (opt-in granulaire)
+  const [maiContextPosts, setMaiContextPosts] = useState(false);
+  const [maiContextDms, setMaiContextDms] = useState(false);
+  const [maiContextBooks, setMaiContextBooks] = useState(false);
+  // Coche bleue (badge vérifié) masquée par le propriétaire — comptes Plus/Pro/Max
+  const [hideVerifiedBadge, setHideVerifiedBadge] = useState(false);
   // Recherche & sélection des personnes autorisées dans le Cercle Privé
   const [circleSearchQuery, setCircleSearchQuery] = useState('');
   const [circleSearchResults, setCircleSearchResults] = useState<Array<{
@@ -143,6 +173,11 @@ export const SettingsPage: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Éligibilité à la coche bleue : compte vérifié ou abonnement Plus/Pro/Max
+  const canHideVerifiedBadge = Boolean(
+    user?.is_verified || ['plus', 'pro', 'max'].includes((user?.tier || '').toLowerCase().trim())
+  );
+
   useEffect(() => {
     const loadSettings = async () => {
       try {
@@ -154,6 +189,8 @@ export const SettingsPage: React.FC = () => {
           setBlockedKeywords(Array.isArray(s.blocked_keywords) ? s.blocked_keywords.join(', ') : (s.blocked_keywords || ''));
           setAllowDms(s.allow_dms || s.allow_dms_from || 'everyone');
           setDmsEnabled(s.dms_enabled ?? true);
+          setDmAutoTranslate(Boolean(s.dm_auto_translate));
+          setDmTranslateLang(String(s.dm_translate_lang || browserToDeepLCode(navigator.language || 'fr-FR')));
           setAllowMentions(s.allow_mentions || 'everyone');
           setContentFilter(s.content_filter_level || 'medium');
           setBlurSensitive(s.blur_sensitive_content ?? true);
@@ -190,11 +227,47 @@ export const SettingsPage: React.FC = () => {
           if (s.default_vibe_audience && ['public', 'followers', 'circle'].includes(s.default_vibe_audience)) {
             setDefaultVibeAudience(s.default_vibe_audience as any);
           }
+          if (s.mai_context_posts !== undefined) setMaiContextPosts(Boolean(s.mai_context_posts));
+          if (s.mai_context_dms !== undefined) setMaiContextDms(Boolean(s.mai_context_dms));
+          if (s.mai_context_books !== undefined) setMaiContextBooks(Boolean(s.mai_context_books));
+          if (s.hide_verified_badge !== undefined) setHideVerifiedBadge(Boolean(s.hide_verified_badge));
+          if (s.collab_auto_accept !== undefined) setCollabAutoAccept(Boolean(s.collab_auto_accept));
+          // Outils mAI : liste activée (vide/null = tout activé → on coche tout)
+          if (Array.isArray(s.mai_enabled_tools) && s.mai_enabled_tools.length > 0) {
+            setMaiEnabledTools(s.mai_enabled_tools.map(String));
+          }
         }
       } catch {}
     };
     loadSettings();
   }, [setTheme, setAccentColor, setFontSize, setMessageBubbleTheme, setChatBackgroundTheme, setMessageBubbleShape]);
+
+  // Charge le catalogue d'outils mAI depuis l'index (GET /v1/mai/tools)
+  useEffect(() => {
+    ApiService.getMAITools()
+      .then((res) => {
+        const tools = (res?.tools || []).map((t) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          category: t.category,
+          sensitive: Boolean(t.sensitive),
+          slash_command: t.slash_command,
+        }));
+        setMaiCatalog(tools);
+        setMaiEnabledTools((prev) => {
+          if (prev.length > 0) {
+            // Filtre les ids inconnus du catalogue courant
+            const valid = new Set(tools.map((t) => t.id));
+            return prev.filter((id) => valid.has(id));
+          }
+          // Aucune sélection enregistrée = tous les outils activés
+          return tools.map((t) => t.id);
+        });
+        setMaiToolsLoaded(true);
+      })
+      .catch(() => setMaiToolsLoaded(true));
+  }, []);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -213,6 +286,8 @@ export const SettingsPage: React.FC = () => {
         allow_dms: allowDms,
         allow_dms_from: allowDms,
         dms_enabled: dmsEnabled,
+        dm_auto_translate: dmAutoTranslate,
+        dm_translate_lang: dmTranslateLang,
         allow_mentions: allowMentions,
         content_filter_level: contentFilter,
         blur_sensitive_content: blurSensitive,
@@ -230,6 +305,12 @@ export const SettingsPage: React.FC = () => {
         chat_background_theme: chatBackgroundTheme,
         message_bubble_shape: messageBubbleShape,
         default_vibe_audience: defaultVibeAudience,
+        mai_context_posts: maiContextPosts,
+        mai_context_dms: maiContextDms,
+        mai_context_books: maiContextBooks,
+        hide_verified_badge: hideVerifiedBadge,
+        collab_auto_accept: collabAutoAccept,
+        mai_enabled_tools: maiEnabledTools,
       });
 
       // Miroir local immédiat (traduction des posts sans recharger les réglages)
@@ -238,7 +319,7 @@ export const SettingsPage: React.FC = () => {
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
     } catch (err: any) {
-      alert(`Erreur: ${err.message}`);
+      NotificationService.showInAppToast('Erreur', err.message || 'La sauvegarde des réglages a échoué.', 'error');
     } finally {
       setIsSaving(false);
     }
@@ -258,7 +339,7 @@ export const SettingsPage: React.FC = () => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err?.message || "Erreur lors de l'export. Vérifiez votre connexion.");
+      NotificationService.showInAppToast('Erreur', err?.message || "Erreur lors de l'export. Vérifiez votre connexion.", 'error');
     } finally {
       setIsExporting(false);
     }
@@ -290,12 +371,12 @@ export const SettingsPage: React.FC = () => {
   // Recherche en direct d'utilisateurs pour le Cercle Privé
   useEffect(() => {
     const q = circleSearchQuery.trim().replace(/^@/, '');
-    if (!q) {
-      setCircleSearchResults((prev) => (prev.length > 0 ? [] : prev));
-      setIsSearchingCircleUsers(false);
-      return;
-    }
     const timer = setTimeout(async () => {
+      if (!q) {
+        setCircleSearchResults([]);
+        setIsSearchingCircleUsers(false);
+        return;
+      }
       setIsSearchingCircleUsers(true);
       try {
         const res = await ApiService.searchUsers(q);
@@ -308,7 +389,7 @@ export const SettingsPage: React.FC = () => {
       } finally {
         setIsSearchingCircleUsers(false);
       }
-    }, 250);
+    }, q ? 250 : 0);
     return () => clearTimeout(timer);
   }, [circleSearchQuery, user?.username]);
 
@@ -475,6 +556,48 @@ export const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Thème programmé (bascule automatique) */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-900">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-zinc-200 font-bold text-xs flex items-center gap-1.5">
+                      <Moon className="w-3 h-3 text-zinc-400" /> Thème programmé
+                    </p>
+                    <p className="text-zinc-500 text-[11px]">
+                      Bascule automatique clair/sombre (ex. 22h–7h = sombre). Inactif en mode « Système ».
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={scheduledTheme.enabled}
+                    onChange={(e) => setScheduledTheme({ ...scheduledTheme, enabled: e.target.checked })}
+                    className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+                {scheduledTheme.enabled && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <span className="text-[10px] font-mono uppercase text-zinc-500">Sombre dès</span>
+                      <input
+                        type="time"
+                        value={scheduledTheme.darkStart}
+                        onChange={(e) => setScheduledTheme({ ...scheduledTheme, darkStart: e.target.value || '22:00' })}
+                        className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10px] font-mono uppercase text-zinc-500">Clair dès</span>
+                      <input
+                        type="time"
+                        value={scheduledTheme.darkEnd}
+                        onChange={(e) => setScheduledTheme({ ...scheduledTheme, darkEnd: e.target.value || '07:00' })}
+                        className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 text-xs"
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+
               {/* Taille du texte */}
               <div className="space-y-2 pt-3 border-t border-zinc-900">
                 <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center gap-1.5">
@@ -573,207 +696,8 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Row 2: Personnalisation des discussions & messages (Pleine largeur avec aperçu en direct) */}
-          <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-6">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-white font-bold text-sm sm:text-base">
-                <MessageSquare className="w-5 h-5 text-white" />
-                <span>Personnalisation des discussions & messages</span>
-              </div>
-              <span className="text-[10px] sm:text-[11px] font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-full">
-                Aperçu en direct
-              </span>
-            </div>
-
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Personnalisez l'apparence de vos conversations privées : couleur et dégradés des bulles envoyées, fond d'écran du chat et forme des bulles.
-            </p>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Contrôles (7 cols) */}
-              <div className="lg:col-span-7 space-y-5">
-                {/* 1. Couleur / Dégradé des bulles envoyées */}
-                <div className="space-y-2.5">
-                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
-                    <span>Bulles de message envoyées</span>
-                    <span className="text-zinc-500 font-normal lowercase">
-                      {MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.label || messageBubbleTheme}
-                    </span>
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {(Object.keys(MESSAGE_BUBBLE_THEMES) as MessageBubbleTheme[]).map((themeKey) => {
-                      const t = MESSAGE_BUBBLE_THEMES[themeKey];
-                      const isSelected = messageBubbleTheme === themeKey;
-                      const isLightText = t.textColor === 'light';
-                      return (
-                        <button
-                          key={themeKey}
-                          type="button"
-                          onClick={() => setMessageBubbleTheme(themeKey)}
-                          className={`p-2.5 rounded-2xl border text-left transition-all flex flex-col gap-2 ${
-                            isSelected
-                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 shadow-md'
-                              : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div
-                              className="w-6 h-6 rounded-full border border-white/20 shadow-inner flex items-center justify-center"
-                              style={{ background: t.gradient }}
-                            >
-                              {isSelected && (
-                                <Check className={`w-3.5 h-3.5 ${isLightText ? 'text-white' : 'text-black'} stroke-[3]`} />
-                              )}
-                            </div>
-                            {isSelected && (
-                              <span className="text-[10px] font-bold text-white uppercase tracking-wider">Actif</span>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-semibold text-zinc-200 truncate block">
-                            {t.label}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* 2. Fond d'écran des discussions */}
-                <div className="space-y-2.5 pt-4 border-t border-zinc-900">
-                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
-                    <span>Arrière-plan des discussions</span>
-                    <span className="text-zinc-500 font-normal lowercase">
-                      {CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.label || chatBackgroundTheme}
-                    </span>
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {(Object.keys(CHAT_BACKGROUND_THEMES) as ChatBackgroundTheme[]).map((bgKey) => {
-                      const b = CHAT_BACKGROUND_THEMES[bgKey];
-                      const isSelected = chatBackgroundTheme === bgKey;
-                      return (
-                        <button
-                          key={bgKey}
-                          type="button"
-                          onClick={() => setChatBackgroundTheme(bgKey)}
-                          className={`p-2.5 rounded-2xl border text-left transition-all flex flex-col gap-2 ${
-                            isSelected
-                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 shadow-md'
-                              : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
-                          }`}
-                        >
-                          <div
-                            className={`w-full h-8 rounded-xl border border-white/10 flex items-center justify-center relative overflow-hidden ${b.previewBg}`}
-                            style={b.style ? { background: b.style } : undefined}
-                          >
-                            {isSelected && (
-                              <div className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shadow">
-                                <Check className="w-3 h-3 stroke-[3]" />
-                              </div>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-semibold text-zinc-200 truncate block">
-                            {b.label}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* 3. Forme des bulles */}
-                <div className="space-y-2.5 pt-4 border-t border-zinc-900">
-                  <label className="text-zinc-400 font-mono uppercase text-[11px] flex items-center justify-between">
-                    <span>Forme & Arrondi des bulles</span>
-                    <span className="text-zinc-500 font-normal lowercase">
-                      {MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.label || messageBubbleShape}
-                    </span>
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                    {(Object.keys(MESSAGE_BUBBLE_SHAPES) as MessageBubbleShape[]).map((shapeKey) => {
-                      const s = MESSAGE_BUBBLE_SHAPES[shapeKey];
-                      const isSelected = messageBubbleShape === shapeKey;
-                      return (
-                        <button
-                          key={shapeKey}
-                          type="button"
-                          onClick={() => setMessageBubbleShape(shapeKey)}
-                          className={`p-3 rounded-2xl border text-center transition-all flex flex-col items-center gap-2 ${
-                            isSelected
-                              ? 'border-white bg-zinc-900 ring-1 ring-white/30 text-white'
-                              : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700 hover:text-white'
-                          }`}
-                        >
-                          <div
-                            className={`w-12 h-6 border border-zinc-600 bg-zinc-800 ${s.meRadius} flex items-center justify-center`}
-                          >
-                            <div className="w-4 h-1 bg-zinc-400 rounded-full" />
-                          </div>
-                          <span className="text-[11px] font-semibold">{s.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              {/* Live Preview (5 cols) */}
-              <div className="lg:col-span-5 rounded-3xl border border-zinc-800 p-4 bg-zinc-900/60 flex flex-col gap-3 sticky top-24">
-                <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
-                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                    <MessageSquare className="w-3.5 h-3.5 text-zinc-400" />
-                    Aperçu de la conversation
-                  </span>
-                  <span className="text-[10px] text-zinc-400 font-mono">Temps réel</span>
-                </div>
-
-                {/* Cadre de simulation de discussion */}
-                <div
-                  className={`rounded-2xl border border-zinc-800 p-4 space-y-3 min-h-[220px] flex flex-col justify-end transition-all shadow-inner overflow-hidden ${
-                    CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.previewBg || 'bg-black'
-                  }`}
-                  style={
-                    CHAT_BACKGROUND_THEMES[chatBackgroundTheme]?.style
-                      ? { background: CHAT_BACKGROUND_THEMES[chatBackgroundTheme].style }
-                      : undefined
-                  }
-                >
-                  {/* Message reçu */}
-                  <div className="flex items-end gap-2 max-w-[85%]">
-                    <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
-                      V
-                    </div>
-                    <div className={`p-3 bg-zinc-900/90 border border-zinc-800 text-zinc-100 text-xs shadow-sm ${MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.partnerRadius || 'rounded-2xl'}`}>
-                      <p className="leading-relaxed">Salut ! Tu as vu le nouveau design des messages Vibe ? ✨</p>
-                      <span className="text-[9px] text-zinc-500 font-mono mt-1 block">14:30</span>
-                    </div>
-                  </div>
-
-                  {/* Message envoyé */}
-                  <div className="flex items-end justify-end gap-2 self-end max-w-[85%]">
-                    <div
-                      className={`p-3 text-xs shadow-md transition-all ${
-                        MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.textColor === 'dark' ? 'vibe-msg-text-dark' : 'vibe-msg-text-light'
-                      } ${MESSAGE_BUBBLE_SHAPES[messageBubbleShape]?.meRadius || 'rounded-2xl'}`}
-                      style={{
-                        background: MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.gradient,
-                        border: MESSAGE_BUBBLE_THEMES[messageBubbleTheme]?.border,
-                      }}
-                    >
-                      <p className="leading-relaxed font-medium">Oui, c'est super fluide et personnalisable ! 🚀</p>
-                      <div className="flex items-center justify-end gap-1 mt-1 opacity-75">
-                        <span className="text-[9px] font-mono">14:31</span>
-                        <CheckCheck className="w-3 h-3" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <p className="text-[10px] text-zinc-400 text-center">
-                  Ces réglages s'appliquent immédiatement à toutes vos discussions privées.
-                </p>
-              </div>
-            </div>
-          </div>
+          {/* Row 2: Personnalisation des discussions & messages (composant dedie) */}
+          <ChatAppearanceSection />
 
           {/* Row 3: Fils d'actualité & Modération (Grid 2 cols sur desktop, 1 col sur mobile) */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -918,6 +842,37 @@ export const SettingsPage: React.FC = () => {
                   </select>
                 </div>
 
+                <div className="flex items-center justify-between gap-3 pt-2 border-t border-zinc-900">
+                  <div>
+                    <span className="font-semibold text-white">Traduction automatique des messages</span>
+                    <p className="text-zinc-500 text-[11px]">
+                      Traduit automatiquement les messages privés reçus dans la langue choisie.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={dmAutoTranslate}
+                    onChange={(e) => setDmAutoTranslate(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer shrink-0"
+                  />
+                </div>
+                {dmAutoTranslate && (
+                  <div className="space-y-1.5">
+                    <label className="text-zinc-400 font-mono uppercase text-[11px]">Langue de la traduction automatique</label>
+                    <select
+                      value={dmTranslateLang}
+                      onChange={(e) => setDmTranslateLang(e.target.value)}
+                      className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-white focus:outline-none focus:border-zinc-500"
+                    >
+                      {TRANSLATION_LANGUAGES.map((l) => (
+                        <option key={l.code} value={l.code}>
+                          {l.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div className="space-y-1.5 pt-2 border-t border-zinc-900">
                   <label className="text-zinc-400 font-mono uppercase text-[11px]">Qui peut vous mentionner (@pseudo)</label>
                   <select
@@ -930,6 +885,39 @@ export const SettingsPage: React.FC = () => {
                     <option value="nobody">Personne</option>
                   </select>
                 </div>
+
+                {/* Co-auteurs : auto-acceptation des co-signatures (sans invitation) */}
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+                  <div>
+                    <span className="font-semibold text-white">Co-auteurs sans invitation</span>
+                    <p className="text-zinc-500 text-[11px]">
+                      Quand quelqu'un vous désigne co-auteur d'une publication, la co-signature est acceptée automatiquement (simple notification, aucune validation).
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={collabAutoAccept}
+                    onChange={(e) => setCollabAutoAccept(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer"
+                  />
+                </div>
+
+                {canHideVerifiedBadge && (
+                  <div className="flex items-center justify-between pt-2 border-t border-zinc-900">
+                    <div>
+                      <span className="font-semibold text-white">Masquer la coche bleue</span>
+                      <p className="text-zinc-500 text-[11px]">
+                        Retire le badge vérifié de votre profil public, même avec un abonnement Plus, Pro ou Max.
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={hideVerifiedBadge}
+                      onChange={(e) => setHideVerifiedBadge(e.target.checked)}
+                      className="w-4 h-4 accent-white cursor-pointer"
+                    />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -968,6 +956,85 @@ export const SettingsPage: React.FC = () => {
                 </div>
 
                 <DevicePermissionHint />
+
+                <InstallAppHint />
+
+                {/* Section Retour Haptique & Vibrations Tactiles */}
+                <div className="pt-3 border-t border-zinc-900 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-1.5 font-semibold text-white">
+                        <Smartphone className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>Animations & effets visuels</span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-0.5">
+                        Burst de likes, particules, spring navigation, transitions. Coupé auto si « Réduire les animations » OS.
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={animationsEnabled}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setAnimationsEnabledState(val);
+                        setAnimationsEnabled(val);
+                      }}
+                      className="w-4 h-4 accent-white cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-1.5 font-semibold text-white">
+                        <Smartphone className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>Vibrations & retour haptique mobile</span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-0.5">
+                        {hapticsSupported
+                          ? 'Sensations tactiles lors des likes (battement de cœur), publications, signets et navigation'
+                          : 'Retour haptique non disponible sur cet appareil.'}
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={hapticsEnabled}
+                      disabled={!hapticsSupported}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setHapticsEnabled(val);
+                        haptics.setEnabled(val);
+                        if (val) haptics.like();
+                      }}
+                      className="w-4 h-4 accent-white cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  {hapticsEnabled && hapticsSupported && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => haptics.like()}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-rose-500 dark:text-rose-400 text-xs font-medium transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        ❤️ Tester le Like (Heartbeat)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => haptics.selection()}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-sky-500 dark:text-sky-400 text-xs font-medium transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        📳 Tester la Sélection
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => haptics.success()}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-emerald-600 dark:text-emerald-400 text-xs font-medium transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        🚀 Tester le Succès
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -1242,7 +1309,7 @@ export const SettingsPage: React.FC = () => {
 
                             {isAlreadyMember ? (
                               <span className="shrink-0 px-2.5 py-1 rounded-full bg-zinc-800/80 border border-zinc-700/60 text-[11px] text-zinc-300 font-medium flex items-center gap-1">
-                                <Check className="w-3 h-3 text-emerald-400" />
+                                <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                                 <span>Déjà dans le cercle</span>
                               </span>
                             ) : (
@@ -1318,7 +1385,7 @@ export const SettingsPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleRemoveFromCircle(m.username)}
-                          className="px-2.5 py-1 rounded-full border border-zinc-800 text-zinc-400 hover:text-red-400 hover:border-red-900/50 hover:bg-red-950/20 text-xs transition-colors shrink-0 flex items-center gap-1"
+                          className="px-2.5 py-1 rounded-full border border-zinc-800 text-zinc-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-900/50 hover:bg-red-950/20 text-xs transition-colors shrink-0 flex items-center gap-1"
                           title={`Retirer @${m.username} du cercle privé`}
                         >
                           <X className="w-3 h-3" />
@@ -1368,6 +1435,48 @@ export const SettingsPage: React.FC = () => {
                     checked={postsAIGeneratedByDefault}
                     onChange={(e) => setPostsAIGeneratedByDefault(e.target.checked)}
                     className="w-4 h-4 accent-white cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+              </div>
+
+              {/* mAI — personnalisation du contexte (opt-in) */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-900">
+                <p className="text-zinc-200 font-bold text-xs flex items-center gap-1.5">
+                  <Cpu className="w-3 h-3 text-zinc-400" /> mAI — Personnalisation du contexte
+                </p>
+                <p className="text-zinc-500 text-[11px]">
+                  Autorisez mAI à connaître vos contenus pour des réponses plus personnalisées.
+                </p>
+                <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                  <span className="text-xs text-zinc-300">Mes publications</span>
+                  <input
+                    type="checkbox"
+                    checked={maiContextPosts}
+                    onChange={(e) => setMaiContextPosts(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer shrink-0"
+                  />
+                </div>
+                <div className="p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-zinc-300">Mes messages privés</span>
+                    <input
+                      type="checkbox"
+                      checked={maiContextDms}
+                      onChange={(e) => setMaiContextDms(e.target.checked)}
+                      className="w-4 h-4 accent-white cursor-pointer shrink-0"
+                    />
+                  </div>
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400/90">
+                    ⚠️ Confidentiel : seuls des extraits tronqués sont transmis à mAI, jamais cités verbatim.
+                  </p>
+                </div>
+                <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                  <span className="text-xs text-zinc-300">Mes Vibe Books</span>
+                  <input
+                    type="checkbox"
+                    checked={maiContextBooks}
+                    onChange={(e) => setMaiContextBooks(e.target.checked)}
+                    className="w-4 h-4 accent-white cursor-pointer shrink-0"
                   />
                 </div>
               </div>
@@ -1426,6 +1535,73 @@ export const SettingsPage: React.FC = () => {
                   )}
                 </div>
               </div>
+
+              {/* Outils mAI disponibles (catalogue lib/tools/index.json) */}
+              <div className="space-y-2.5 pt-3 border-t border-zinc-900">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-zinc-200 font-bold text-xs flex items-center gap-1.5">
+                    <Wrench className="w-3 h-3 text-zinc-400" /> Outils disponibles pour mAI
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setMaiEnabledTools((prev) =>
+                        prev.length === maiCatalog.length ? [] : maiCatalog.map((t) => t.id)
+                      )
+                    }
+                    className="text-[10px] font-bold text-zinc-400 hover:text-white underline underline-offset-2"
+                  >
+                    {maiEnabledTools.length === maiCatalog.length ? 'Tout désélectionner' : 'Tout sélectionner'}
+                  </button>
+                </div>
+                <p className="text-zinc-500 text-[11px]">
+                  Choisissez les outils que mAI peut utiliser en votre nom. Les outils sensibles restent soumis à l'approbation ci-dessus.
+                </p>
+                {!maiToolsLoaded ? (
+                  <div className="flex items-center gap-2 text-zinc-500 py-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Chargement du catalogue…</span>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {maiCatalog.map((tool) => {
+                      const checked = maiEnabledTools.includes(tool.id);
+                      return (
+                        <label
+                          key={tool.id}
+                          className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition-colors ${
+                            checked ? 'bg-zinc-900 border-zinc-600' : 'bg-zinc-900/40 border-zinc-800 hover:border-zinc-700'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              setMaiEnabledTools((prev) =>
+                                prev.includes(tool.id) ? prev.filter((id) => id !== tool.id) : [...prev, tool.id]
+                              )
+                            }
+                            className="w-4 h-4 accent-white cursor-pointer mt-0.5 shrink-0"
+                          />
+                          <span className="min-w-0">
+                            <span className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">{tool.name}</span>
+                              {tool.sensitive && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-bold">sensible</span>
+                              )}
+                            </span>
+                            <span className="block text-[10px] text-zinc-500 font-mono">{tool.slash_command}</span>
+                            <span className="block text-[11px] text-zinc-400 line-clamp-2">{tool.description}</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-zinc-600 text-[10px]">
+                  {maiEnabledTools.length}/{maiCatalog.length} outils activés
+                </p>
+              </div>
             </div>
           </div>
 
@@ -1440,6 +1616,37 @@ export const SettingsPage: React.FC = () => {
             </button>
           </div>
         </form>
+
+        {/* Section Aide & Tutoriel — rejoue l'intro ou la visite guidée */}
+        <div data-tour="settings-tutorial" className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
+          <div className="flex items-center gap-2 text-white font-bold text-sm">
+            <GraduationCap className="w-4 h-4 text-white" />
+            <span>Aide & Tutoriel</span>
+          </div>
+
+          <p className="text-xs text-zinc-400">
+            Revoyez la visite guidée des pages (Accueil, Explorer, Profil, Statistiques…) ou l'intro de départ en 3 étapes (intérêts, comptes, premier post).
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => startFullTour(navigate)}
+              className="py-2.5 px-5 rounded-2xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-all flex items-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Refaire le tutoriel</span>
+            </button>
+            <button
+              type="button"
+              onClick={restartOnboarding}
+              className="py-2.5 px-5 rounded-2xl bg-zinc-900 border border-zinc-800 text-zinc-200 hover:text-white hover:bg-zinc-800 text-xs font-semibold transition-all flex items-center gap-2"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Revoir l'intro (3 étapes)</span>
+            </button>
+          </div>
+        </div>
 
         {/* Section Données & Compte */}
         <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 space-y-4">
@@ -1460,6 +1667,24 @@ export const SettingsPage: React.FC = () => {
             <Download className="w-4 h-4" />
             <span>{isExporting ? 'Exportation...' : 'Télécharger mes données (JSON)'}</span>
           </button>
+        </div>
+
+        {/* Footer légal & version — sync package.json */}
+        {/* APP_VERSION: 0.9.0 (sync package.json) */}
+        <div className="p-5 sm:p-6 rounded-3xl bg-zinc-950 border border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-center">
+          <div className="text-[11px] text-zinc-500">
+            <p className="font-mono">Vibe v0.9.0</p>
+            <p>© 2026 mAI Devs — Tous droits réservés</p>
+          </div>
+          <a
+            href="https://mai-devs.vercel.app"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="py-2.5 px-5 rounded-2xl bg-zinc-900 border border-zinc-700 text-xs font-semibold text-zinc-200 hover:text-white hover:bg-zinc-800 transition-all flex items-center gap-2"
+          >
+            <FileText className="w-4 h-4" />
+            Conditions d'utilisation (CGU)
+          </a>
         </div>
       </div>
     </div>

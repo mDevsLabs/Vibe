@@ -6,7 +6,7 @@
  * ============================================================================
  */
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { ApiService } from '../services/api';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -199,6 +199,19 @@ export const MESSAGE_BUBBLE_SHAPES: Record<MessageBubbleShape, { label: string; 
   },
 };
 
+/** Plage horaire de bascule automatique du thème (format "HH:MM"). */
+export interface ScheduledTheme {
+  enabled: boolean;
+  darkStart: string;
+  darkEnd: string;
+}
+
+export const DEFAULT_SCHEDULED_THEME: ScheduledTheme = {
+  enabled: false,
+  darkStart: '22:00',
+  darkEnd: '07:00',
+};
+
 interface ThemeContextType {
   theme: ThemeMode;
   resolvedTheme: ResolvedTheme;
@@ -213,6 +226,8 @@ interface ThemeContextType {
   setChatBackgroundTheme: (bg: ChatBackgroundTheme) => void;
   messageBubbleShape: MessageBubbleShape;
   setMessageBubbleShape: (s: MessageBubbleShape) => void;
+  scheduledTheme: ScheduledTheme;
+  setScheduledTheme: (s: ScheduledTheme) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
@@ -223,6 +238,33 @@ const FONT_KEY = 'vibe_font_size';
 const MSG_BUBBLE_KEY = 'vibe_message_bubble_theme';
 const CHAT_BG_KEY = 'vibe_chat_bg_theme';
 const MSG_SHAPE_KEY = 'vibe_message_bubble_shape';
+const SCHED_KEY = 'vibe_scheduled_theme';
+
+const parseScheduledTheme = (raw: string | null): ScheduledTheme => {
+  if (!raw) return { ...DEFAULT_SCHEDULED_THEME };
+  try {
+    const parsed = JSON.parse(raw);
+    const hhmm = (v: unknown, fallback: string) =>
+      typeof v === 'string' && /^\d{2}:\d{2}$/.test(v) ? v : fallback;
+    return {
+      enabled: Boolean(parsed.enabled),
+      darkStart: hhmm(parsed.darkStart, DEFAULT_SCHEDULED_THEME.darkStart),
+      darkEnd: hhmm(parsed.darkEnd, DEFAULT_SCHEDULED_THEME.darkEnd),
+    };
+  } catch {
+    return { ...DEFAULT_SCHEDULED_THEME };
+  }
+};
+
+/** true si l'heure courante (HH:MM) tombe dans la plage sombre (gère le chevauchement minuit). */
+export const isDarkScheduledNow = (sched: ScheduledTheme, now = new Date()): boolean => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const cur = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  if (sched.darkStart <= sched.darkEnd) {
+    return cur >= sched.darkStart && cur < sched.darkEnd;
+  }
+  return cur >= sched.darkStart || cur < sched.darkEnd;
+};
 
 /** Couleurs d'accent disponibles (hex clairs, lisibles avec du texte noir). */
 export const ACCENT_COLORS: Record<AccentColor, { label: string; hex: string }> = {
@@ -280,6 +322,13 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
     return false;
+  });
+
+  const [scheduledTheme, setScheduledThemeState] = useState<ScheduledTheme>(() => {
+    if (typeof window !== 'undefined') {
+      return parseScheduledTheme(localStorage.getItem(SCHED_KEY));
+    }
+    return { ...DEFAULT_SCHEDULED_THEME };
   });
 
   // Listen to OS system theme changes
@@ -361,6 +410,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setFontState(s.font_size as FontSize);
           localStorage.setItem(FONT_KEY, s.font_size);
         }
+        if (s.scheduled_theme) {
+          const parsed = parseScheduledTheme(typeof s.scheduled_theme === 'string' ? s.scheduled_theme : JSON.stringify(s.scheduled_theme));
+          setScheduledThemeState(parsed);
+          if (typeof window !== 'undefined') localStorage.setItem(SCHED_KEY, JSON.stringify(parsed));
+        }
         if (s.theme_preference && ['light', 'dark', 'system'].includes(s.theme_preference)) {
           const local = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
           if (local && ['light', 'dark', 'system'].includes(local)) {
@@ -384,6 +438,45 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     ApiService.updateSettings({ theme_preference: newTheme }).catch(() => {});
   };
+
+  const setScheduledTheme = (sched: ScheduledTheme) => {
+    setScheduledThemeState(sched);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(SCHED_KEY, JSON.stringify(sched));
+    }
+    ApiService.updateSettings({ scheduled_theme: JSON.stringify(sched) } as any).catch(() => {});
+  };
+
+  // Bascule automatique (toutes les 60 s) : seulement si programmé ET theme fixé
+  // manuellement — le mode 'system' garde la priorité OS (spec stricte).
+  const themeRef = useRef(theme);
+  useEffect(() => {
+    themeRef.current = theme;
+  }, [theme ]);
+  const schedRef = useRef(scheduledTheme);
+  useEffect(() => {
+    schedRef.current = scheduledTheme;
+  }, [scheduledTheme]);
+  useEffect(() => {
+    const tick = () => {
+      const sched = schedRef.current;
+      if (!sched.enabled || themeRef.current === 'system') return;
+      const wantDark = isDarkScheduledNow(sched);
+      const current = themeRef.current;
+      if (wantDark && current !== 'dark') {
+        setThemeState('dark');
+        if (typeof window !== 'undefined') localStorage.setItem(STORAGE_KEY, 'dark');
+        ApiService.updateSettings({ theme_preference: 'dark' }).catch(() => {});
+      } else if (!wantDark && current !== 'light') {
+        setThemeState('light');
+        if (typeof window !== 'undefined') localStorage.setItem(STORAGE_KEY, 'light');
+        ApiService.updateSettings({ theme_preference: 'light' }).catch(() => {});
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 60_000);
+    return () => clearInterval(interval);
+  }, []);
 
   const setAccentColor = (c: AccentColor) => {
     setAccentState(c);
@@ -441,6 +534,8 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setChatBackgroundTheme,
         messageBubbleShape,
         setMessageBubbleShape,
+        scheduledTheme,
+        setScheduledTheme,
       }}
     >
       {children}

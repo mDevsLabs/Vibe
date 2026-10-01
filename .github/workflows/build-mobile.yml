@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint source
+        run: npm run lint
+
       - name: Build web app
         run: npm run build
         env:
@@ -38,7 +41,7 @@ jobs:
       - name: Add Capacitor platforms
         run: |
           npm i -D @capacitor/cli
-          npm i @capacitor/core @capacitor/android
+          npm i @capacitor/core @capacitor/android @capacitor/haptics
           if [ ! -d "android" ]; then
             npx cap add android || true
           fi
@@ -112,6 +115,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint source
+        run: npm run lint
+
       - name: Build web app
         run: npm run build
         env:
@@ -120,7 +126,7 @@ jobs:
       - name: Add Capacitor iOS platform
         run: |
           npm i -D @capacitor/cli
-          npm i @capacitor/core @capacitor/ios
+          npm i @capacitor/core @capacitor/ios @capacitor/haptics
           if [ ! -d "ios" ]; then
             npx cap add ios || true
           fi

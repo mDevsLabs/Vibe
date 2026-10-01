@@ -12,20 +12,32 @@ import {
   Sparkles,
   Zap,
   Image as ImageIcon,
-  CheckCircle2,
   Mic,
   MicOff,
   FileText,
   Search,
   Loader2,
+  RefreshCw,
+  ChevronDown,
+  SquarePen,
+  MessagesSquare,
 } from 'lucide-react';
 import { ApiService } from '../../services/api';
+import { motion } from 'framer-motion';
+import { useMotionPrefs } from '../../hooks/useMotionPrefs';
 import { useAuth } from '../../context/AuthContext';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ToolAutocomplete } from './ToolAutocomplete';
-import { AVAILABLE_MAI_TOOLS, MAITool } from '../../data/maiTools';
+import { type MAITool } from '../../data/maiTools';
+import { useAvailableMAITools } from '../../hooks/useAvailableMAITools';
 import { ModelDropdown, AIModel } from '../common/ModelDropdown';
+import { makeExcerpt } from '../common/richTextUtils';
+import { ShareToDMModal } from '../common/ShareToDMModal';
+import { MaiToolChips } from '../mai/MaiToolChips';
+import { haptics } from '../../services/haptics';
+import { NotificationService } from '../../services/notificationService';
 import type { Post } from '../../types/vibe';
+import type { MaiToolCall, MAIConversationSummary } from '../../types/vibe';
 
 interface MAIDrawerProps {
   isOpen: boolean;
@@ -44,9 +56,13 @@ interface AttachedPostInfo {
 
 interface MessageItem {
   id: string;
+  /** Id serveur du message persisté (mai_messages.id). */
+  serverId?: string;
   sender: 'user' | 'assistant';
   content: string;
   toolResult?: any;
+  /** Outils utilisés par l'IA (chips persistantes). */
+  toolCalls?: MaiToolCall[];
   attachment?: AttachedPostInfo;
   timestamp: string;
 }
@@ -73,11 +89,18 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   onClearAttachedPost,
 }) => {
   const { user, quotas, refreshQuotas } = useAuth();
+  const { animationsEnabled } = useMotionPrefs();
+  const availableTools = useAvailableMAITools();
   const [selectedModel, setSelectedModel] = useState<string>('poolside/laguna-xs-2.1:free');
   const [availableModels, setAvailableModels] = useState<AIModel[]>(DEFAULT_MODELS);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Approbation d'outil sensible (même flux que mAI Studio)
+  const [pendingTool, setPendingTool] = useState<{ name: string; args: any } | null>(null);
+  const [isApproving, setIsApproving] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [shareMessageText, setShareMessageText] = useState<string | null>(null);
   // Publication mentionnée jointe à la conversation
   const [attachedPost, setAttachedPost] = useState<AttachedPostInfo | null>(null);
   // Sélecteur de posts (« Mentionner un post »)
@@ -85,6 +108,88 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   const [postPickerQuery, setPostPickerQuery] = useState('');
   const [postPickerResults, setPostPickerResults] = useState<Post[]>([]);
   const [postPickerLoading, setPostPickerLoading] = useState(false);
+  // Multi-conversations : sélecteur compact (titre actif + menu des dernières)
+  const [conversations, setConversations] = useState<MAIConversationSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [convMenuOpen, setConvMenuOpen] = useState(false);
+
+  const refreshDrawerConversations = () => {
+    ApiService.getMAIConversations()
+      .then((res) => setConversations(res.conversations || []))
+      .catch(() => {});
+  };
+
+  /** Charge une conversation du sélecteur (messages + outils persistés). */
+  const loadDrawerHistory = async (conversationId?: string | null) => {
+    try {
+      const res = await ApiService.getMAIHistory(conversationId || undefined);
+      setActiveConversationId(res.conversation_id || null);
+      setMessages(
+        (res.messages || []).map((m) => ({
+          id: m.id,
+          serverId: m.id,
+          sender: (m.role === 'assistant' ? 'assistant' : 'user') as MessageItem['sender'],
+          content: m.content,
+          toolCalls: Array.isArray(m.tool_calls) ? m.tool_calls : [],
+          timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }))
+      );
+      setPendingTool(null);
+    } catch {}
+  };
+
+  const handleSelectDrawerConversation = (conversationId: string) => {
+    setConvMenuOpen(false);
+    setPendingTool(null);
+    setActiveConversationId(conversationId);
+    loadDrawerHistory(conversationId);
+  };
+
+  const handleNewDrawerConversation = async () => {
+    setConvMenuOpen(false);
+    try {
+      const res = await ApiService.newMAIConversation();
+      if (res?.conversation_id) setActiveConversationId(res.conversation_id);
+      setMessages([]);
+      setPendingTool(null);
+      refreshDrawerConversations();
+      inputRef.current?.focus();
+    } catch {}
+  };
+
+  /** Regénère la dernière réponse mAI (remplace la bulle, contexte du post joint conservé). */
+  const handleRegenerate = async () => {
+    if (isRegenerating || isLoading) return;
+    setIsRegenerating(true);
+    try {
+      const res = await ApiService.regenerateMAI({
+        model: selectedModel,
+        postId: attachedPost?.id,
+        conversationId: activeConversationId || undefined,
+      });
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].sender === 'assistant') {
+            next[i] = { ...next[i], content: res.reply, toolResult: null, toolCalls: [] };
+            break;
+          }
+        }
+        return next;
+      });
+      haptics.success();
+      refreshQuotas();
+    } catch (err: any) {
+      haptics.error();
+      NotificationService.showInAppToast(
+        'Régénération',
+        err?.message || 'La régénération de la réponse a échoué.',
+        'error'
+      );
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
 
   useEffect(() => {
     const loadModels = async () => {
@@ -124,24 +229,29 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
   };
 
   // Historique persisté : chargé à la première ouverture du panneau
+  // (le drapeau n'est posé qu'en cas de succès pour permettre un nouvel essai)
   const historyLoadedRef = useRef(false);
   useEffect(() => {
     if (!isOpen || historyLoadedRef.current) return;
-    historyLoadedRef.current = true;
     ApiService.getMAIHistory()
       .then((res) => {
+        historyLoadedRef.current = true;
+        setActiveConversationId(res.conversation_id || null);
         if (res.messages && res.messages.length > 0) {
           setMessages(
             res.messages.map((m) => ({
               id: m.id,
+              serverId: m.id,
               sender: (m.role === 'assistant' ? 'assistant' : 'user') as MessageItem['sender'],
               content: m.content,
+              toolCalls: Array.isArray(m.tool_calls) ? m.tool_calls : [],
               timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             }))
           );
         }
       })
       .catch(() => {});
+    refreshDrawerConversations();
   }, [isOpen]);
 
   // Post pré-attaché depuis l'extérieur (bouton « Mentionner dans mAI »)
@@ -155,7 +265,7 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
         setAttachedPost({
           id: data.post.id,
           username: data.post.username || 'utilisateur',
-          excerpt: (data.post.content || '').slice(0, 90),
+          excerpt: makeExcerpt(data.post.content, 90),
         });
       })
       .catch(() => {});
@@ -281,17 +391,50 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
         textToSend,
         undefined,
         selectedModel,
-        currentAttachment ? { post_id: currentAttachment.id } : undefined
+        currentAttachment ? { post_id: currentAttachment.id } : undefined,
+        activeConversationId || undefined
       );
+      // Outils utilisés (persistés côté serveur) — repli local pour les anciens formats
+      const toolCalls: MaiToolCall[] = response.toolCalls?.length
+        ? response.toolCalls
+        : response.toolExecuted
+        ? [{
+            id: `local-${Date.now()}`,
+            name: response.toolExecuted.name,
+            args: {},
+            status: response.toolExecuted.result?.success === false ? 'error' : 'executed',
+            result: response.toolExecuted.result,
+            at: new Date().toISOString(),
+          }]
+        : response.requiresApproval && response.pendingTool
+        ? [{
+            id: `local-${Date.now()}`,
+            name: response.pendingTool.name,
+            args: response.pendingTool.args,
+            status: 'pending_approval',
+            at: new Date().toISOString(),
+          }]
+        : [];
       const assistantMsg: MessageItem = {
         id: generateMessageId(),
+        serverId: response.assistant_message_id || undefined,
         sender: 'assistant',
         content: response.reply,
         toolResult: response.toolExecuted,
+        toolCalls,
         timestamp: formatCurrentTime(),
       };
       setMessages((prev) => [...prev, assistantMsg]);
+      if (response.conversation_id && response.conversation_id !== activeConversationId) {
+        setActiveConversationId(response.conversation_id);
+      }
+      refreshDrawerConversations();
       refreshQuotas();
+
+      // Outil sensible : le serveur demande une approbation explicite
+      if (response.requiresApproval && response.pendingTool) {
+        setPendingTool(response.pendingTool);
+      }
 
       if (response.toolExecuted?.name === 'create_post' && onPostCreated) {
         onPostCreated();
@@ -309,11 +452,70 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
     }
   };
 
+  /** Exécution (ou refus) de l'outil sensible en attente d'approbation. */
+  const handleApproveTool = async (approved: boolean) => {
+    if (!pendingTool || isApproving) return;
+    setIsApproving(true);
+    const tool = pendingTool;
+    setPendingTool(null);
+
+    const pushAssistant = (content: string, toolResult?: any, toolCalls?: MaiToolCall[]) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: generateMessageId(),
+          sender: 'assistant',
+          content,
+          toolResult,
+          toolCalls,
+          timestamp: formatCurrentTime(),
+        },
+      ]);
+    };
+
+    if (!approved) {
+      // Refus persisté côté serveur (flux d'approbation conservé dans l'historique)
+      try {
+        const res = await ApiService.refuseMAITool(tool.name, tool.args, activeConversationId || undefined);
+        pushAssistant(res.reply, undefined, res.toolCalls);
+      } catch {
+        pushAssistant(`🚫 Très bien, je n'exécute pas l'outil « ${tool.name} ». Dites-moi si je peux faire autre chose pour vous.`);
+      }
+      setIsApproving(false);
+      return;
+    }
+
+    try {
+      const res = await ApiService.executeMAITool(tool.name, tool.args, selectedModel, true, activeConversationId || undefined);
+      pushAssistant(res.reply, res.toolExecuted, res.toolCalls);
+      refreshQuotas();
+      if (res.toolExecuted?.name === 'create_post' && onPostCreated) {
+        onPostCreated();
+      }
+    } catch (err: any) {
+      pushAssistant(`⚠️ Erreur lors de l'exécution de « ${tool.name} » : ${err.message || 'réessayez plus tard.'}`);
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-fadeIn select-none">
-      <div className="w-full max-w-md h-full bg-zinc-950 border-l border-zinc-800 flex flex-col shadow-2xl animate-slideLeft">
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-fadeIn select-none" onClick={onClose}>
+      <motion.div
+        initial={animationsEnabled ? { x: 60, opacity: 0 } : false}
+        animate={{ x: 0, opacity: 1 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+        drag={animationsEnabled ? 'x' : false}
+        dragConstraints={{ left: 0, right: 0 }}
+        dragElastic={0.18}
+        onDragEnd={(_, info) => {
+          if (info.offset.x > 90 || info.velocity.x > 600) onClose();
+        }}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md h-full bg-zinc-950 border-l border-zinc-800 flex flex-col shadow-2xl animate-slideLeft"
+      >
         {/* Header */}
         <div className="p-3.5 border-b border-zinc-800 flex items-center justify-between bg-black/80">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -322,11 +524,57 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
             </div>
             <div className="min-w-0">
               <div className="font-bold text-xs text-white truncate">Assistant mAI</div>
-              <div className="text-[10px] text-zinc-500 font-mono">Multi-modèles</div>
+              <div className="text-[10px] text-zinc-500 font-mono truncate max-w-[140px]">
+                {conversations.find((c) => c.id === activeConversationId)?.title || 'Multi-modèles'}
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 relative">
+            <button
+              onClick={() => setConvMenuOpen((v) => !v)}
+              title="Changer de discussion mAI"
+              className={`p-1.5 rounded-full transition-colors ${convMenuOpen ? 'text-white bg-zinc-900' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'}`}
+            >
+              <ChevronDown className="w-4 h-4" />
+            </button>
+
+            {convMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setConvMenuOpen(false)} />
+                <div className="absolute right-0 top-full mt-1 w-64 z-50 p-1.5 rounded-2xl vibe-menu shadow-2xl animate-fadeIn max-h-80 overflow-y-auto">
+                  <button
+                    type="button"
+                    onClick={handleNewDrawerConversation}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-[11px] font-bold text-white hover:bg-zinc-800 text-left"
+                  >
+                    <SquarePen className="w-3.5 h-3.5" /> Nouvelle discussion
+                  </button>
+                  {conversations.length > 0 && <div className="border-t border-zinc-800 my-1" />}
+                  {conversations.length === 0 ? (
+                    <p className="px-2.5 py-2 text-[10px] text-zinc-500">Aucune conversation enregistrée.</p>
+                  ) : (
+                    conversations.slice(0, 20).map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => handleSelectDrawerConversation(c.id)}
+                        className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[11px] text-left transition-colors ${
+                          c.id === activeConversationId ? 'bg-zinc-800 text-white font-bold' : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
+                        }`}
+                      >
+                        <MessagesSquare className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                        <span className="truncate flex-1">{c.title}</span>
+                        <span className="text-[9px] text-zinc-500 font-mono shrink-0">
+                          {c.message_count || 0}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+
             <ModelDropdown
               models={availableModels}
               selectedModelId={selectedModel}
@@ -382,7 +630,7 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
               </p>
             </div>
           )}
-          {messages.map((msg) => (
+          {messages.map((msg, msgIdx) => (
             <div
               key={msg.id}
               className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
@@ -408,24 +656,25 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
                   </div>
                 )}
 
-                {/* Tool Execution Visual Card if applicable */}
-                {msg.toolResult && msg.toolResult.result?.result && (
-                  <div className="mt-3 p-2.5 rounded-xl bg-black/60 border border-zinc-700/80 text-xs text-zinc-300 space-y-1.5">
-                    <div className="flex items-center gap-1.5 text-white font-semibold">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-white" />
-                      <span>Action mAI effectuée</span>
-                    </div>
+                {/* Outils utilisés par mAI (chips persistantes, rechargées de l'historique) */}
+                <MaiToolChips
+                  toolCalls={
+                    msg.toolCalls?.length
+                      ? msg.toolCalls
+                      : msg.toolResult?.result?.result
+                      ? [{
+                          id: `legacy-${msg.id}`,
+                          name: msg.toolResult.name || 'outil',
+                          args: {},
+                          status: msg.toolResult.result?.success === false ? 'error' : 'executed',
+                          result: msg.toolResult.result,
+                        }]
+                      : []
+                  }
+                  className="mt-2.5"
+                />
 
-                    {msg.toolResult.result.result.imageUrl && (
-                      <img
-                        src={msg.toolResult.result.result.imageUrl}
-                        alt="Généré"
-                        className="w-full h-36 rounded-lg object-cover mt-2 border border-zinc-800"
-                      />
-                    )}
-                  </div>
-                )}
-                {/* Interactive Actions (Copy / Edit) */}
+                {/* Interactive Actions (Copy / Share / Edit / Regenerate) */}
                 <div className={`flex items-center gap-2 pt-2 mt-2 border-t text-[10px] font-mono ${msg.sender === 'user' ? 'border-zinc-200 text-zinc-600 justify-end' : 'border-zinc-800 text-zinc-400 justify-start'}`}>
                   <button
                     type="button"
@@ -433,6 +682,13 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
                     className="hover:underline flex items-center gap-1"
                   >
                     <span>Copier</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShareMessageText(msg.content)}
+                    className="hover:underline flex items-center gap-1"
+                  >
+                    <span>Partager</span>
                   </button>
                   {msg.sender === 'user' && (
                     <button
@@ -444,6 +700,18 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
                       className="hover:underline flex items-center gap-1"
                     >
                       <span>Modifier</span>
+                    </button>
+                  )}
+                  {msg.sender === 'assistant' && msgIdx === messages.length - 1 && !msg.toolResult && !(msg.toolCalls && msg.toolCalls.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={handleRegenerate}
+                      disabled={isRegenerating || isLoading}
+                      className="hover:underline flex items-center gap-1 disabled:opacity-40"
+                      title="Regénérer la réponse"
+                    >
+                      {isRegenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                      <span>Regénérer</span>
                     </button>
                   )}
                 </div>
@@ -461,9 +729,39 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
           <div ref={messagesEndRef} />
         </div>
 
+        {/* Approbation d'outil sensible (bannière au-dessus du composeur) */}
+        {pendingTool && (
+          <div className="mx-3 mb-2 p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-2">
+            <p className="font-bold text-amber-500 flex items-center gap-1.5">
+              🔐 Approbation requise : {pendingTool.name}
+            </p>
+            <pre className="text-[10px] text-zinc-500 overflow-x-auto max-h-20">
+              {JSON.stringify(pendingTool.args, null, 2)}
+            </pre>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => handleApproveTool(true)}
+                disabled={isApproving}
+                className="flex-1 py-1.5 rounded-xl bg-white text-black text-[11px] font-bold disabled:opacity-40"
+              >
+                {isApproving ? 'Exécution…' : 'Approuver'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleApproveTool(false)}
+                disabled={isApproving}
+                className="flex-1 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 text-[11px] font-bold disabled:opacity-40"
+              >
+                Refuser
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Quick Tools Strip */}
         <div className="px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar border-t border-zinc-800/60 bg-black/40">
-          {AVAILABLE_MAI_TOOLS.slice(0, 5).map((tool) => (
+          {availableTools.slice(0, 5).map((tool) => (
             <button
               key={tool.id}
               onClick={() => handleSendMessage(tool.samplePrompt)}
@@ -547,7 +845,7 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
                         setAttachedPost({
                           id: p.id,
                           username: p.username || 'utilisateur',
-                          excerpt: (p.content || '').slice(0, 90),
+                          excerpt: makeExcerpt(p.content, 90),
                         });
                         setShowPostPicker(false);
                         inputRef.current?.focus();
@@ -633,7 +931,16 @@ export const MAIDrawer: React.FC<MAIDrawerProps> = ({
             </button>
           </form>
         </div>
-      </div>
+      </motion.div>
+
+      {/* Partage d'un message mAI par message Vibe */}
+      {shareMessageText !== null && (
+        <ShareToDMModal
+          isOpen={shareMessageText !== null}
+          onClose={() => setShareMessageText(null)}
+          initialMessage={shareMessageText}
+        />
+      )}
     </div>
   );
 };

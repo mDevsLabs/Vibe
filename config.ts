@@ -11,12 +11,35 @@ export const BCRYPT_ROUNDS = 12;
 // ─────────────────────────────────────────────
 // Rate limiting en mémoire (par clé : ip ou user)
 // ─────────────────────────────────────────────
+
+// Une Map qui ne fait que grossir permet de consommer la mémoire avec des clés
+// arbitraires. On conserve donc une borne dure et on purge les fenêtres
+// expirées à chaque nouvelle tentative.
+export const RATE_LIMIT_MAX_BUCKETS = 10_000;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
+function pruneRateBuckets(now: number): void {
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}
+
+function makeRoomForRateBucket(): void {
+  if (rateBuckets.size < RATE_LIMIT_MAX_BUCKETS) return;
+  const oldestKey = rateBuckets.keys().next().value;
+  if (oldestKey !== undefined) rateBuckets.delete(oldestKey);
+}
+
 export function rateLimit(key: string, limit: number, windowMs: number): boolean {
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(windowMs) || windowMs <= 0) {
+    return false;
+  }
+
   const now = Date.now();
+  pruneRateBuckets(now);
   const bucket = rateBuckets.get(key);
-  if (!bucket || now > bucket.resetAt) {
+  if (!bucket) {
+    makeRoomForRateBucket();
     rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
     return true;
   }
@@ -25,12 +48,277 @@ export function rateLimit(key: string, limit: number, windowMs: number): boolean
   return true;
 }
 
-export function clientIp(c: any): string {
-  return (
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    c.req.header("x-real-ip") ||
-    "unknown"
+// ─────────────────────────────────────────────
+// Runtime / résolution d'adresse IP
+// ─────────────────────────────────────────────
+
+type RuntimeWithEnv = {
+  Deno?: { env?: { get?: (name: string) => string | undefined } };
+  process?: { env?: Record<string, string | undefined> };
+};
+
+/**
+ * Lit une variable dans Deno ou Node sans faire référence directe à un runtime
+ * inexistant. Les backend Deno/Val Town et les tests Node utilisent le même
+ * chemin de code.
+ */
+export function getEnv(name: string): string | undefined {
+  const runtime = globalThis as typeof globalThis & RuntimeWithEnv;
+
+  if (runtime.Deno?.env?.get) {
+    try {
+      const value = runtime.Deno.env.get(name);
+      if (value !== undefined && value !== "") return value;
+    } catch {
+      // Some runtimes expose Deno.env but deny access until permissions are granted.
+    }
+  }
+
+  return runtime.process?.env?.[name];
+}
+
+type ParsedIp = { version: 4 | 6; bytes: Uint8Array; value: string };
+type TrustedProxyRule = { network: ParsedIp; prefix: number };
+
+function ipv4Bytes(value: string): Uint8Array | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  const bytes = new Uint8Array(4);
+  for (let i = 0; i < parts.length; i++) {
+    if (!/^\d{1,3}$/.test(parts[i])) return null;
+    const part = Number(parts[i]);
+    if (part < 0 || part > 255) return null;
+    bytes[i] = part;
+  }
+  return bytes;
+}
+
+function ipv6Bytes(value: string): Uint8Array | null {
+  let input = value.toLowerCase();
+  if (input.includes("%")) input = input.split("%", 1)[0];
+
+  // IPv4Mapped notation (::ffff:192.0.2.1).
+  const lastColon = input.lastIndexOf(":");
+  if (lastColon >= 0 && input.slice(lastColon + 1).includes(".")) {
+    const embedded = ipv4Bytes(input.slice(lastColon + 1));
+    if (!embedded) return null;
+    const high = ((embedded[0] << 8) | embedded[1]).toString(16);
+    const low = ((embedded[2] << 8) | embedded[3]).toString(16);
+    input = `${input.slice(0, lastColon + 1)}${high}:${low}`;
+  }
+
+  const halves = input.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const leftGroups = left.filter(Boolean);
+  const rightGroups = right.filter(Boolean);
+  const allGroups =
+    halves.length === 2
+      ? [...leftGroups, ...Array(Math.max(0, 8 - leftGroups.length - rightGroups.length)).fill("0"), ...rightGroups]
+      : leftGroups;
+  if (allGroups.length !== 8 || allGroups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    const group = Number.parseInt(allGroups[i], 16);
+    bytes[i * 2] = (group >>> 8) & 0xff;
+    bytes[i * 2 + 1] = group & 0xff;
+  }
+  return bytes;
+}
+
+function formatIp(version: 4 | 6, bytes: Uint8Array): string {
+  if (version === 4) return Array.from(bytes).join(".");
+
+  const groups = Array.from({ length: 8 }, (_, index) =>
+    ((bytes[index * 2] << 8) | bytes[index * 2 + 1]).toString(16)
   );
+  let bestStart = -1;
+  let bestLength = 0;
+  let currentStart = -1;
+  let currentLength = 0;
+  for (let index = 0; index <= groups.length; index++) {
+    if (groups[index] === "0") {
+      if (currentStart < 0) currentStart = index;
+      currentLength += 1;
+    } else if (currentStart >= 0) {
+      if (currentLength > bestLength) {
+        bestStart = currentStart;
+        bestLength = currentLength;
+      }
+      currentStart = -1;
+      currentLength = 0;
+    }
+  }
+  if (bestLength < 2) return groups.join(":");
+  const left = groups.slice(0, bestStart).join(":");
+  const right = groups.slice(bestStart + bestLength).join(":");
+  return `${left}::${right}`;
+}
+
+function stripIpPort(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    const closing = trimmed.indexOf("]");
+    if (closing > 0) return trimmed.slice(1, closing);
+  }
+  // Ne retire un port que lorsqu'il s'agit clairement d'une adresse IPv4.
+  if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(trimmed)) {
+    return trimmed.slice(0, trimmed.lastIndexOf(":"));
+  }
+  return trimmed;
+}
+
+function parseIp(value: unknown): ParsedIp | null {
+  if (typeof value !== "string") return null;
+  const stripped = stripIpPort(value);
+  if (!stripped || stripped.length > 128) return null;
+
+  const v4 = ipv4Bytes(stripped);
+  if (v4) {
+    return { bytes: v4, value: formatIp(4, v4), version: 4 };
+  }
+  const v6 = ipv6Bytes(stripped);
+  return v6 ? { bytes: v6, value: formatIp(6, v6), version: 6 } : null;
+}
+
+function parseTrustedProxyRule(value: string): TrustedProxyRule | null {
+  const [address, prefixText] = value.trim().split("/", 2);
+  const network = parseIp(address);
+  if (!network) return null;
+  const maxPrefix = network.version === 4 ? 32 : 128;
+  const prefix = prefixText === undefined ? maxPrefix : Number(prefixText);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) return null;
+  return { network, prefix };
+}
+
+function readTrustedProxyConfig(): { enabled: boolean; allowAny: boolean; rules: TrustedProxyRule[] } {
+  // Les noms multiples permettent de rester compatible avec les
+  // conventions des différents proxys, sans jamais activer la confiance par
+  // défaut. Une valeur booléenne doit être explicite.
+  const values = [
+    getEnv("TRUSTED_PROXY_IPS"),
+    getEnv("TRUSTED_PROXY_CIDRS"),
+    getEnv("TRUSTED_PROXIES"),
+    getEnv("TRUSTED_PROXY"),
+    getEnv("MAI_TRUSTED_PROXY"),
+    getEnv("TRUST_PROXY_IPS"),
+    getEnv("TRUST_PROXY_CIDRS"),
+    getEnv("TRUST_PROXY"),
+    getEnv("MAI_TRUST_PROXY"),
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .flatMap((value) => value.split(/[\s,]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const allowAny = values.some((value) => /^(1|true|yes|on)$/i.test(value));
+  const rules = values
+    .filter((value) => !/^(0|false|no|off)$/i.test(value))
+    .map(parseTrustedProxyRule)
+    .filter((rule): rule is TrustedProxyRule => Boolean(rule));
+
+  return { allowAny, enabled: allowAny || rules.length > 0, rules };
+}
+
+function requestHeader(c: any, name: string): string | undefined {
+  try {
+    return (
+      c?.req?.header?.(name) ??
+      c?.req?.raw?.headers?.get?.(name) ??
+      undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function requestPeerIp(c: any): string | null {
+  const candidates = [
+    c?.remoteAddress,
+    c?.req?.remoteAddress,
+    c?.req?.raw?.remoteAddress,
+    c?.req?.raw?.socket?.remoteAddress,
+    c?.req?.raw?.connection?.remoteAddress,
+    c?.env?.remoteAddress,
+    c?.env?.request?.remoteAddress,
+    c?.req?.raw?.cf?.clientIp,
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseIp(candidate);
+    if (parsed) return parsed.value;
+  }
+  return null;
+}
+
+function ipMatchesRule(ip: ParsedIp, rule: TrustedProxyRule): boolean {
+  if (ip.version !== rule.network.version) return false;
+  const fullBytes = Math.floor(rule.prefix / 8);
+  const remainingBits = rule.prefix % 8;
+  for (let i = 0; i < fullBytes; i++) {
+    if (ip.bytes[i] !== rule.network.bytes[i]) return false;
+  }
+  if (remainingBits === 0) return true;
+  const mask = (0xff << (8 - remainingBits)) & 0xff;
+  return (ip.bytes[fullBytes] & mask) === (rule.network.bytes[fullBytes] & mask);
+}
+
+/**
+ * Résout l'IP cliente sans faire confiance implicitement à X-Forwarded-For.
+ * Les en-têtes de forwarding ne sont acceptés que si l'opérateur a déclaré un
+ * proxy de confiance via TRUSTED_PROXY* / TRUST_PROXY*. En mode CIDR, le pair
+ * direct doit correspondre à la règle ; `TRUST_PROXY=true` est réservé aux
+ * déploiements dont le runtime ne fournit pas l'adresse du pair.
+ */
+export function clientIp(c: any): string {
+  const peer = requestPeerIp(c);
+  const parsedPeer = peer ? parseIp(peer) : null;
+  const proxy = readTrustedProxyConfig();
+  const canTrustForwardedHeaders =
+    proxy.enabled &&
+    (proxy.allowAny ||
+      Boolean(
+        parsedPeer &&
+          proxy.rules.some((rule) => ipMatchesRule(parsedPeer, rule))
+      ));
+
+  if (canTrustForwardedHeaders) {
+    const forwardedCandidates: Array<string | undefined> = [
+      requestHeader(c, "cf-connecting-ip"),
+      requestHeader(c, "x-real-ip"),
+    ];
+    const forwardedFor = requestHeader(c, "x-forwarded-for");
+    if (forwardedFor) {
+      const chain = forwardedFor
+        .split(",")
+        .map((value) => parseIp(value))
+        .filter((value): value is ParsedIp => Boolean(value));
+      if (proxy.allowAny) {
+        forwardedCandidates.push(chain[0]?.value);
+      } else {
+        // Un proxy peut ajouter une valeur spoofée à gauche de la chaîne.
+        // On parcourt donc de droite à gauche et on s'arrête au premier
+        // pair qui n'est pas dans la liste des proxys de confiance.
+        for (let index = chain.length - 1; index >= 0; index--) {
+          const candidate = chain[index];
+          if (!proxy.rules.some((rule) => ipMatchesRule(candidate, rule))) {
+            forwardedCandidates.push(candidate.value);
+            break;
+          }
+        }
+      }
+    }
+
+    for (const candidate of forwardedCandidates) {
+      const parsed = parseIp(candidate);
+      if (parsed) return parsed.value;
+    }
+  }
+
+  return peer || "unknown";
 }
 
 export type Tier = "Free" | "Plus" | "Pro" | "Max";
@@ -184,13 +472,27 @@ export function getTierStorageLimitBytes(tier?: string | null): number {
   return STORAGE_LIMITS_BYTES[normalizeTier(tier)];
 }
 
-let _cachedDb: ReturnType<typeof neon> | null = null;
+export type DbTransaction = {
+  (strings: TemplateStringsArray, ...values: unknown[]): Promise<any>;
+  unsafe: (query: string, values?: unknown[]) => Promise<any>;
+  query: (query: string, values?: unknown[]) => Promise<any>;
+};
+
+export type DbQuery = {
+  (strings: TemplateStringsArray, ...values: unknown[]): Promise<any>;
+  unsafe: (query: string, values?: unknown[]) => Promise<any>;
+  query: (query: string, values?: unknown[]) => Promise<any>;
+  transaction: (
+    queriesOrFn: any[] | ((txn: DbTransaction) => any[]),
+    options?: any
+  ) => Promise<any>;
+};
+
+let _cachedDb: DbQuery | null = null;
 let _lastDbUrl: string | null = null;
 
-export function getDb() {
-  const rawUrl =
-    (typeof (globalThis as any).Deno !== "undefined" ? (globalThis as any).Deno.env?.get("DATABASE_URL") : null) ||
-    (typeof process !== "undefined" ? process.env?.DATABASE_URL : null);
+export function getDb(): DbQuery {
+  const rawUrl = getEnv("DATABASE_URL")?.trim();
   if (!rawUrl) {
     throw new Error("DATABASE_URL not set");
   }
@@ -202,16 +504,22 @@ export function getDb() {
   }
 
   if (!_cachedDb || _lastDbUrl !== url) {
-    _cachedDb = neon(url);
+    _cachedDb = neon(url) as unknown as DbQuery;
     _lastDbUrl = url;
   }
   return _cachedDb;
 }
 
 export function getJwtSecret(): Uint8Array {
-  const secret =
-    (typeof Deno !== "undefined" ? Deno.env.get("MAI_JWT_SECRET") || Deno.env.get("JWT_SECRET") : null) ||
-    "mai_super_secret_jwt_key_2026_default_vibe";
+  const secret = getEnv("MAI_JWT_SECRET")?.trim() || getEnv("JWT_SECRET")?.trim();
+  if (!secret) {
+    // Ne jamais générer un secret de secours : un secret partagé par défaut
+    // permettrait à quiconque de forger des sessions JWT.
+    throw new Error("JWT secret is not configured");
+  }
+  if (secret.length < 32) {
+    throw new Error("JWT secret must contain at least 32 characters");
+  }
   return new TextEncoder().encode(secret);
 }
 
@@ -240,8 +548,8 @@ export async function verifyToken(
     if (sqliteResult && sqliteResult.rows && sqliteResult.rows.length > 0) {
       throw new Error("Token révoqué.");
     }
-  } catch (e: any) {
-    if (e?.message === "Token révoqué.") throw e;
+  } catch (e: unknown) {
+    if (e instanceof Error && e.message === "Token révoqué.") throw e;
   }
 
   // Vérif Postgres token_blacklist avec TTL 14j
@@ -252,47 +560,68 @@ export async function verifyToken(
     if (pgResult && pgResult.length > 0) {
       throw new Error("Token révoqué.");
     }
-  } catch (e: any) {
-    if (e?.message === "Token révoqué.") throw e;
+  } catch (e: unknown) {
+    if (e instanceof Error && e.message === "Token révoqué.") throw e;
   }
 
   const { payload } = await jwtVerify(token, getJwtSecret());
   return payload as Record<string, unknown>;
 }
 
-export async function blacklistToken(token: string) {
+export async function blacklistToken(token: string): Promise<boolean> {
+  const normalizedToken = token?.trim();
+  if (!normalizedToken) return false;
+
   const expiresAt = new Date(
     Date.now() + 14 * 24 * 60 * 60 * 1000
   ).toISOString();
+  let stored = false;
+
   try {
     await sqlite.execute({
-      args: [token],
+      args: [normalizedToken],
       sql: "INSERT OR IGNORE INTO token_blacklist (token) VALUES (?)",
     });
-  } catch {}
+    stored = true;
+  } catch {
+    // PostgreSQL peut être la seule source disponible (ou inversement).
+  }
+
   try {
     const sql = getDb();
-    await sql`INSERT INTO token_blacklist (token, revoked_at, expires_at) VALUES (${token}, NOW(), ${expiresAt}::timestamp) ON CONFLICT (token) DO NOTHING`;
-  } catch {}
+    await sql`INSERT INTO token_blacklist (token, revoked_at, expires_at) VALUES (${normalizedToken}, NOW(), ${expiresAt}::timestamp) ON CONFLICT (token) DO NOTHING`;
+    stored = true;
+  } catch {
+    // Une source peut être indisponible pendant un déploiement ; l'autre
+    // blacklist suffit à révoquer le jeton si elle a bien été écrite.
+  }
+
   // Nettoyage opportuniste des vieux tokens
   try {
     const sql = getDb();
     await sql`DELETE FROM token_blacklist WHERE expires_at < NOW() OR revoked_at < NOW() - INTERVAL '14 days'`;
-  } catch {}
+  } catch {
+    // Le nettoyage PostgreSQL est opportuniste.
+  }
   try {
     await sqlite.execute({
       sql: "DELETE FROM token_blacklist WHERE revoked_at < datetime('now', '-14 days')",
       args: [],
     });
-  } catch {}
+  } catch {
+    // Le nettoyage SQLite est opportuniste.
+  }
+
+  // Ne jamais annoncer une déconnexion réussie si aucune source n'a pu être
+  // écrite : l'appelant peut alors renvoyer une erreur explicite.
+  return stored;
 }
 
 export function extractToken(req: Request): string | null {
-  const auth = req.headers.get("Authorization");
-  if (!auth?.startsWith("Bearer ")) {
-    return null;
-  }
-  return auth.slice(7);
+  const auth = req.headers.get("Authorization") || req.headers.get("authorization");
+  const match = auth?.match(/^Bearer\s+(.+)$/i);
+  const token = match?.[1]?.trim();
+  return token || null;
 }
 
 export function parseUserAgent(ua: string) {

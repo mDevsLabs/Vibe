@@ -12,6 +12,7 @@ import { PostCard } from '../components/feed/PostCard';
 import { CommentSection } from '../components/comments/CommentSection';
 import { ApiService } from '../services/api';
 import { useAudioPlayer } from '../context/AudioPlayerContext';
+import { htmlToPlainText } from '../components/common/RichContent';
 
 interface PostDetailPageProps {
   postId: string;
@@ -35,12 +36,13 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
     if (!post || isQueueingThread) return;
     setIsQueueingThread(true);
     try {
-      const snippet = (post.content || '').trim().slice(0, 48);
+      const plain = htmlToPlainText(post.content || '').trim();
+      const snippet = plain.slice(0, 48);
       const segments: Array<{ id: string; title: string; text: string }> = [
         {
           id: `post-${post.id}`,
-          title: `@${post.username}${snippet ? ` — ${snippet}${(post.content || '').length > 48 ? '…' : ''}` : ''}`,
-          text: post.content || '',
+          title: `@${post.username}${snippet ? ` — ${snippet}${plain.length > 48 ? '…' : ''}` : ''}`,
+          text: plain,
         },
       ];
       try {
@@ -49,7 +51,7 @@ export const PostDetailPage: React.FC<PostDetailPageProps> = ({
           segments.push({
             id: `comment-${c.id}`,
             title: `Réponse de @${c.username}`,
-            text: c.content || '',
+            text: htmlToPlainText(c.content || ''),
           });
         }
       } catch {}

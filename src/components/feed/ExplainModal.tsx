@@ -29,6 +29,8 @@ export const ExplainModal: React.FC<ExplainModalProps> = ({
     semanticScore: 82,
     graphProximityScore: 50,
     safetyFactor: 1.0,
+    dwellScore: 0,
+    timeContextBoost: 0,
   };
 
   const signals = [
@@ -36,6 +38,8 @@ export const ExplainModal: React.FC<ExplainModalProps> = ({
     { label: 'Engagement & Vélocité', value: `${breakdown.velocityScore}%`, icon: Activity },
     { label: 'Affinité Sémantique mAI', value: `${breakdown.semanticScore}%`, icon: Sparkles },
     { label: 'Indice de Confiance & Sécurité', value: `${Math.round(breakdown.safetyFactor * 100)}%`, icon: ShieldCheck },
+    { label: 'Temps passé (profil temporel)', value: `${(breakdown as any).dwellScore ?? 0}%`, icon: Eye },
+    { label: 'Contexte temporel', value: `+${(breakdown as any).timeContextBoost ?? 0}%`, icon: Zap },
   ];
 
   return (

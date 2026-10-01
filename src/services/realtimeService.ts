@@ -14,7 +14,7 @@ import { API_BASE } from './api';
 
 export type RealtimeHandler = (type: string, payload: any) => void;
 
-const EVENT_TYPES = ['connected', 'unread_counts', 'notification', 'dm_message', 'dm_typing', 'post_stats'];
+const EVENT_TYPES = ['connected', 'unread_counts', 'notification', 'dm_message', 'dm_typing', 'post_stats', 'dm_pin_updated', 'dm_message_edited', 'dm_message_deleted', 'group_updated'];
 const MAX_RECONNECT_DELAY = 30_000;
 
 class RealtimeClient {
@@ -29,6 +29,7 @@ class RealtimeClient {
   start(token: string) {
     if (!token || typeof window === 'undefined' || typeof EventSource === 'undefined') return;
     if (this.es && this.currentToken === token) return;
+    if (this.es || this.reconnectTimer) this.stop();
     this.currentToken = token;
     this.manuallyStopped = false;
     this.reconnectDelay = 1_000;
@@ -47,6 +48,17 @@ class RealtimeClient {
       this.es = null;
     }
     this.currentToken = null;
+    this.reconnectDelay = 1_000;
+  }
+
+  /**
+   * Reset complet de l'état de connexion sans désabonner les composants
+   * montés. Utile au logout puis à une nouvelle session.
+   * TEST: logout pendant un retry => aucun timer ne se reconnecte avec l'ancien JWT.
+   */
+  reset() {
+    this.stop();
+    this.reconnectDelay = 1_000;
   }
 
   /** Abonnement programmatique — renvoie une fonction de désabonnement. */
@@ -90,6 +102,7 @@ class RealtimeClient {
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY);
       };
     } catch {
+      if (this.manuallyStopped) return;
       this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY);
     }

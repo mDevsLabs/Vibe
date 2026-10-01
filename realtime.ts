@@ -35,6 +35,9 @@ export async function ensureRealtimeTables() {
       )
     `;
     await sql`CREATE INDEX IF NOT EXISTS idx_realtime_user ON realtime_events(user_id, id)`;
+    // La purge recherche created_at ; sans cet index, chaque événement
+    // provoquerait un scan séquentiel sur realtime_events.
+    await sql`CREATE INDEX IF NOT EXISTS idx_realtime_created_at ON realtime_events(created_at)`;
     realtimeTablesReady = true;
   } catch (err) {
     console.warn("[realtime] ensureRealtimeTables skipped:", (err as any)?.message);
@@ -104,9 +107,7 @@ export function registerRealtimeRoutes(app: Hono) {
     // Chevauchement initial de 3 s : rattrape ce qui a été émis juste avant la
     // connexion (le client déduplique par id côté UI).
     const seenNotificationIds = new Set<string>();
-    const seenMessageIds = new Set<string>();
     let notifCursor = new Date(Date.now() - 3_000).toISOString();
-    let dmCursor = new Date(Date.now() - 3_000).toISOString();
     let lastEventId = 0;
     let tick = 0;
 
@@ -122,7 +123,13 @@ export function registerRealtimeRoutes(app: Hono) {
             const counts = await sql`
               SELECT
                 (SELECT COUNT(*) FROM notifications WHERE recipient_id = ${userId} AND is_read = FALSE) AS unread_notifications,
-                (SELECT COUNT(*) FROM direct_messages WHERE recipient_id = ${userId} AND is_read = FALSE) AS unread_messages
+                (
+                  (SELECT COUNT(*) FROM direct_messages WHERE recipient_id = ${userId} AND is_read = FALSE) +
+                  (SELECT COUNT(*) FROM direct_messages m
+                    JOIN dm_group_members gm ON gm.conversation_id = m.conversation_id AND gm.user_id = ${userId}
+                    WHERE m.sender_id <> ${userId}
+                      AND NOT COALESCE((m.read_by ? ${userId}::text), FALSE))
+                ) AS unread_messages
             `;
             await sse.writeSSE({
               event: "unread_counts",
@@ -246,7 +253,8 @@ export function registerRealtimeRoutes(app: Hono) {
 
       return c.json({ success: true });
     } catch (err: any) {
-      return c.json({ error: err?.message || "Erreur indicateur de frappe." }, 500);
+      console.error("[realtime] typing error:", err?.message || err);
+      return c.json({ error: "Erreur indicateur de frappe." }, 500);
     }
   };
 

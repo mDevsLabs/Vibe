@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import { AlertCircle, PenSquare, TrendingUp, X, ArrowUp } from 'lucide-react';
 import { PostComposer } from '../components/feed/PostComposer';
 import { PostCard } from '../components/feed/PostCard';
@@ -16,34 +17,51 @@ import { VibeLogo } from '../components/layout/VibeLogo';
 import type { Post } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { useInfiniteFeed } from '../hooks/useInfiniteFeed';
+import { haptics } from '../services/haptics';
+import { useMotionPrefs } from '../hooks/useMotionPrefs';
 
 interface HomePageProps {
   onOpenThread: (post: Post) => void;
   onOpenProfile: (username: string) => void;
 }
 
-/** Pull-to-refresh mobile : déclenché au-delà de 70px de sur-scroll. */
+/** Pull-to-refresh mobile : déclenché au-delà de 60px de sur-scroll avec retour haptique. */
 function usePullToRefresh(onRefresh: () => void, enabled: boolean) {
   const [pullDistance, setPullDistance] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const startY = useRef<number | null>(null);
+  const hasTriggeredThresholdHaptic = useRef(false);
 
   useEffect(() => {
     if (!enabled) return;
     const onTouchStart = (e: TouchEvent) => {
-      if (window.scrollY <= 0) startY.current = e.touches[0].clientY;
-      else startY.current = null;
+      if (window.scrollY <= 0) {
+        startY.current = e.touches[0].clientY;
+        hasTriggeredThresholdHaptic.current = false;
+      } else {
+        startY.current = null;
+      }
     };
     const onTouchMove = (e: TouchEvent) => {
       if (startY.current == null || isRefreshing) return;
       const dist = e.touches[0].clientY - startY.current;
-      if (dist > 0 && window.scrollY <= 0) setPullDistance(Math.min(90, dist * 0.5));
+      if (dist > 0 && window.scrollY <= 0) {
+        const calculated = Math.min(90, dist * 0.5);
+        setPullDistance(calculated);
+        if (calculated >= 60 && !hasTriggeredThresholdHaptic.current) {
+          hasTriggeredThresholdHaptic.current = true;
+          haptics.pullRefresh();
+        } else if (calculated < 60 && hasTriggeredThresholdHaptic.current) {
+          hasTriggeredThresholdHaptic.current = false;
+        }
+      }
     };
     const onTouchEnd = async () => {
       if (pullDistance >= 60 && !isRefreshing) {
         setIsRefreshing(true);
         try {
           await onRefresh();
+          haptics.success();
         } finally {
           setIsRefreshing(false);
           setPullDistance(0);
@@ -52,6 +70,7 @@ function usePullToRefresh(onRefresh: () => void, enabled: boolean) {
         setPullDistance(0);
       }
       startY.current = null;
+      hasTriggeredThresholdHaptic.current = false;
     };
     window.addEventListener('touchstart', onTouchStart, { passive: true });
     window.addEventListener('touchmove', onTouchMove, { passive: true });
@@ -68,6 +87,7 @@ function usePullToRefresh(onRefresh: () => void, enabled: boolean) {
 
 export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile }) => {
   const [feedType, setFeedType] = useState<'for_you' | 'stream' | 'trending'>('for_you');
+  const { animationsEnabled } = useMotionPrefs();
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [trends, setTrends] = useState<Array<{ tag: string; category?: string; posts: string }>>([]);
   const [selectedPostForExplain, setSelectedPostForExplain] = useState<Post | null>(null);
@@ -151,6 +171,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
   );
 
   const handleSelectTag = (tag: string) => {
+    haptics.light();
     if (selectedTag === tag) {
       setSelectedTag(null);
     } else {
@@ -160,6 +181,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
   };
 
   const showNewPosts = () => {
+    haptics.light();
     lastTopIdRef.current = null;
     setNewCount(0);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -189,14 +211,23 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
             {selectedTag && (
               <span className="flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-white font-mono">
                 <span>{selectedTag}</span>
-                <button onClick={() => setSelectedTag(null)} className="hover:text-zinc-400">
+                <button
+                  onClick={() => {
+                    haptics.light();
+                    setSelectedTag(null);
+                  }}
+                  className="hover:text-zinc-400"
+                >
                   <X className="w-3 h-3" />
                 </button>
               </span>
             )}
           </div>
           <button
-            onClick={refresh}
+            onClick={() => {
+              haptics.light();
+              refresh();
+            }}
             title="Rafraîchir le flux"
             className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
           >
@@ -208,6 +239,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
         <div className="flex border-t border-zinc-800 bg-zinc-950/60">
           <button
             onClick={() => {
+              haptics.light();
               setSelectedTag(null);
               setFeedType('for_you');
             }}
@@ -217,12 +249,17 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Pour Vous
             </span>
             {feedType === 'for_you' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
 
           <button
             onClick={() => {
+              haptics.light();
               setSelectedTag(null);
               setFeedType('stream');
             }}
@@ -232,12 +269,19 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Abonnements
             </span>
             {feedType === 'stream' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
 
           <button
-            onClick={() => setFeedType('trending')}
+            onClick={() => {
+              haptics.light();
+              setFeedType('trending');
+            }}
             className="flex-1 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900/50 flex items-center justify-center gap-1.5"
           >
             <TrendingUp className={`w-3.5 h-3.5 ${feedType === 'trending' ? 'text-white' : 'text-zinc-500'}`} />
@@ -245,7 +289,11 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
               Tendances
             </span>
             {feedType === 'trending' && (
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              animationsEnabled ? (
+                <motion.div layoutId="home-tab-indicator" transition={{ type: 'spring', stiffness: 500, damping: 32 }} className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              ) : (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )
             )}
           </button>
         </div>
@@ -314,15 +362,20 @@ export const HomePage: React.FC<HomePageProps> = ({ onOpenThread, onOpenProfile 
 
         {isLoading && posts.length === 0
           ? [0, 1, 2, 3].map((i) => <PostCardSkeleton key={i} />)
-          : posts.map((post) => (
-              <PostCard
+          : posts.map((post, i) => (
+              <div
                 key={post.id}
-                post={post}
-                onOpenThread={onOpenThread}
-                onOpenProfile={onOpenProfile}
-                onPostDeleted={handlePostDeleted}
-                onOpenExplain={handleOpenExplain}
-              />
+                className="vibe-stagger-item"
+                style={{ '--vibe-delay': `${Math.min(i, 8) * 35}ms` } as React.CSSProperties}
+              >
+                <PostCard
+                  post={post}
+                  onOpenThread={onOpenThread}
+                  onOpenProfile={onOpenProfile}
+                  onPostDeleted={handlePostDeleted}
+                  onOpenExplain={handleOpenExplain}
+                />
+              </div>
             ))}
 
         {/* Sentinelle du scroll infini + loader de fin de liste */}

@@ -28,7 +28,7 @@
   | `follow_user` | Suivre / ne plus suivre | ✅ Oui |
   | `search_posts` | Recherche de publications | Non |
   | `search_web` | Recherche web (You.com + fallbacks) | Non |
-  | `generate_vibe_image` | Génération d'image IA (quota daily) | Non |
+  | `generate_vibe_image` | Génération d'image IA (désactivée tant qu'aucun fournisseur réel n'est configuré) | Non |
   | `fact_check` / `rewrite_post` / `translate` | Outils textuels (OpenRouter) | Non |
   | `analyze_trends` | Tendances hashtags 7 jours | Non |
   | `check_quotas` | Quotas tokens/images | Non |
@@ -76,7 +76,7 @@ Par défaut, tout outil **modifiant le compte ou le contenu public** (`create_po
 ```
 
 ### Pile technique
-- **Frontend** : React 18, TypeScript, Vite, Tailwind CSS, lucide-react, Vite React Compiler (SWC/Oxc)
+- **Frontend** : React 19, TypeScript, Vite, Tailwind CSS, lucide-react, Vite React Compiler (SWC/Oxc)
 - **Backend** : Hono (Deno / Val Town), Neon Postgres serverless, JWT `jose`, OpenRouter (LLM), You.com (recherche)
 - **Stockage** : Neon Postgres + S3 « Z1 Storage » pour les médias
 
@@ -111,7 +111,9 @@ npm run migrate    # DATABASE_URL requise
 | Variable | Rôle |
 |---|---|
 | `DATABASE_URL` | Connexion Neon Postgres |
-| `JWT_SECRET` | Signature des tokens de session |
+| `MAI_JWT_SECRET` / `JWT_SECRET` | Signature des tokens de session (obligatoire) |
+| `TRUSTED_PROXY_CIDRS` | CIDR des proxys autorisés à fournir l'IP cliente |
+| `BOT_PASSWORD_HASH` | Hash bcrypt optionnel du compte @bot de test |
 | `OPENROUTER_API_KEY` | LLM mAI (repli : clés par utilisateur) |
 | Clés You.com | Recherche web (fallbacks RSS/Wikipedia inclus) |
 
@@ -122,6 +124,7 @@ npm run migrate    # DATABASE_URL requise
 | Route | Description |
 |---|---|
 | `POST /v1/mai/chat` | Chat mAI (peut renvoyer `requiresApproval` + `pendingTool`) |
+| `POST /v1/logout` | Révocation serveur du JWT et fermeture de session |
 | `POST /v1/mai/execute-tool` | Exécution d'un outil approuvé par l'utilisateur |
 | `GET /v1/mai/quotas` | Quotas tokens/images |
 | `POST /v1/mai/modulate` | Modulation de texte (ton) |
@@ -135,8 +138,9 @@ npm run migrate    # DATABASE_URL requise
 ---
 
 ## 🛡️ Sécurité & confidentialité
-- Sessions JWT révocables (blacklist SQLite + Postgres, TTL 14 jours)
+- Sessions JWT révocables (blacklist SQLite + Postgres, expiration 7 jours, TTL de conservation 14 jours)
 - Connexion par **OTP email** (pas de mot de passe en clair)
+- `MAI_JWT_SECRET` ou `JWT_SECRET` est obligatoire en production ; aucun secret de repli n'est accepté
 - Filtre de sécurité du contenu côté IA (`assessContentSafety`) avant toute publication par agent
 - Journal d'exécution des outils IA (`mai_tool_executions`) auditable
 - Export GDPR à la demande

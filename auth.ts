@@ -2,10 +2,12 @@ import bcrypt from "npm:bcryptjs";
 import type { Hono } from "npm:hono@4";
 import {
   BCRYPT_ROUNDS,
+  blacklistToken,
   clientIp,
   extractToken,
   generateVerificationCode,
   getDb,
+  getEnv,
   parseUserAgent,
   rateLimit,
   signToken,
@@ -18,6 +20,66 @@ import { createRegisterMulti } from "./vibe-common.ts";
 
 export function registerAuthRoutes(app: Hono) {
   const registerMulti = createRegisterMulti(app);
+
+  const OTP_WINDOW_MS = 10 * 60_000;
+  const OTP_ATTEMPT_LIMIT = 5;
+  const OTP_TARGET_ATTEMPT_LIMIT = 10;
+  const OTP_IP_ATTEMPT_LIMIT = 50;
+  const OTP_RESEND_LIMIT = 3;
+  const OTP_TARGET_RESEND_LIMIT = 5;
+  const OTP_IP_RESEND_LIMIT = 20;
+  const OTP_ISSUE_TARGET_LIMIT = 5;
+  const OTP_ISSUE_IP_LIMIT = 30;
+  const OTP_ACTIONS = new Set(["register", "login", "verify_new_email", "delete_account"]);
+  const OTP_RATE_LIMIT_MESSAGE = "Trop de tentatives. Réessayez plus tard.";
+
+  function otpTarget(value: unknown): string {
+    return String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .slice(0, 160);
+  }
+
+  function allowOtpAttempt(c: any, scope: string, target: unknown): boolean {
+    const ip = clientIp(c);
+    const normalizedTarget = otpTarget(target) || "unknown";
+    return (
+      rateLimit(`otp:attempt:${scope}:${ip}:${normalizedTarget}`, OTP_ATTEMPT_LIMIT, OTP_WINDOW_MS) &&
+      rateLimit(`otp:attempt-target:${scope}:${normalizedTarget}`, OTP_TARGET_ATTEMPT_LIMIT, OTP_WINDOW_MS) &&
+      rateLimit(`otp:attempt-ip:${scope}:${ip}`, OTP_IP_ATTEMPT_LIMIT, OTP_WINDOW_MS)
+    );
+  }
+
+  function allowOtpResend(c: any, action: string, target: unknown): boolean {
+    const ip = clientIp(c);
+    const normalizedTarget = otpTarget(target) || "unknown";
+    return (
+      rateLimit(`otp:resend:${action}:${ip}:${normalizedTarget}`, OTP_RESEND_LIMIT, OTP_WINDOW_MS) &&
+      rateLimit(`otp:resend-target:${action}:${normalizedTarget}`, OTP_TARGET_RESEND_LIMIT, OTP_WINDOW_MS) &&
+      rateLimit(`otp:resend-ip:${ip}`, OTP_IP_RESEND_LIMIT, OTP_WINDOW_MS)
+    );
+  }
+
+  function allowOtpIssue(c: any, action: string, target: unknown): boolean {
+    const ip = clientIp(c);
+    const normalizedTarget = otpTarget(target) || "unknown";
+    return (
+      rateLimit(`otp:issue-target:${action}:${normalizedTarget}`, OTP_ISSUE_TARGET_LIMIT, OTP_WINDOW_MS) &&
+      rateLimit(`otp:issue-ip:${action}:${ip}`, OTP_ISSUE_IP_LIMIT, OTP_WINDOW_MS)
+    );
+  }
+
+  function logAuthServerError(scope: string): void {
+    // Ne jamais renvoyer le message d'une exception SQL/JWT au client. Le
+    // message détaillé reste dans les logs d'exécution de l'hôte, hors réponse.
+    console.error(`[Auth] ${scope}`);
+  }
+
+  function maskApiKey(value: unknown): string {
+    const key = String(value || "");
+    if (key.length <= 8) return "********";
+    return `${key.slice(0, 4)}…${key.slice(-4)}`;
+  }
 
   // GET /register info endpoint (évite 404 lors des tests au navigateur)
   registerMulti("get", ["/register", "/v1/register", "/api/register", "/api/vibe/register"], (c) => {
@@ -42,7 +104,13 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
-      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
+      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "");
+      if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
+        return c.json(
+          { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
+          400
+        );
+      }
 
       const sql = getDb();
       const existing =
@@ -51,13 +119,16 @@ export function registerAuthRoutes(app: Hono) {
         return c.json({ error: "Email ou nom d'utilisateur déjà pris." }, 400);
       }
 
+      if (!allowOtpIssue(c, "register", cleanEmail)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
       const code = await generateVerificationCode(cleanEmail, "register");
       await sendVerificationEmail(cleanEmail, code, "register");
 
       return c.json({ email: cleanEmail, status: "verification_required", success: true });
-    } catch (err: any) {
-      console.error("Register Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Register Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -70,7 +141,17 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
-      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
+      const cleanUsername = String(username).trim().toLowerCase().replace(/^@/, "");
+      if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
+        return c.json(
+          { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
+          400
+        );
+      }
+
+      if (!allowOtpAttempt(c, "register", cleanEmail)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
 
       const isValid = await verifyVerificationCode(cleanEmail, code, "register");
       if (!isValid) {
@@ -96,10 +177,7 @@ export function registerAuthRoutes(app: Hono) {
       const token = await signToken({ sub: user.id, tier: user.tier });
 
       const userAgent = c.req.header("user-agent") || "";
-      const ip =
-        c.req.header("cf-connecting-ip") ||
-        c.req.header("x-forwarded-for") ||
-        "Inconnue";
+      const ip = clientIp(c);
       const { os, device_model, device_version, device_name } =
         parseUserAgent(userAgent);
 
@@ -108,14 +186,14 @@ export function registerAuthRoutes(app: Hono) {
           INSERT INTO connected_devices (user_id, token, os, device_model, device_version, ip_address, device_name)
           VALUES (${user.id}::text, ${token}, ${os}, ${device_model}, ${device_version}, ${ip}, ${device_name})
         `;
-      } catch (dbErr) {
-        console.error("Erreur insertion device:", dbErr);
+      } catch {
+        console.error("[Auth] device registration failed");
       }
 
       return c.json({ success: true, tier: user.tier, token });
-    } catch (err: any) {
-      console.error("Verify Register Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Verify Register Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -134,7 +212,7 @@ export function registerAuthRoutes(app: Hono) {
     let body;
     try {
       body = await c.req.json();
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Requête JSON invalide (vérifiez les guillemets double de votre payload)." }, 400);
     }
     try {
@@ -207,6 +285,9 @@ export function registerAuthRoutes(app: Hono) {
         return c.json({ success: true, tier: user.tier, token });
       }
 
+      if (!allowOtpIssue(c, "login", user.email)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
       const code = await generateVerificationCode(user.email, "login");
       await sendVerificationEmail(user.email, code, "login");
 
@@ -215,9 +296,9 @@ export function registerAuthRoutes(app: Hono) {
         status: "verification_required",
         success: true,
       });
-    } catch (err: any) {
-      console.error("Login Error:", err?.message || err, err?.stack);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Login Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -226,7 +307,7 @@ export function registerAuthRoutes(app: Hono) {
     let body;
     try {
       body = await c.req.json();
-    } catch (err: any) {
+    } catch {
       return c.json({ error: "Requête JSON invalide (vérifiez les guillemets de votre payload)." }, 400);
     }
     
@@ -239,6 +320,9 @@ export function registerAuthRoutes(app: Hono) {
 
       const cleanId = loginId.toLowerCase();
       const cleanUser = cleanId.replace(/^@/, "");
+      if (!allowOtpAttempt(c, "login", cleanUser)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
 
       const sql = getDb();
       const users =
@@ -271,18 +355,7 @@ export function registerAuthRoutes(app: Hono) {
       const token = await signToken({ sub: user.id, tier: user.tier });
 
       const userAgent = c.req.header("user-agent") || "";
-      // Pour les tests en dev, on utilise une IP par défaut
-      let ip =
-        c.req.header("cf-connecting-ip") ||
-        c.req.header("x-forwarded-for") ||
-        c.req.header("x-real-ip") ||
-        "";
-      if (!ip || ip === "::1" || ip === "127.0.0.1") {
-        ip = "8.8.8.8"; // IP Google par défaut pour ne pas planter l'API
-      } else {
-        // Extraire la première IP si on a une liste
-        ip = ip.split(",")[0].trim();
-      }
+      const ip = clientIp(c);
       const { os, device_model, device_version, device_name } =
         parseUserAgent(userAgent);
 
@@ -304,7 +377,7 @@ export function registerAuthRoutes(app: Hono) {
           }
         }
       } catch (e) {
-        console.error("Erreur de géolocalisation:", e);
+        console.error("[Auth] geolocation lookup failed");
       }
 
       // Vérifier si c'est un nouvel appareil ou un nouveau pays
@@ -317,10 +390,10 @@ export function registerAuthRoutes(app: Hono) {
         if (pastDevices.length > 0) {
           // C'est pas sa toute première connexion
           const knownDevice = pastDevices.some(
-            (d) => d.device_name === device_name
+            (d: any) => d.device_name === device_name
           );
           const knownLocation = pastDevices.some(
-            (d) => d.location && d.location.includes(countryStr)
+            (d: any) => d.location && d.location.includes(countryStr)
           );
           if (knownDevice && knownLocation) {
             isNewDeviceOrLocation = false;
@@ -329,8 +402,8 @@ export function registerAuthRoutes(app: Hono) {
           // Première connexion jamais (donc nouvelle par defaut, ou pas besoin d'alerte? on envoie quand meme)
           isNewDeviceOrLocation = true;
         }
-      } catch (e) {
-        console.error(e);
+      } catch {
+        console.error("[Auth] device history lookup failed");
       }
 
       try {
@@ -338,36 +411,44 @@ export function registerAuthRoutes(app: Hono) {
           INSERT INTO connected_devices (user_id, token, os, device_model, device_version, ip_address, device_name, location)
           VALUES (${user.id}::text, ${token}, ${os}, ${device_model}, ${device_version}, ${ip}, ${device_name}, ${locationStr})
         `;
-      } catch (dbErr) {
-        console.error("Erreur insertion device:", dbErr);
+      } catch {
+        console.error("[Auth] device registration failed");
       }
 
       if (isNewDeviceOrLocation) {
         // On n'attend pas l'envoi de l'email
-        sendVerificationEmail(email, "", "new_login", {
+        sendVerificationEmail(user.email, "", "new_login", {
           device: device_name,
           location: locationStr,
-        }).catch(console.error);
+        }).catch(() => console.error("[Auth] new-login notification failed"));
       }
 
       return c.json({ success: true, tier: user.tier, token });
-    } catch (err: any) {
-      console.error("Verify Login Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Verify Login Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
   // POST /resend-code
   registerMulti("post", ["/resend-code", "/v1/resend-code", "/api/resend-code", "/api/vibe/resend-code"], async (c) => {
     try {
-      const { email, action } = await c.req.json();
-      if (!email || !action) {
+      const body = await c.req.json();
+      const cleanEmail = otpTarget(body?.email);
+      const action = String(body?.action || "").trim().toLowerCase();
+      if (!cleanEmail || !action) {
         return c.json({ error: "Champs manquants." }, 400);
       }
+      if (!OTP_ACTIONS.has(action)) {
+        return c.json({ error: "Type de vérification non pris en charge." }, 400);
+      }
+      if (!allowOtpResend(c, action, cleanEmail)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
 
-      // Vérifier le rate-limit (1 minute)
+      // Vérifier le cooldown d'une minute, en plus des limites en mémoire.
       const result = await sqlite.execute({
-        args: [email, action],
+        args: [cleanEmail, action],
         sql: "SELECT expires_at FROM verification_codes WHERE email = ? AND action = ?",
       });
 
@@ -384,15 +465,60 @@ export function registerAuthRoutes(app: Hono) {
         }
       }
 
-      const code = await generateVerificationCode(email, action);
-      await sendVerificationEmail(email, code, action);
+      const code = await generateVerificationCode(cleanEmail, action);
+      await sendVerificationEmail(cleanEmail, code, action);
 
       return c.json({ success: true });
-    } catch (err: any) {
-      console.error("Resend Code Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Resend Code Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
+
+  // POST /logout — la suppression locale du token côté frontend ne suffit pas :
+  // le token doit aussi être révoqué dans les deux backends de blacklist.
+  const handleLogout = async (c: any) => {
+    const token = extractToken(c.req.raw);
+    if (!token) {
+      return c.json({ error: "Non authentifié." }, 401);
+    }
+
+    try {
+      // Vérifie la signature avant d'ajouter une entrée de blacklist, sans
+      // exposer le détail jose/JWT au client.
+      await verifyToken(token);
+    } catch {
+      return c.json({ error: "Jeton invalide." }, 401);
+    }
+
+    try {
+      const blacklisted = await blacklistToken(token);
+      if (!blacklisted) {
+        return c.json({ error: "Déconnexion impossible." }, 503);
+      }
+
+      // Le nettoyage de la liste des appareils est best-effort : la révocation
+      // du jeton est déjà effective et doit réussir même si cette table est
+      // momentanément indisponible.
+      try {
+        const sql = getDb();
+        await sql`DELETE FROM connected_devices WHERE token = ${token}`;
+      } catch {
+        // Le nettoyage de la table est best-effort.
+      }
+
+      return c.json({ success: true });
+    } catch {
+      logAuthServerError("Logout Error");
+      return c.json({ error: "Erreur serveur." }, 500);
+    }
+  };
+
+  registerMulti(
+    "post",
+    ["/logout", "/v1/logout", "/api/logout", "/api/vibe/logout", "/vibe/logout", "/api/v1/logout"],
+    handleLogout
+  );
 
   // POST /verify-code
   app.post("/verify-code", async (c) => {
@@ -472,11 +598,8 @@ export function registerAuthRoutes(app: Hono) {
           newTier = row.tier;
           dbCodeId = row.id;
         }
-      } catch (dbErr) {
-        console.warn(
-          "Table subscription_codes non accessible, vérification fallback ENV:",
-          dbErr
-        );
+      } catch {
+        console.warn("[Auth] subscription code table unavailable");
       }
 
       // 2. Fallback vers les variables d'environnement si non trouvé en base
@@ -484,19 +607,19 @@ export function registerAuthRoutes(app: Hono) {
         const upgradeCodes: Record<string, string> = {};
 
         const plusCode =
-          Deno.env.get("MAI_PLUS_CODE") || Deno.env.get("PLUS_CODE");
+          getEnv("MAI_PLUS_CODE") || getEnv("PLUS_CODE");
         if (plusCode) {
           upgradeCodes[plusCode.trim().toUpperCase()] = "Plus";
         }
 
         const proCode =
-          Deno.env.get("MAI_PRO_CODE") || Deno.env.get("PRO_CODE");
+          getEnv("MAI_PRO_CODE") || getEnv("PRO_CODE");
         if (proCode) {
           upgradeCodes[proCode.trim().toUpperCase()] = "Pro";
         }
 
         const maxCode =
-          Deno.env.get("MAI_MAX_CODE") || Deno.env.get("MAX_CODE");
+          getEnv("MAI_MAX_CODE") || getEnv("MAX_CODE");
         if (maxCode) {
           upgradeCodes[maxCode.trim().toUpperCase()] = "Max";
         }
@@ -505,7 +628,7 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       if (!newTier) {
-        console.log(`[Verify-Code] Code invalide soumis par user=${userId}`);
+        console.warn("[Auth] invalid subscription code submitted");
         return c.json({ error: "Code invalide ou expiré." }, 400);
       }
 
@@ -526,8 +649,8 @@ export function registerAuthRoutes(app: Hono) {
             INSERT INTO subscription_code_redemptions (code_id, user_id)
             VALUES (${dbCodeId}, ${userId}::text)
           `;
-        } catch (updateErr) {
-          console.error("Erreur mise à jour usage code:", updateErr);
+        } catch {
+          console.error("[Auth] subscription usage update failed");
         }
       }
 
@@ -546,11 +669,8 @@ export function registerAuthRoutes(app: Hono) {
             }
           );
         }
-      } catch (mailErr) {
-        console.error(
-          "Erreur envoi email remerciements souscription:",
-          mailErr
-        );
+      } catch {
+        console.error("[Auth] subscription confirmation email failed");
       }
 
       // 6. Nouveau token JWT avec le tier débloqué
@@ -562,9 +682,9 @@ export function registerAuthRoutes(app: Hono) {
         tier: newTier,
         token: newToken,
       });
-    } catch (err: any) {
-      console.error("Verify-Code error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("Verify-Code Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -618,10 +738,10 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       if (username && username.trim()) {
-        const cleanUsername = username.trim().toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_]/g, "");
-        if (cleanUsername.length < 2) {
+        const cleanUsername = username.trim().toLowerCase().replace(/^@/, "");
+        if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
           return c.json(
-            { error: "Le nom d'utilisateur doit contenir au moins 2 caractères (lettres, chiffres, _)." },
+            { error: "Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _)." },
             400
           );
         }
@@ -634,7 +754,7 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       if (email && email.trim()) {
-        const cleanEmail = email.trim();
+        const cleanEmail = email.trim().toLowerCase();
         const existing =
           await sql`SELECT id FROM users WHERE email = ${cleanEmail} AND id::text != ${userId}::text LIMIT 1`;
         if (existing.length > 0) {
@@ -644,6 +764,9 @@ export function registerAuthRoutes(app: Hono) {
           );
         }
         if (cleanEmail !== currentUser[0].email) {
+          if (!allowOtpIssue(c, "verify_new_email", cleanEmail)) {
+            return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+          }
           // Send OTP instead of updating directly
           const code = await generateVerificationCode(
             cleanEmail,
@@ -734,9 +857,16 @@ export function registerAuthRoutes(app: Hono) {
       if (!email || !code) {
         return c.json({ error: "Champs manquants." }, 400);
       }
+      const cleanEmail = otpTarget(email);
+      if (!cleanEmail) {
+        return c.json({ error: "Champs manquants." }, 400);
+      }
+      if (!allowOtpAttempt(c, "verify_new_email", cleanEmail)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
 
       const isValid = await verifyVerificationCode(
-        email,
+        cleanEmail,
         code,
         "verify_new_email"
       );
@@ -745,12 +875,12 @@ export function registerAuthRoutes(app: Hono) {
       }
 
       const sql = getDb();
-      await sql`UPDATE users SET email = ${email.trim()} WHERE id::text = ${userId}::text`;
+      await sql`UPDATE users SET email = ${cleanEmail} WHERE id::text = ${userId}::text`;
 
-      return c.json({ email: email.trim(), success: true });
-    } catch (err: any) {
-      console.error("verify-new-email Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+      return c.json({ email: cleanEmail, success: true });
+    } catch {
+      logAuthServerError("verify-new-email Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -771,14 +901,17 @@ export function registerAuthRoutes(app: Hono) {
         return c.json({ error: "Utilisateur introuvable." }, 404);
       }
 
-      const email = currentUser[0].email;
+      const email = String(currentUser[0].email || "").trim().toLowerCase();
+      if (!email || !allowOtpIssue(c, "delete_account", email)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
       const code = await generateVerificationCode(email, "delete_account");
       await sendVerificationEmail(email, code, "delete_account");
 
       return c.json({ email, success: true });
-    } catch (err: any) {
-      console.error("request-delete-account Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("request-delete-account Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -815,7 +948,10 @@ export function registerAuthRoutes(app: Hono) {
         return c.json({ error: "Mot de passe incorrect." }, 400);
       }
 
-      const email = currentUser[0].email;
+      const email = String(currentUser[0].email || "").trim().toLowerCase();
+      if (!allowOtpAttempt(c, "delete_account", email)) {
+        return c.json({ error: OTP_RATE_LIMIT_MESSAGE }, 429);
+      }
       const isValid = await verifyVerificationCode(
         email,
         code,
@@ -825,19 +961,20 @@ export function registerAuthRoutes(app: Hono) {
         return c.json({ error: "Code invalide ou expiré." }, 400);
       }
 
+      // Révoquer le token avant de supprimer le compte. Si aucune source de
+      // blacklist n'est disponible, on ne supprime pas le compte par accident.
+      if (!(await blacklistToken(token))) {
+        throw new Error("Token blacklist unavailable");
+      }
+
       // Suppression (ou anonymisation)
       await sql`DELETE FROM users WHERE id::text = ${userId}::text`;
-
-      // Révoquer le token pour déconnecter immédiatement
-      await sqlite.execute({
-        args: [token],
-        sql: "INSERT OR IGNORE INTO token_blacklist (token) VALUES (?)",
-      });
+      await sql`DELETE FROM connected_devices WHERE user_id::text = ${userId}::text`.catch(() => {});
 
       return c.json({ success: true });
-    } catch (err: any) {
-      console.error("confirm-delete-account Error:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("confirm-delete-account Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 
@@ -845,13 +982,15 @@ export function registerAuthRoutes(app: Hono) {
   app.get("/api-keys", async (c) => {
     try {
       const token = extractToken(c.req.raw);
-      let userId = c.get("userId");
+      let userId = (c as any).get("userId");
 
       if (token) {
         try {
           const payload = await verifyToken(token);
           userId = (payload.sub as string) || userId;
-        } catch {}
+        } catch {
+          // Un JWT invalide laisse le contexte middleware décider de l'accès.
+        }
       }
 
       const sql = getDb();
@@ -869,7 +1008,9 @@ export function registerAuthRoutes(app: Hono) {
           if (keyRows.length > 0) {
             userId = keyRows[0].user_id;
           }
-        } catch {}
+        } catch {
+          // La table de clés peut être indisponible; le userId existant suffit.
+        }
       }
 
       if (!userId) {
@@ -906,7 +1047,7 @@ export function registerAuthRoutes(app: Hono) {
         const effectivePlan = k.user_tier || userTier || (isPlanTier ? rawPlan : "Plus");
 
         return {
-          api_key: k.api_key,
+          api_key: maskApiKey(k.api_key),
           name: keyName,
           plan: effectivePlan,
           request_count: Number(k.request_count || 0),
@@ -916,9 +1057,9 @@ export function registerAuthRoutes(app: Hono) {
       });
 
       return c.json({ keys, success: true });
-    } catch (err: any) {
-      console.error("Erreur API Keys:", err);
-      return c.json({ error: err?.message || "Erreur serveur." }, 500);
+    } catch {
+      logAuthServerError("API Keys Error");
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   });
 }

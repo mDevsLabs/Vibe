@@ -77,3 +77,16 @@ export function qualityBoost(isVerifiedAuthor?: boolean, hasMedia?: boolean): nu
   if (hasMedia) boost *= 1.10;
   return boost;
 }
+
+/** Score dwell 0..1 : temps passé sur un post (profil temporel). */
+export function dwellScore(ms?: number): number {
+  if (!ms || ms <= 0) return 0;
+  return Math.min(1, Math.log10(ms / 1000 + 1) / 1.5);
+}
+
+/** Boost contexte temporel : +10% si même partie de journée. */
+export function dayPartBoost(publishedAt: Date, now: number = Date.now()): number {
+  const h = (t: Date) => t.getHours();
+  const part = (hh: number) => (hh < 6 ? 0 : hh < 12 ? 1 : hh < 18 ? 2 : 3);
+  return part(h(publishedAt)) === part(h(new Date(now))) ? 0.1 : 0;
+}

@@ -106,7 +106,7 @@ app.use(
 );
 
 // Filet preflight explicite : répond 204 avant l'auth (local / preview / SDK).
-app.options("*", (c) => c.text("", 204));
+app.options("*", (c) => c.body(null, 204));
 
 app.use("*", async (c, next) => {
   await next();

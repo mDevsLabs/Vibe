@@ -1,5 +1,13 @@
 import type { Hono } from "npm:hono@4";
-import { extractTierFromApiKey, getDb, getTierRequestLimit, getUserQuotaBoost, getWeekData, verifyToken } from "./config.ts";
+import {
+  extractTierFromApiKey,
+  getDb,
+  getEnv,
+  getTierRequestLimit,
+  getUserQuotaBoost,
+  getWeekData,
+  verifyToken,
+} from "./config.ts";
 
 export function registerMiddleware(app: Hono) {
   // Middleware global pour Auth, Rate limiting & Logging sur toutes les routes d'API
@@ -117,8 +125,10 @@ export function registerMiddleware(app: Hono) {
       // peut pas définir d'en-têtes) — cf. realtime.ts /v1/realtime/stream
       c.req.query("token");
 
+    const bearerToken = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
     let rawApiKey =
-      (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : authHeader) ||
+      bearerToken ||
+      authHeader ||
       headerApiKey ||
       queryApiKey ||
       null;
@@ -139,36 +149,35 @@ export function registerMiddleware(app: Hono) {
     const reqUserId = c.req.header("x-user-id") || c.req.header("X-User-Id");
     const startTime = Date.now();
 
-    const systemMaiApiKey = Deno.env.get("MAI_API_KEY");
+    const systemMaiApiKey = getEnv("MAI_API_KEY")?.trim() || null;
 
     let userPlan = "Free";
     let currentUserId: string | null = null;
-    const currentApiKey: string | null = apiKey;
-    let matchedApiKey: string | null = apiKey;
-    // Authentification par clé API enregistrée (par opposition à un JWT de session ou à la clé système)
+    let matchedApiKey: string | null = null;
     let isRegisteredApiKey = false;
+    let isJwtAuth = false;
+    let isSystemAuth = false;
 
     function timingSafeEqual(a: string, b: string): boolean {
-      if (a.length !== b.length) {
-        return false;
-      }
-      let diff = 0;
-      for (let i = 0; i < a.length; i++) {
-        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+      const maxLength = Math.max(a.length, b.length, 1);
+      let diff = a.length ^ b.length;
+      for (let i = 0; i < maxLength; i++) {
+        const aChar = a.length > 0 ? a.charCodeAt(i % a.length) : 0;
+        const bChar = b.length > 0 ? b.charCodeAt(i % b.length) : 0;
+        diff |= aChar ^ bChar;
       }
       return diff === 0;
     }
 
     // Résolution de l'authentification : Clé API utilisateur enregistrée, Clé système, ou Token JWT
     if (apiKey) {
-      // Détection prioritaire du forfait directement encodé dans la clé (mai-TIER_USER-XXXXX-XXXXX)
+      // Le préfixe de tier n'est une indication de confiance qu'après avoir
+      // validé la clé dans la base : une chaîne mai-pro-... ne doit jamais
+      // suffire à obtenir un contexte payant.
       const keyTier = extractTierFromApiKey(apiKey);
-      if (keyTier) {
-        userPlan = keyTier;
-      }
 
-      const sql = getDb();
       try {
+        const sql = getDb();
         const rows = await sql`
           SELECT k.*, u.tier as user_tier, u.id as u_id
           FROM mprojects_api_keys k
@@ -179,34 +188,52 @@ export function registerMiddleware(app: Hono) {
 
         if (rows.length > 0) {
           const apiKeyData = rows[0];
-          // Si le TIER_USER a été extrait de la clé fournie, il fait foi en priorité
-          if (!keyTier) {
+          // Si le TIER_USER a été extrait de la clé déjà validée, il fait foi
+          // en priorité ; sinon on utilise le forfait de la base.
+          if (keyTier) {
+            userPlan = keyTier;
+          } else {
             const rawPlan = String(apiKeyData.plan || "").trim().toLowerCase();
             const validTiers = ["free", "plus", "pro", "max"];
             userPlan = apiKeyData.user_tier || (validTiers.includes(rawPlan) ? apiKeyData.plan : "Plus");
           }
-          currentUserId = apiKeyData.user_id;
+          currentUserId = String(apiKeyData.user_id || apiKeyData.u_id || "").trim();
+          if (!currentUserId) {
+            throw new Error("API key has no owner");
+          }
           matchedApiKey = apiKeyData.api_key || apiKey;
           isRegisteredApiKey = true;
         } else if (systemMaiApiKey && timingSafeEqual(apiKey, systemMaiApiKey)) {
           userPlan = "Plus";
           currentUserId = "system-mai";
+          isSystemAuth = true;
         } else {
           // Tenter de valider le token comme un JWT de session
           try {
             const payload = await verifyToken(apiKey);
-            currentUserId = String(payload.sub || "");
+            const subject = String(payload.sub || "").trim();
+            if (!subject) {
+              throw new Error("JWT has no subject");
+            }
+            currentUserId = subject;
+            isJwtAuth = true;
             userPlan = String(payload.tier || "Free");
 
-            // Vérifier dans la table users si le forfait a changé
+            // Vérifier dans la table users si le forfait a changé. Cette
+            // lecture est best-effort : la signature JWT suffit pour
+            // autoriser la route et un logout doit rester possible.
             if (currentUserId) {
-              const uRows = await sql`
-                SELECT tier FROM users
-                WHERE id::text = ${currentUserId}::text OR username = ${currentUserId}::text OR email = ${currentUserId}::text
-                LIMIT 1
-              `;
-              if (uRows.length > 0 && uRows[0].tier) {
-                userPlan = uRows[0].tier;
+              try {
+                const uRows = await sql`
+                  SELECT tier FROM users
+                  WHERE id::text = ${currentUserId}::text OR username = ${currentUserId}::text OR email = ${currentUserId}::text
+                  LIMIT 1
+                `;
+                if (uRows.length > 0 && uRows[0].tier) {
+                  userPlan = uRows[0].tier;
+                }
+              } catch {
+                // Le tier JWT reste utilisable si cette lecture best-effort échoue.
               }
             }
           } catch {
@@ -215,8 +242,28 @@ export function registerMiddleware(app: Hono) {
             }
           }
         }
-      } catch (dbErr) {
-        console.error("Auth DB Error in middleware:", dbErr);
+      } catch {
+        currentUserId = null;
+        matchedApiKey = null;
+        isRegisteredApiKey = false;
+        isJwtAuth = false;
+        isSystemAuth = false;
+        userPlan = "Free";
+        // Si la table des clés est momentanément indisponible, un JWT signé
+        // peut encore être validé sans concession d'identité ni de tier.
+        try {
+          const payload = await verifyToken(apiKey);
+          const subject = String(payload.sub || "").trim();
+          if (!subject) throw new Error("JWT has no subject");
+          currentUserId = subject;
+          isJwtAuth = true;
+          userPlan = String(payload.tier || "Free");
+        } catch {
+          if (!isPublicRoute) {
+            return c.json({ error: "Invalid API Key." }, 403);
+          }
+          console.error("[Auth] credential lookup failed");
+        }
       }
     }
 
@@ -225,9 +272,7 @@ export function registerMiddleware(app: Hono) {
       if (currentUserId) {
         // Déjà authentifié via clé API ou JWT : x-user-id doit correspondre, sinon on l'ignore
         if (reqUserId !== currentUserId) {
-          console.warn(
-            `[Auth] x-user-id mismatch: header=${reqUserId} vs auth=${currentUserId} — header ignoré`
-          );
+          console.warn("[Auth] x-user-id mismatch — header ignoré");
         }
       } else if (apiKey) {
         // apiKey présent mais non reconnu (route publique) : ne pas promouvoir via x-user-id seul
@@ -247,12 +292,12 @@ export function registerMiddleware(app: Hono) {
             if (isPublicRoute) {
               currentUserId = reqUserId;
             } else {
-              console.warn(
-                `[Auth] x-user-id sans JWT sur route privée ${path} — ignoré`
-              );
+              console.warn("[Auth] x-user-id sans JWT sur route privée — ignoré");
             }
           }
-        } catch {}
+        } catch {
+          // Une résolution x-user-id best-effort ne doit pas contourner l'auth.
+        }
       }
     }
 
@@ -262,22 +307,25 @@ export function registerMiddleware(app: Hono) {
     }
 
     // Enregistrer le plan et les infos de contexte
-    c.set("userPlan", userPlan);
-    c.set("userId", currentUserId);
-    c.set("apiKey", currentApiKey);
-    c.set("matchedApiKey", matchedApiKey);
+    (c as any).set("userPlan", userPlan);
+    (c as any).set("userId", currentUserId);
+    // Ne jamais repasser une clé non reconnue aux handlers : certains
+    // handlers l'utilisent comme credential fournisseur. Les JWT et la clé
+    // système restent disponibles via le contexte pour les flux query-token.
+    (c as any).set("apiKey", isRegisteredApiKey ? matchedApiKey : (isJwtAuth || isSystemAuth) ? apiKey : null);
+    (c as any).set("matchedApiKey", isRegisteredApiKey ? matchedApiKey : null);
 
     // Vérification préventive du quota de requêtes pour les clés API enregistrées.
     // Le solde est global au compte (cumul de toutes ses clés) et la période est hebdomadaire
     // (lundi 00:00 UTC), marquée par usage_period_start pour un reset idempotent.
     // Un token JWT de session ne consomme pas ce quota : la requête est exécutée directement.
     if (isRegisteredApiKey && currentUserId && currentUserId !== "system-mai") {
-      const sql = getDb();
-      const { nextResetIso, weekStartStr } = getWeekData();
-      const apiBoost = await getUserQuotaBoost(sql, currentUserId, "api");
-      const limit = getTierRequestLimit(userPlan) + apiBoost;
-
       try {
+        const sql = getDb();
+        const { nextResetIso, weekStartStr } = getWeekData();
+        const apiBoost = await getUserQuotaBoost(sql, currentUserId, "api");
+        const limit = getTierRequestLimit(userPlan) + apiBoost;
+
         await sql`
           UPDATE mprojects_api_keys
           SET request_count = 0, usage_period_start = ${weekStartStr}::date
@@ -310,7 +358,11 @@ export function registerMiddleware(app: Hono) {
             used,
           }, 429);
         }
-      } catch {}
+      } catch {
+        if (!isPublicRoute) {
+          return c.json({ error: "Service temporarily unavailable." }, 503);
+        }
+      }
     }
 
     await next();
@@ -344,8 +396,8 @@ export function registerMiddleware(app: Hono) {
             WHERE api_key = ${effectiveKeyToLog}::text
           `;
         }
-      } catch (err) {
-        console.error("Erreur logging API & mise à jour quota:", err);
+      } catch {
+        console.error("[Api] usage logging failed");
       }
     }
   });

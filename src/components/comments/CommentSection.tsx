@@ -26,6 +26,11 @@ import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 import { ProfileAvatar } from '../common/ProfileAvatar';
 import { RichContent, htmlToPlainText } from '../common/RichContent';
 import { RichTextEditor, RichTextEditorHandle } from '../common/RichTextEditor';
+import { haptics } from '../../services/haptics';
+import { isPaidTier } from '../../services/tierLimits';
+import { motion } from 'framer-motion';
+import { useMotionPrefs } from '../../hooks/useMotionPrefs';
+import { LikeParticles } from '../common/LikeParticles';
 
 const nextToastId = () => Date.now();
 
@@ -58,6 +63,8 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [burstMap, setBurstMap] = useState<Record<string, number>>({});
+  const { play: playMotion, animationsEnabled } = useMotionPrefs();
   // Traduction DeepL par commentaire (repli mAI côté serveur)
   const [commentTranslations, setCommentTranslations] = useState<Record<string, { text: string; language: string; targetLanguage?: string; provider?: string }>>({});
   const [translatingId, setTranslatingId] = useState<string | null>(null);
@@ -100,7 +107,9 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
   }, [postId]);
 
   useEffect(() => {
-    fetchComments();
+    queueMicrotask(() => {
+      fetchComments();
+    });
   }, [fetchComments]);
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -165,6 +174,14 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     const plainText = htmlToPlainText(html).trim();
     if ((!plainText && mediaList.length === 0) || isSubmitting) return;
 
+    // Commande /mai : réservée aux abonnés Plus, Pro et Max
+    const isMaiCommand = /^\/mai\b/i.test(plainText);
+    if (isMaiCommand && !isPaidTier(user?.tier)) {
+      haptics.warning();
+      setComposerError('La commande /mai est réservée aux abonnés Plus, Pro et Max.');
+      return;
+    }
+
     if (isListening) {
       stopListening();
       resetTranscript();
@@ -178,14 +195,32 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
         media_type: m.mime_type || (m.media_type === 'video' ? 'video/mp4' : 'image/jpeg'),
         alt_text: m.alt_text?.trim() || undefined,
       }));
-      await ApiService.addComment(postId, html, replyingTo?.id, mediaAssets.length > 0 ? mediaAssets : undefined);
+      const res = await ApiService.addComment(postId, html, replyingTo?.id, mediaAssets.length > 0 ? mediaAssets : undefined);
+      const aiPending = Boolean((res as any)?.ai_pending) || isMaiCommand;
       editorRef.current?.clear();
       setContentText('');
       setMediaList([]);
       setReplyingTo(null);
+      haptics.success();
       fetchComments();
+      if (aiPending) {
+        // La réponse de mAI arrive de façon asynchrone : rafraîchissements différés
+        NotificationService.showInAppToast(
+          'mAI réfléchit…',
+          'Votre question /mai a été envoyée : la réponse apparaîtra sous peu en commentaire.',
+          'info'
+        );
+        window.setTimeout(() => fetchComments(), 2500);
+        window.setTimeout(() => fetchComments(), 8000);
+      }
     } catch (err: any) {
-      setComposerError(err.message || 'Erreur lors de l’envoi de la réponse.');
+      if (err?.code === 'MAI_CMD') {
+        haptics.warning();
+        setComposerError(err?.message || 'La commande /mai est réservée aux abonnés Plus, Pro et Max.');
+      } else {
+        haptics.error();
+        setComposerError(err.message || 'Erreur lors de l’envoi de la réponse.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -195,6 +230,7 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     if (!user) {
       // Bouton "mort" si déconnecté : on prévient au lieu d'un update optimiste
       // qui serait annulé par un 401.
+      haptics.warning();
       window.dispatchEvent(
         new CustomEvent('vibe:in_app_toast', {
           detail: {
@@ -208,6 +244,12 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
     }
     const id = String(cm.id);
     const wasLiked = likedIds.has(id);
+    if (!wasLiked) {
+      playMotion('like');
+      setBurstMap((m) => ({ ...m, [id]: (m[id] || 0) + 1 }));
+    } else {
+      playMotion('unlike');
+    }
     // Mise à jour optimiste
     setLikedIds((prev) => {
       const next = new Set(prev);
@@ -341,6 +383,12 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
               className="border border-zinc-800 shrink-0"
             />
             <span className="text-xs font-bold text-white truncate">{cm.display_name || cm.username}</span>
+            {cm.username === 'mai' && (
+              <span className="flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wide text-violet-300 bg-violet-500/10 border border-violet-500/30 px-1.5 py-0.5 rounded-full shrink-0">
+                <Sparkles className="w-2.5 h-2.5" />
+                mAI
+              </span>
+            )}
             <span className="text-[11px] text-zinc-500 truncate">@{cm.username}</span>
           </div>
           <button
@@ -393,15 +441,20 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
           <div className="pl-8">{renderCommentMedia(cm.media_assets)}</div>
         )}
         <div className="flex items-center gap-4 pl-8 pt-0.5">
-          <button
+          <motion.button
+            whileTap={animationsEnabled ? { scale: 0.8 } : undefined}
+            transition={{ type: 'spring', stiffness: 500, damping: 22 }}
             onClick={() => handleLikeComment(cm)}
-            className={`flex items-center gap-1 text-[11px] transition-colors ${
-              liked ? 'text-rose-500' : 'text-zinc-500 hover:text-rose-400'
+            className={`relative flex items-center gap-1 text-[11px] transition-all ${
+              liked ? 'text-rose-500 font-bold' : 'text-zinc-500 hover:text-rose-400'
             }`}
           >
-            <Heart className={`w-3.5 h-3.5 ${liked ? 'fill-rose-500' : ''}`} />
-            <span>{cm.likes_count || 0}</span>
-          </button>
+            <span className={`relative inline-flex ${burstMap[String(cm.id)] ? 'animate-likeBurst' : ''}`}>
+              <Heart className={`w-3.5 h-3.5 transition-transform ${liked ? 'fill-rose-500 scale-110' : 'hover:scale-110'}`} />
+              {animationsEnabled && <LikeParticles burstKey={burstMap[String(cm.id)] || 0} count={5} />}
+            </span>
+            <span key={cm.likes_count || 0} className={burstMap[String(cm.id)] ? 'animate-countPop' : ''}>{cm.likes_count || 0}</span>
+          </motion.button>
           {!commentTranslations[String(cm.id)] && translatingId !== String(cm.id) && (
             <button
               onClick={() => handleTranslateComment(cm)}
@@ -471,6 +524,20 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
               disabled={isSubmitting}
             />
 
+            {/* Indication commande /mai (réponse mAI en commentaire) */}
+            {/^\/mai\b/i.test(contentText.trim()) && (
+              <div
+                className={`flex items-center gap-1.5 text-[11px] ${
+                  isPaidTier(user?.tier) ? 'text-zinc-400' : 'text-amber-400'
+                }`}
+              >
+                <Sparkles className="w-3 h-3 shrink-0" />
+                {isPaidTier(user?.tier)
+                  ? 'mAI répondra à votre question à partir du contenu de cette publication.'
+                  : '/mai interroge mAI — réservé aux abonnés Plus, Pro et Max.'}
+              </div>
+            )}
+
             {/* Aperçus médias + légendes */}
             {mediaList.length > 0 && (
               <div className="space-y-1.5">
@@ -529,6 +596,22 @@ export const CommentSection: React.FC<CommentSectionProps> = ({ postId }) => {
                   title={`Ajouter des médias (max ${MAX_COMMENT_IMAGES} images, ${MAX_COMMENT_VIDEOS} vidéo)`}
                 >
                   {isUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImageIcon className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isPaidTier(user?.tier)) {
+                      haptics.warning();
+                      setComposerError('La commande /mai est réservée aux abonnés Plus, Pro et Max.');
+                      return;
+                    }
+                    editorRef.current?.insertText('/mai ');
+                    editorRef.current?.focus();
+                  }}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  title="Interroger mAI sur cette publication (abonnés Plus, Pro et Max)"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
                 </button>
                 {isSupported && (
                   <button

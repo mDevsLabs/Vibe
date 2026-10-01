@@ -14,9 +14,18 @@ import type {
   DMConversation,
   NotificationItem,
   MAIQuotas,
+  MAIConversationSummary,
+  MaiToolCall,
   UserSettings,
   User,
   VibeBook,
+  VibeBookMember,
+  VibeBookPost,
+  BookComment,
+  ProfileListUser,
+  Poll,
+  UnifiedSearchResult,
+  ServerDraft,
 } from '../types/vibe';
 import { AppStorage } from './storageAdapter';
 
@@ -44,6 +53,62 @@ export interface TranslateResult {
   /** true si le contenu source est déjà dans la langue cible. */
   same_language?: boolean;
   cached?: boolean;
+}
+
+/** Périodes supportées par les endpoints stats (?period=). */
+export type StatsPeriod = '7d' | '30d' | '90d' | '12m';
+
+/** Point quotidien d'une série stats créateur. */
+export interface CreatorSeriesPoint {
+  day: string;
+  views: number;
+  likes: number;
+  reposts: number;
+  replies: number;
+  profile_views: number;
+}
+
+/** Statistiques créateur agrégées (champs historiques + séries à période). */
+export interface CreatorStats {
+  total_views: number;
+  total_likes: number;
+  total_reposts: number;
+  total_replies: number;
+  posts_count: number;
+  top_post: Post | null;
+  daily: Array<{ day: string; views: number; posts: number }>;
+  period?: string;
+  series?: CreatorSeriesPoint[];
+  sources?: Array<{ source: string; views: number }>;
+  profile_views?: number;
+  /** Période précédente (comparaison de croissance). */
+  previous_period?: { total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number } | null;
+  /** Jour le plus vu (événement vues) de la période. */
+  best_day?: { day: string; views: number } | null;
+  /** Jour de publication le plus performant. */
+  best_publish_day?: { day: string; views: number; posts: number } | null;
+  /** Répartition horaire des vues (0-23). */
+  hourly?: Array<{ hour: number; views: number }>;
+  /** Top 5 des publications les plus engageantes. */
+  top_posts?: Array<Post & { engagement?: number }>;
+  /** Taux d'engagement global (%). */
+  engagement_rate?: number;
+  /** Fréquence de publication (posts/semaine). */
+  posts_per_week?: number;
+}
+
+/** Statistiques d'un post (auteur uniquement). */
+export interface PostStats {
+  views: number;
+  likes: number;
+  reposts: number;
+  replies: number;
+  bookmarks: number;
+  engagement_rate: number;
+  period?: string;
+  reach_7d: Array<{ day: string; views: number }>;
+  reach?: Array<{ day: string; views: number }>;
+  top_referrers: unknown[];
 }
 
 /** Langues cibles supportées par DeepL (libellés français). */
@@ -99,15 +164,23 @@ export function browserToDeepLCode(tag: string): string {
 // ─────────────────────────────────────────────
 // CACHE GET (TTL court) + dédoublonnage des requêtes en vol.
 // Réduit fortement les latences perçues (feed, profils, DMs…).
-// Tout POST/PUT/DELETE invalide le cache pour rester cohérent.
+// Toute écriture invalide le cache pour rester cohérent.
 // ─────────────────────────────────────────────
 const GET_CACHE_TTL = 15000;
+const OFFLINE_FEED_KEYS = [
+  'vibe_offline_feed_for_you',
+  'vibe_offline_feed_stream',
+  'vibe_offline_feed_trending',
+] as const;
 
 interface CacheEntry { data: any; ts: number }
 
 export class ApiService {
   private static cache = new Map<string, CacheEntry>();
   private static inflight = new Map<string, Promise<any>>();
+  // Une réponse déjà partie en vol ne doit pas repeupler le cache après une purge.
+  private static cacheGeneration = 0;
+  private static sessionGeneration = 0;
 
   private static cacheGet<T>(endpoint: string, ttlMs: number = GET_CACHE_TTL): Promise<T> | null {
     const hit = this.cache.get(endpoint);
@@ -122,25 +195,62 @@ export class ApiService {
     const pending = this.inflight.get(endpoint);
     if (pending) return pending as Promise<T>;
 
-    const p = this.request<T>(endpoint)
+    const generation = this.cacheGeneration;
+    const p: Promise<T> = this.request<T>(endpoint)
       .then((data) => {
-        this.cache.set(endpoint, { data, ts: Date.now() });
+        if (generation === this.cacheGeneration) {
+          this.cache.set(endpoint, { data, ts: Date.now() });
+        }
         return data;
       })
       .finally(() => {
-        this.inflight.delete(endpoint);
+        // Ne pas supprimer une requête plus récente lancée après une invalidation.
+        if (this.inflight.get(endpoint) === p) this.inflight.delete(endpoint);
       });
 
     this.inflight.set(endpoint, p);
-    return p as Promise<T>;
+    return p;
+  }
+
+  /**
+   * Purge complète du cache mémoire, y compris les dédoublonnages en vol.
+   * Les réponses déjà lancées ne peuvent plus réinjecter leurs données.
+   * TEST: invalider puis résoudre une promesse GET ne doit pas recréer une entrée.
+   */
+  public static clearCache(): void {
+    this.cacheGeneration += 1;
+    this.cache.clear();
+    this.inflight.clear();
   }
 
   /** Invalide tout ou partie du cache GET (préfixe d'endpoint, ex. '/v1/dms'). */
   public static invalidateCache(prefix?: string) {
-    if (!prefix) this.cache.clear();
-    else for (const key of Array.from(this.cache.keys())) {
+    if (!prefix) {
+      this.clearCache();
+      return;
+    }
+
+    this.cacheGeneration += 1;
+    for (const key of Array.from(this.cache.keys())) {
       if (key.includes(prefix)) this.cache.delete(key);
     }
+    for (const key of Array.from(this.inflight.keys())) {
+      if (key.includes(prefix)) this.inflight.delete(key);
+    }
+  }
+
+  /** Supprime les seuls snapshots explicitement enregistrés pour le mode hors-ligne. */
+  public static clearOfflineData(): void {
+    for (const key of OFFLINE_FEED_KEYS) AppStorage.removeItem(key);
+    // Couvre aussi une clé offline future, sans toucher aux préférences de thème
+    // ou aux brouillons explicitement gérés par une autre couche.
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        for (const key of Object.keys(window.localStorage)) {
+          if (key.startsWith('vibe_offline_')) AppStorage.removeItem(key);
+        }
+      }
+    } catch {}
   }
 
   /** Précharge les profils auteurs d'un flux pour un affichage instantané des pages profil. */
@@ -162,12 +272,40 @@ export class ApiService {
   }
 
   public static setToken(token: string) {
+    const previousToken = this.getToken();
+    if (previousToken && previousToken !== token) {
+      this.sessionGeneration += 1;
+      this.clearCache();
+      this.clearOfflineData();
+      AppStorage.removeItem('vibe_user_data');
+    }
     AppStorage.setItem('vibe_jwt_token', token);
   }
 
   public static removeToken() {
+    // Une déconnexion est une frontière de session : ni cache mémoire, ni snapshot
+    // hors-ligne, ni réponse GET déjà en vol ne doit conserver l'identité précédente.
+    this.sessionGeneration += 1;
+    this.clearCache();
     AppStorage.removeItem('vibe_jwt_token');
     AppStorage.removeItem('vibe_user_data');
+    this.clearOfflineData();
+  }
+
+  /** Révoque le token courant côté serveur sans bloquer la fermeture locale. */
+  public static async revokeSession(token: string | null = this.getToken()): Promise<void> {
+    if (!token) return;
+    try {
+      await fetch(`${API_BASE}/v1/logout`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch {
+      // La purge locale restePrioritaire même si le réseau est indisponible.
+    }
   }
 
   /** Langue cible de traduction : réglage utilisateur (miroir local), sinon langue du navigateur. */
@@ -182,7 +320,23 @@ export class ApiService {
     AppStorage.setItem('vibe_ui_language', lang);
   }
 
-  private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  /**
+   * `/api/vibe/...` est l'alias de routage historique de `/v1/...`.
+   * 404/405 prouvent que la route primaire n'existe pas ; aucun autre statut ne
+   * doit déclencher une seconde écriture (401/403/429/5xx/réseau compris).
+   * TEST: primary=404|405 => un alias ; primary=autre erreur/network => un seul fetch.
+   */
+  private static shouldRetryVibeAlias(error: any): boolean {
+    return error?.status === 404 || error?.status === 405;
+  }
+
+  private static toVibeAliasEndpoint(endpoint: string): string | null {
+    if (typeof endpoint !== 'string' || (endpoint !== '/v1' && !endpoint.startsWith('/v1/'))) return null;
+    return `/api/vibe${endpoint.slice('/v1'.length)}`;
+  }
+
+  /** Un seul essai réseau/HTTP. La politique d'alias est centralisée dans request(). */
+  private static async executeRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const token = this.getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -195,6 +349,8 @@ export class ApiService {
     }
 
     const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
+    const method = (options.method || 'GET').toUpperCase();
+    const isReadRequest = method === 'GET' || method === 'HEAD';
 
     let response: Response;
     try {
@@ -203,13 +359,13 @@ export class ApiService {
         headers,
       });
     } catch (networkErr: any) {
-      // Si la requête vers l'URL absolue échoue (ex. CORS ou Failed to fetch),
-      // et qu'un serveur local est actif, on tente via le proxy relatif local UNIQUEMENT en local
+      // Le repli proxy local n'est sûr que pour une lecture. Répéter une écriture
+      // après « Failed to fetch » pourrait dupliquer une mutation déjà arrivée au serveur.
       const isLocalhost =
         typeof window !== 'undefined' &&
         (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-      if (url.startsWith('https://mai.val.run') && isLocalhost) {
+      if (isReadRequest && url.startsWith('https://mai.val.run') && isLocalhost) {
         try {
           response = await fetch(endpoint, {
             ...options,
@@ -224,7 +380,7 @@ export class ApiService {
     }
 
     if (!response.ok) {
-      const errJson = await response.json().catch(() => ({}));
+      const errJson = (await response.json().catch(() => ({}))) || {};
       const err = new Error(errJson.error || `Erreur (${response.status})`) as any;
       err.status = response.status;
       // Code machine optionnel renvoyé par le backend (ex. 'PIN_LIMIT')
@@ -233,24 +389,87 @@ export class ApiService {
       throw err;
     }
 
-    // Exclure les routes d'interaction rapides et les GET de lecture pour éviter les boucles de log
+    // Les GET sont déjà couverts par !isReadRequest. Exclure aussi les trackers
+    // de vue POST : une visite simple ne doit pas créer elle-même un usage API.
+    // TEST: viewPost/trackProfileView => aucun POST /v1/usage/log.
     const SKIP_LOG_PATTERNS = ['/usage/log', '/like', '/repost', '/bookmark', '/notifications/read', '/models'];
-    const isReadRequest = (options.method || 'GET').toUpperCase() === 'GET';
-    const shouldLog = !isReadRequest && !SKIP_LOG_PATTERNS.some(p => endpoint.includes(p));
+    const isViewEvent = /\/view\/?(?:\?|$)/.test(endpoint);
+    const shouldLog = !isReadRequest && !isViewEvent && !SKIP_LOG_PATTERNS.some(p => endpoint.includes(p));
 
-    if (response.ok && shouldLog) {
+    if (shouldLog) {
       this.logUsage(endpoint).catch(() => {});
     }
 
     const json = await response.json();
 
-    // Toute écriture invalide le cache GET pour garantir la fraîcheur des lectures suivantes
-    const isRead = (options.method || 'GET').toUpperCase() === 'GET';
-    if (!isRead) {
-      this.cache.clear();
+    if (!isReadRequest) {
+      this.invalidateCache();
     }
 
     return json;
+  }
+
+  private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const aliasEndpoint = this.toVibeAliasEndpoint(endpoint);
+    const sessionGeneration = this.sessionGeneration;
+    try {
+      return await this.executeRequest<T>(endpoint, options);
+    } catch (error) {
+      // Si la session a changé entre les deux essais, ne jamais porter une
+      // mutation vers le compte suivant.
+      if (sessionGeneration !== this.sessionGeneration) throw error;
+      if (!aliasEndpoint || !this.shouldRetryVibeAlias(error)) throw error;
+      return this.executeRequest<T>(aliasEndpoint, options);
+    }
+  }
+
+  /**
+   * Upload séparé de request() afin de laisser le navigateur gérer le boundary
+   * multipart. Chaque fetch construit son propre FormData : un FormData déjà
+   * consommé par le premier essai ne doit jamais être renvoyé au fallback.
+   * TEST: primary 404/405 => deux instances FormData ; 401/429/500/réseau => une seule.
+   */
+  private static async uploadWithFallback<T>(
+    primaryEndpoint: string,
+    fallbackEndpoint: string,
+    field: string,
+    file: File,
+    errorMessage: string
+  ): Promise<T> {
+    const send = async (endpoint: string): Promise<Response> => {
+      const formData = new FormData();
+      formData.append(field, file);
+      const token = this.getToken();
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      // Une exception réseau est propagée telle quelle : aucune écriture n'est rejouée.
+      return fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+    };
+
+    const toError = async (response: Response): Promise<any> => {
+      const body = (await response.json().catch(() => ({}))) || {};
+      const error = new Error(body.error || errorMessage) as any;
+      error.status = response.status;
+      error.body = body;
+      return error;
+    };
+
+    const sessionGeneration = this.sessionGeneration;
+    let response: Response = await send(primaryEndpoint);
+
+    if (!response.ok) {
+      const error = await toError(response);
+      if (!this.shouldRetryVibeAlias(error) || sessionGeneration !== this.sessionGeneration) throw error;
+      // send() recrée le FormData et relit le jeton courant.
+      response = await send(fallbackEndpoint);
+      if (!response.ok) throw await toError(response);
+    }
+
+    return response.json() as Promise<T>;
   }
 
   // ─────────────────────────────────────────────
@@ -300,19 +519,11 @@ export class ApiService {
   }
 
   public static async getCurrentUser(): Promise<{ user: User; profile: Profile; quotas: MAIQuotas }> {
-    try {
-      return await this.request<{ user: User; profile: Profile; quotas: MAIQuotas }>('/v1/me');
-    } catch {
-      return await this.request<{ user: User; profile: Profile; quotas: MAIQuotas }>('/api/vibe/me');
-    }
+    return this.request<{ user: User; profile: Profile; quotas: MAIQuotas }>('/v1/me');
   }
 
   public static async getSuggestedUsers(): Promise<{ users: Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string; bio?: string }> }> {
-    try {
-      return await this.request('/v1/users/suggested');
-    } catch {
-      return await this.request('/api/vibe/users/suggested');
-    }
+    return this.request('/v1/users/suggested');
   }
 
   // ─────────────────────────────────────────────
@@ -322,23 +533,22 @@ export class ApiService {
     const queryParams = new URLSearchParams({ type });
     if (tag) queryParams.append('tag', tag);
     if (cursor) queryParams.append('cursor', cursor);
+    const sessionGeneration = this.sessionGeneration;
+    const cacheGeneration = this.cacheGeneration;
 
     try {
-      let res: { posts: Post[]; mode: string; title: string; nextCursor?: string | null };
-      try {
-        res = await this.request(`/v1/feed?${queryParams.toString()}`);
-      } catch {
-        res = await this.request(`/api/vibe/feed?${queryParams.toString()}`);
-      }
+      const res = await this.request<{ posts: Post[]; mode: string; title: string; nextCursor?: string | null }>(`/v1/feed?${queryParams.toString()}`);
 
-      // Mettre en cache localement le flux principal pour consultation hors-ligne
-      if (!cursor && !tag && res?.posts && res.posts.length > 0) {
+      // Ne pas recréer un snapshot après un logout ou une écriture survenu pendant le fetch.
+      if (!cursor && !tag && res?.posts && res.posts.length > 0 && sessionGeneration === this.sessionGeneration && cacheGeneration === this.cacheGeneration) {
         AppStorage.setJSON(`vibe_offline_feed_${type}`, res);
       }
       return res;
     } catch (networkErr) {
-      // Fallback gracieux en mode hors-ligne : récupérer le dernier flux en cache local
-      const cached = AppStorage.getJSON<{ posts: Post[]; mode: string; title: string } | null>(`vibe_offline_feed_${type}`, null);
+      // Fallback gracieux en mode hors-ligne : récupérer le dernier flux en cache local.
+      const cached = sessionGeneration === this.sessionGeneration && cacheGeneration === this.cacheGeneration
+        ? AppStorage.getJSON<{ posts: Post[]; mode: string; title: string } | null>(`vibe_offline_feed_${type}`, null)
+        : null;
       if (cached && cached.posts && cached.posts.length > 0) {
         return {
           ...cached,
@@ -354,27 +564,42 @@ export class ApiService {
     try {
       return await this.cachedRequest('/v1/trends', 60000);
     } catch {
-      try {
-        return await this.cachedRequest('/api/vibe/trends', 60000);
-      } catch {
-        // Aucun fallback statique — retourner une liste vide si le backend est inaccessible
-        return { success: false, trends: [] };
-      }
+      // Aucun fallback statique — retourner une liste vide si le backend est inaccessible
+      return { success: false, trends: [] };
+    }
+  }
+
+  /** Top Vibe — meilleures publications des N derniers jours (Explorer). */
+  public static async getTopPosts(limit: number = 5, days: number = 30): Promise<{ success: boolean; posts: Post[] }> {
+    const qs = `?limit=${limit}&days=${days}`;
+    try {
+      return await this.cachedRequest(`/v1/posts/top${qs}`, 60000);
+    } catch {
+      return { success: false, posts: [] };
+    }
+  }
+
+  /** Top Vibers — comptes les plus suivis (Explorer). */
+  public static async getTopVibers(limit: number = 5): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number; bio?: string; is_following?: boolean }> }> {
+    const qs = `?limit=${limit}`;
+    try {
+      return await this.cachedRequest(`/v1/users/top${qs}`, 60000);
+    } catch {
+      return { users: [] };
     }
   }
 
   public static async searchUsers(q: string): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number }> }> {
     try {
       return await this.request(`/v1/search/users?q=${encodeURIComponent(q)}`);
-    } catch {
+    } catch (error: any) {
+      // Le troisième endpoint est une ancienne route métier, pas l'alias /api/vibe.
+      // On ne l'essaie que si les deux routes de recherche ont réellement disparu.
+      if (!this.shouldRetryVibeAlias(error)) return { users: [] };
       try {
-        return await this.request(`/api/vibe/search/users?q=${encodeURIComponent(q)}`);
+        return await this.request(`/v1/dms/users?q=${encodeURIComponent(q)}`);
       } catch {
-        try {
-          return await this.request(`/v1/dms/users?q=${encodeURIComponent(q)}`);
-        } catch {
-          return { users: [] };
-        }
+        return { users: [] };
       }
     }
   }
@@ -383,12 +608,156 @@ export class ApiService {
     try {
       return await this.request(`/v1/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
     } catch {
-      try {
-        return await this.request(`/api/vibe/search/posts?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
-      } catch {
-        return { posts: [], count: 0 };
-      }
+      return { posts: [], count: 0 };
     }
+  }
+
+  /** Recherche globale unifiée : posts + utilisateurs + livres + DMs (limit/section). */
+  public static async searchUnified(q: string, limit: number = 5): Promise<UnifiedSearchResult> {
+    try {
+      return await this.cachedRequest<UnifiedSearchResult>(`/v1/search/unified?q=${encodeURIComponent(q)}&limit=${limit}`, 15000);
+    } catch {
+      return { posts: [], users: [], books: [], messages: [], total: 0 };
+    }
+  }
+
+  /** Vote (modifiable) à un sondage de post. */
+  public static async votePoll(postId: string, optionId: string): Promise<{ success: boolean; poll: Poll }> {
+    this.invalidateCache('/v1/posts/');
+    return this.request(`/v1/posts/${postId}/poll/vote`, {
+      method: 'POST',
+      body: JSON.stringify({ option_id: optionId }),
+    });
+  }
+
+  /** Statistiques créateur d'un post (auteur uniquement). */
+  public static async getPostStats(postId: string, period: StatsPeriod = '7d'): Promise<PostStats> {
+    return this.cachedRequest(`/v1/posts/${postId}/stats?period=${period}`, 30000);
+  }
+
+  /** Statistiques créateur agrégées (?period=7d|30d|90d|12m, défaut 30d). */
+  public static async getCreatorStats(period: StatsPeriod = '30d'): Promise<CreatorStats> {
+    return this.cachedRequest(`/v1/users/me/creator-stats?period=${period}`, 60000);
+  }
+
+  /** Visites profil agrégées (?period=7d|30d|90d|12m, défaut 30d, soi-même uniquement). */
+  public static async getProfileViews(period: StatsPeriod = '30d'): Promise<{ period: string; total: number; series: Array<{ day: string; views: number }> }> {
+    return this.cachedRequest(`/v1/users/me/profile-views?period=${period}`, 60000);
+  }
+
+  /** Track une visite profil (fire-and-forget, anti-spam serveur 1/24h, pas d'auto-comptage). */
+  public static async trackProfileView(username: string, source = 'profile'): Promise<{ success: boolean; counted?: boolean }> {
+    const clean = username.replace(/^@/, '');
+    if (!clean) return { success: false };
+    const body = JSON.stringify({ source });
+    try {
+      return await this.request(`/v1/profiles/${encodeURIComponent(clean)}/view`, { method: 'POST', body });
+    } catch {
+      return { success: false };
+    }
+  }
+
+  /** Traduction d'un texte brut (ex : message DM) via /v1/ai/translate. */
+  public static async translateText(text: string, targetLang: string): Promise<TranslateResult> {
+    return this.request('/v1/ai/translate', {
+      method: 'POST',
+      body: JSON.stringify({ text, target_lang: targetLang }),
+    });
+  }
+
+  /** Suggestions de comptes pour l'onboarding (10 populaires non suivis). */
+  public static async getOnboardingSuggestions(): Promise<{ users: Array<{ id: number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; followers_count?: number; bio?: string }> }> {
+    try {
+      return await this.cachedRequest('/v1/onboarding/suggestions', 60000);
+    } catch {
+      return { users: [] };
+    }
+  }
+
+  /** Marque l'onboarding comme terminé. */
+  public static async completeOnboarding(): Promise<{ success: boolean }> {
+    return this.request('/v1/onboarding/complete', { method: 'POST' });
+  }
+
+  /** Épingle un message dans une conversation (max 3, adressage partnerId). */
+  public static async pinMessage(partnerId: string | number, messageId: string): Promise<{ success: boolean; pinned: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/conversations/${partnerId}/pin`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId }),
+    });
+  }
+
+  /** Désépingle un message d'une conversation. */
+  public static async unpinMessage(partnerId: string | number, messageId: string): Promise<{ success: boolean; pinned: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/conversations/${partnerId}/pin/${messageId}`, { method: 'DELETE' });
+  }
+
+  /** Recherche plein texte dans une conversation DM. */
+  public static async searchDMMessages(partnerId: string | number, q: string): Promise<{ messages: DirectMessage[] }> {
+    try {
+      return await this.request(`/v1/dms/messages/${partnerId}/search?q=${encodeURIComponent(q)}`);
+    } catch {
+      return { messages: [] };
+    }
+  }
+
+  /** Marque manuellement une conversation comme non lue. */
+  public static async markConversationUnread(partnerId: string | number): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/conversations/${partnerId}/mark-unread`, { method: 'POST' });
+  }
+
+  /** Posts programmés de l'utilisateur courant (tri scheduled_at ASC). */
+  public static async getScheduledPosts(): Promise<{ posts: Post[] }> {
+    try {
+      return await this.cachedRequest<{ posts: Post[] }>('/v1/posts/scheduled', 15000);
+    } catch {
+      return { posts: [] };
+    }
+  }
+
+  /** Replanifie un post (scheduled_at=null → publie aussitôt). */
+  public static async reschedulePost(postId: string, scheduledAt: string | null): Promise<{ success: boolean; status?: string; scheduled_at?: string }> {
+    this.invalidateCache('/v1/posts/');
+    return this.request(`/v1/posts/${postId}/reschedule`, {
+      method: 'PATCH',
+      body: JSON.stringify({ scheduled_at: scheduledAt }),
+    });
+  }
+
+  /** Brouillons serveur (multi-appareils). */
+  public static async getDrafts(): Promise<{ drafts: ServerDraft[] }> {
+    try {
+      return await this.cachedRequest<{ drafts: ServerDraft[] }>('/v1/drafts', 15000);
+    } catch {
+      return { drafts: [] };
+    }
+  }
+
+  public static async saveDraft(draft: { id?: string; html: string; text: string; visibility?: string; scheduled_at?: string | null; ai_generated?: boolean; media_assets?: Array<{ url: string; media_type?: string; size?: number; alt_text?: string }> }): Promise<{ success: boolean; id: string }> {
+    if (draft.id) {
+      return this.request(`/v1/drafts/${draft.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(draft),
+      });
+    }
+    return this.request('/v1/drafts', {
+      method: 'POST',
+      body: JSON.stringify(draft),
+    });
+  }
+
+  public static async deleteDraft(id: string): Promise<{ success: boolean }> {
+    return this.request(`/v1/drafts/${id}`, { method: 'DELETE' });
+  }
+
+  /** Répond à une invitation de co-signature. */
+  public static async respondToCollab(postId: string, accept: boolean): Promise<{ success: boolean; status: string }> {
+    this.invalidateCache('/v1/posts/');
+    const action = accept ? 'accept' : 'decline';
+    return this.request(`/v1/posts/${postId}/collaborate/${action}`, { method: 'POST' });
   }
 
   public static async getUserLikedPosts(username: string): Promise<{ posts: Post[] }> {
@@ -396,11 +765,7 @@ export class ApiService {
     try {
       return await this.cachedRequest<{ posts: Post[] }>(`/v1/profiles/${encodeURIComponent(cleanUser)}/likes`, 15000);
     } catch {
-      try {
-        return await this.request<{ posts: Post[] }>(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/likes`);
-      } catch {
-        return { posts: [] };
-      }
+      return { posts: [] };
     }
   }
 
@@ -408,7 +773,7 @@ export class ApiService {
     content: string,
     media_url?: string,
     media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
-    options?: { aiGenerated?: boolean; quotedPostId?: string; scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
+    options?: { aiGenerated?: boolean; quotedPostId?: string; scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private'; poll?: { question?: string; options: string[]; duration_hours: number }; collaboratorUsername?: string; mediaPositions?: number[] }
   ): Promise<{ success: boolean; post: Post }> {
     const payload = {
       content,
@@ -418,18 +783,14 @@ export class ApiService {
       quoted_post_id: options?.quotedPostId,
       scheduled_at: options?.scheduledAt || undefined,
       visibility: options?.visibility || 'public',
+      poll: options?.poll,
+      collaborator_username: options?.collaboratorUsername,
+      media_positions: options?.mediaPositions,
     };
-    try {
-      return await this.request('/v1/posts', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      return await this.request('/api/vibe/posts', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    }
+    return this.request('/v1/posts', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   /** Met à jour une Vibe existante (auteur uniquement). */
@@ -437,185 +798,212 @@ export class ApiService {
     id: string,
     content: string,
     media_assets?: Array<{ url: string; media_type: string; size?: number; alt_text?: string }>,
-    options?: { scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private' }
+    options?: { scheduledAt?: string | null; visibility?: 'public' | 'followers' | 'circle' | 'private'; mediaPositions?: number[] }
   ): Promise<{ success: boolean; post: Post }> {
     const payload = {
       content,
       media_assets,
       scheduled_at: options?.scheduledAt,
       visibility: options?.visibility,
+      media_positions: options?.mediaPositions,
     };
-    try {
-      return await this.request(`/v1/posts/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      });
-    }
+    return this.request(`/v1/posts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
   }
 
   public static async getPost(id: string): Promise<{ post: Post }> {
-    try {
-      return await this.request(`/v1/posts/${id}`);
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}`);
-    }
+    return this.request(`/v1/posts/${id}`);
   }
 
   public static async deletePost(id: string): Promise<{ success: boolean }> {
-    try {
-      return await this.request(`/v1/posts/${id}`, { method: 'DELETE' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}`, { method: 'DELETE' });
-    }
+    return this.request(`/v1/posts/${id}`, { method: 'DELETE' });
   }
 
   public static async toggleLike(id: string): Promise<{ success: boolean; liked: boolean }> {
-    try {
-      return await this.request(`/v1/posts/${id}/like`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}/like`, { method: 'POST' });
-    }
+    return this.request(`/v1/posts/${id}/like`, { method: 'POST' });
   }
 
   public static async toggleRepost(id: string): Promise<{ success: boolean; reposted: boolean }> {
-    try {
-      return await this.request(`/v1/posts/${id}/repost`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}/repost`, { method: 'POST' });
-    }
+    return this.request(`/v1/posts/${id}/repost`, { method: 'POST' });
   }
 
   public static async toggleBookmark(id: string): Promise<{ success: boolean; bookmarked: boolean }> {
-    try {
-      return await this.request(`/v1/posts/${id}/bookmark`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}/bookmark`, { method: 'POST' });
-    }
+    return this.request(`/v1/posts/${id}/bookmark`, { method: 'POST' });
   }
 
   // ─────────────────────────────────────────────
-  // LIVRES — collections de « Vibe préférées » (max 5 par compte)
+  // LIVRES — collections de « Vibe préférées » (max 5 possédés par compte, collaboratifs)
   // ─────────────────────────────────────────────
-  public static async getBooks(postId?: string): Promise<{ success: boolean; books: VibeBook[]; maxBooks: number }> {
+  public static async getBooks(postId?: string): Promise<{ success: boolean; books: VibeBook[]; maxBooks: number; ownedCount: number }> {
     const qs = postId ? `?post_id=${encodeURIComponent(postId)}` : '';
-    try {
-      return await this.request(`/v1/books${qs}`);
-    } catch {
-      return await this.request(`/api/vibe/books${qs}`);
-    }
+    return this.request(`/v1/books${qs}`);
   }
 
-  public static async createBook(title: string, icon: string): Promise<{ success: boolean; book: VibeBook }> {
-    const body = JSON.stringify({ title, icon });
-    try {
-      return await this.request('/v1/books', { method: 'POST', body });
-    } catch {
-      return await this.request('/api/vibe/books', { method: 'POST', body });
-    }
+  public static async createBook(title: string, icon: string, isPublic = false): Promise<{ success: boolean; book: VibeBook }> {
+    // La conversation Messages du Livre est créée côté serveur : rafraîchir la liste DM
+    this.invalidateCache('/dms/');
+    const body = JSON.stringify({ title, icon, is_public: isPublic });
+    return this.request('/v1/books', { method: 'POST', body });
   }
 
-  public static async updateBook(bookId: string, data: { title?: string; icon?: string }): Promise<{ success: boolean; book: VibeBook }> {
+  /** Recherche les Livres publics par titre (mention @livre / attachement dans un post). */
+  public static async searchPublicBooks(q: string): Promise<{ success: boolean; books: Array<{ id: string; title: string; icon?: string; owner_username?: string; owner_display_name?: string; members_count?: number; items_count?: number }> }> {
+    const qs = `?q=${encodeURIComponent(q)}`;
+    return this.request(`/v1/books/public${qs}`);
+  }
+
+  public static async updateBook(bookId: string, data: { title?: string; icon?: string; is_public?: boolean }): Promise<{ success: boolean; book: VibeBook }> {
     const body = JSON.stringify(data);
-    try {
-      return await this.request(`/v1/books/${bookId}/update`, { method: 'POST', body });
-    } catch {
-      return await this.request(`/api/vibe/books/${bookId}/update`, { method: 'POST', body });
-    }
+    return this.request(`/v1/books/${bookId}/update`, { method: 'POST', body });
   }
 
   public static async deleteBook(bookId: string): Promise<{ success: boolean }> {
-    try {
-      return await this.request(`/v1/books/${bookId}`, { method: 'DELETE' });
-    } catch {
-      return await this.request(`/api/vibe/books/${bookId}`, { method: 'DELETE' });
-    }
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}`, { method: 'DELETE' });
   }
 
   /** Enregistre / retire une Vibe d'un Livre (toggle). */
   public static async toggleBookItem(bookId: string, postId: string): Promise<{ success: boolean; saved: boolean }> {
-    try {
-      return await this.request(`/v1/books/${bookId}/posts/${postId}`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/books/${bookId}/posts/${postId}`, { method: 'POST' });
-    }
+    return this.request(`/v1/books/${bookId}/posts/${postId}`, { method: 'POST' });
   }
 
-  public static async getBookPosts(bookId: string): Promise<{ success: boolean; book: VibeBook; posts: Post[] }> {
-    try {
-      return await this.request(`/v1/books/${bookId}/posts`);
-    } catch {
-      return await this.request(`/api/vibe/books/${bookId}/posts`);
-    }
+  /** Contenu d'un Livre : Vibe partagées + membres. */
+  public static async getBookPosts(bookId: string): Promise<{ success: boolean; book: VibeBook; members: VibeBookMember[]; posts: VibeBookPost[] }> {
+    return this.request(`/v1/books/${bookId}/posts`);
+  }
+
+  /** Rejoint un Livre par code (ou URL de partage) — adhésion immédiate. */
+  public static async joinBook(code: string): Promise<{ success: boolean; book: VibeBook; already_member?: boolean }> {
+    this.invalidateCache('/dms/');
+    const body = JSON.stringify({ code });
+    return this.request('/v1/books/join', { method: 'POST', body });
+  }
+
+  /** Membres d'un Livre (qui a rejoint). */
+  public static async getBookMembers(bookId: string): Promise<{ success: boolean; members: VibeBookMember[] }> {
+    return this.request(`/v1/books/${bookId}/members`);
+  }
+
+  /** Quitte un Livre collaboratif (membres non créateurs). */
+  public static async leaveBook(bookId: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}/leave`, { method: 'POST' });
+  }
+
+  /** Régénère le code de partage d'un Livre (créateur uniquement). */
+  public static async regenerateBookCode(bookId: string): Promise<{ success: boolean; join_code: string }> {
+    return this.request(`/v1/books/${bookId}/regenerate-code`, { method: 'POST' });
   }
 
   /** Livres (du compte courant) contenant un post donné — badge PostCard. */
   public static async getBooksForPost(postId: string): Promise<{ success: boolean; book_ids: string[] }> {
-    try {
-      return await this.request(`/v1/books/for-post/${postId}`);
-    } catch {
-      return await this.request(`/api/vibe/books/for-post/${postId}`);
-    }
+    return this.request(`/v1/books/for-post/${postId}`);
+  }
+
+  /** Épingle / désépingle une Vibe dans un Livre (max 3, membres autorisés). */
+  public static async pinBookPost(bookId: string, postId: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean }> {
+    return this.request(`/v1/books/${bookId}/posts/${postId}/pin`, {
+      method: 'POST',
+      body: JSON.stringify({ pinned }),
+    });
+  }
+
+  /** Exclut un membre d'un Livre (créateur uniquement). */
+  public static async kickBookMember(bookId: string, userId: string | number): Promise<{ success: boolean; removed: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}/members/${userId}`, { method: 'DELETE' });
+  }
+
+  /** Transfère la propriété d'un Livre à un membre (créateur uniquement). */
+  public static async transferBookOwnership(bookId: string, userId: string | number): Promise<{ success: boolean; new_owner: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/books/${bookId}/members/${userId}/transfer-ownership`, { method: 'POST' });
+  }
+
+  /** Discussion du Livre : liste des commentaires (pagée). */
+  public static async getBookComments(bookId: string, limit = 50, offset = 0): Promise<{ success: boolean; comments: BookComment[] }> {
+    return this.request(`/v1/books/${bookId}/comments?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Ajoute un commentaire à la discussion du Livre (réponse citée optionnelle). */
+  public static async addBookComment(bookId: string, content: string, replyToId?: string | null): Promise<{ success: boolean; comment: BookComment }> {
+    return this.request(`/v1/books/${bookId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ content, ...(replyToId ? { reply_to_id: replyToId } : {}) }),
+    });
+  }
+
+  /** Supprime un commentaire de la discussion (auteur ou créateur du Livre). */
+  public static async deleteBookComment(bookId: string, commentId: string): Promise<{ success: boolean }> {
+    return this.request(`/v1/books/${bookId}/comments/${commentId}`, { method: 'DELETE' });
+  }
+
+  /** Réagit à un message de la discussion du Livre (toggle emoji). */
+  public static async reactBookComment(
+    bookId: string,
+    commentId: string,
+    emoji: string
+  ): Promise<{ success: boolean; reacted: boolean; reactions: { emoji: string; count: number; mine: boolean }[] }> {
+    return this.request(`/v1/books/${bookId}/comments/${commentId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  /** Abonnés d'un profil (liste paginée, avec état « je suis »). */
+  public static async getProfileFollowers(username: string, limit = 20, offset = 0): Promise<{ users: ProfileListUser[]; has_more: boolean }> {
+    return this.request(`/v1/profiles/${username}/followers?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Abonnements d'un profil (liste paginée, avec état « je suis »). */
+  public static async getProfileFollowing(username: string, limit = 20, offset = 0): Promise<{ users: ProfileListUser[]; has_more: boolean }> {
+    return this.request(`/v1/profiles/${username}/following?limit=${limit}&offset=${offset}`);
   }
 
   /** Retour d'algorithme sur un post : 'more' | 'less' | null (désactive). */
   public static async sendPostFeedback(id: string, value: 'more' | 'less' | null): Promise<{ success: boolean; my_feedback: 'more' | 'less' | null }> {
-    try {
-      return await this.request(`/v1/posts/${id}/feedback`, {
-        method: 'POST',
-        body: JSON.stringify({ value }),
-      });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}/feedback`, {
-        method: 'POST',
-        body: JSON.stringify({ value }),
-      });
-    }
+    return this.request(`/v1/posts/${id}/feedback`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    });
   }
 
   /**
    * Incrémente le compteur d'impressions d'un post. Appelé fire-and-forget
-   * par le tracking de vues (IntersectionObserver), sans invalidation de
-   * cache : le compteur est volontairement approximatif côté affichage.
+   * par le tracking de vues (IntersectionObserver). Le compteur est
+   * volontairement approximatif côté affichage.
+   * Accepte le temps passé pour le profil temporel (post_views).
    */
-  public static async viewPost(id: string): Promise<{ success: boolean; views_count: number | null }> {
-    try {
-      return await this.request(`/v1/posts/${id}/view`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${id}/view`, { method: 'POST' });
-    }
+  public static async viewPost(id: string, opts?: { duration_ms?: number; dwell_ms?: number; visible_ratio?: number; source?: string }): Promise<{ success: boolean; views_count: number | null }> {
+    const body = opts ? JSON.stringify({ duration_ms: opts.duration_ms, dwell_ms: opts.dwell_ms, visible_ratio: opts.visible_ratio, source: opts.source }) : undefined;
+    return this.request(`/v1/posts/${id}/view`, { method: 'POST', ...(body ? { body } : {}) });
   }
 
-  /** Épingler / désépingler un post sur son profil (max 3, contrôlé serveur). */
+  /** Épingler / désépingler un post sur son profil (max 2, contrôlé serveur). */
   public static async setPostPinned(id: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean; pinned_count?: number; code?: string; error?: string }> {
-    try {
-      return await this.request(`/v1/posts/${id}/pin`, {
-        method: 'POST',
-        body: JSON.stringify({ pinned }),
-      });
-    } catch (err: any) {
-      // Limite d'épinglage atteinte : pas de fallback, on propage le code
-      if (err?.code === 'PIN_LIMIT') throw err;
-      return await this.request(`/api/vibe/posts/${id}/pin`, {
-        method: 'POST',
-        body: JSON.stringify({ pinned }),
-      });
-    }
+    // La politique d'alias est dans request() : PIN_LIMIT et les autres erreurs
+    // métier remontent directement, sans une seconde mutation.
+    return this.request(`/v1/posts/${id}/pin`, {
+      method: 'POST',
+      body: JSON.stringify({ pinned }),
+    });
+  }
+
+  /** Épingler / retirer de son profil un post d'un autre compte (max 2 au total, contrôlé serveur). */
+  public static async setPostProfilePinned(id: string, pinned: boolean): Promise<{ success: boolean; pinned: boolean; pinned_count?: number; code?: string; error?: string }> {
+    return this.request(`/v1/posts/${id}/profile-pin`, {
+      method: 'POST',
+      body: JSON.stringify({ pinned }),
+    });
   }
 
   // ─────────────────────────────────────────────
   // COMMENTS
   // ─────────────────────────────────────────────
   public static async getComments(postId: string): Promise<{ comments: Comment[]; aiDigest: string | null; count: number }> {
-    try {
-      return await this.cachedRequest(`/v1/posts/${postId}/comments`, 10000);
-    } catch {
-      return await this.cachedRequest(`/api/vibe/posts/${postId}/comments`, 10000);
-    }
+    return this.cachedRequest(`/v1/posts/${postId}/comments`, 10000);
   }
 
   public static async addComment(
@@ -623,76 +1011,121 @@ export class ApiService {
     content: string,
     parent_comment_id?: string,
     media_assets?: Array<{ url: string; media_type: string; alt_text?: string }>
-  ): Promise<{ success: boolean; comment: Comment }> {
+  ): Promise<{ success: boolean; comment: Comment; ai_pending?: boolean }> {
     const payload = { content, parent_comment_id, media_assets };
-    try {
-      return await this.request(`/v1/posts/${postId}/comments`, {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      return await this.request(`/api/vibe/posts/${postId}/comments`, {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    }
+    return this.request(`/v1/posts/${postId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   public static async likeComment(postId: string, commentId: string): Promise<{ success: boolean; liked: boolean; likes_count: number }> {
-    try {
-      return await this.request(`/v1/posts/${postId}/comments/${commentId}/like`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/posts/${postId}/comments/${commentId}/like`, { method: 'POST' });
-    }
+    return this.request(`/v1/posts/${postId}/comments/${commentId}/like`, { method: 'POST' });
   }
 
   // ─────────────────────────────────────────────
   // DIRECT MESSAGES (DMs)
   // ─────────────────────────────────────────────
   public static async getConversations(): Promise<{ conversations: DMConversation[] }> {
-    try {
-      return await this.cachedRequest('/v1/dms/conversations', 8000);
-    } catch {
-      return await this.cachedRequest('/api/vibe/dms/conversations', 8000);
-    }
+    return this.cachedRequest('/v1/dms/conversations', 8000);
   }
 
-  public static async getMessages(partnerId: string | number): Promise<{ messages: DirectMessage[] }> {
-    try {
-      return await this.cachedRequest(`/v1/dms/messages/${partnerId}`, 5000);
-    } catch {
-      return await this.cachedRequest(`/api/vibe/dms/messages/${partnerId}`, 5000);
-    }
+  public static async getMessages(partnerId: string | number): Promise<{ messages: DirectMessage[]; pinned_messages?: DirectMessage[] }> {
+    return this.cachedRequest(`/v1/dms/messages/${partnerId}`, 5000);
   }
 
-  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string): Promise<{ success: boolean; message: DirectMessage }> {
+  public static async sendMessage(recipient_id: string | number, content: string, reply_to_id?: string, send_at?: string, conversation_id?: string, forwarded_from?: { message_id: string } | null, attached_post_id?: string): Promise<{ success: boolean; message: DirectMessage; scheduled?: boolean }> {
     this.invalidateCache('/dms/');
-    try {
-      return await this.request('/v1/dms/messages', {
-        method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id }),
-      });
-    } catch {
-      return await this.request('/api/vibe/dms/messages', {
-        method: 'POST',
-        body: JSON.stringify({ recipient_id, content, reply_to_id }),
-      });
-    }
+    const body = JSON.stringify({ recipient_id, content, reply_to_id, send_at, conversation_id, forwarded_from, attached_post_id });
+    return this.request('/v1/dms/messages', { method: 'POST', body });
+  }
+
+  // ─────────────────────────────────────────────
+  // MESSAGES DE GROUPE (migration 019)
+  // ─────────────────────────────────────────────
+  /** Crée un groupe dont le créateur devient admin. */
+  public static async createGroup(name: string, memberIds: Array<string | number>): Promise<{ success: boolean; conversation_id: string; name: string; member_count: number }> {
+    this.invalidateCache('/dms/');
+    return this.request('/v1/dms/groups', {
+      method: 'POST',
+      body: JSON.stringify({ name, member_ids: memberIds }),
+    });
+  }
+
+  /** Ajoute des membres (admin) — les ajoutés récupèrent tout l'historique. */
+  public static async addGroupMembers(groupId: string, memberIds: Array<string | number>): Promise<{ success: boolean; added: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ member_ids: memberIds }),
+    });
+  }
+
+  /** Retire un membre (admin) ou quitte le groupe soi-même. */
+  public static async removeGroupMember(groupId: string, userId: string | number): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members/${userId}`, { method: 'DELETE' });
+  }
+
+  /** Détails d'un groupe (nom, membres, rôle admin). */
+  public static async getGroup(groupId: string): Promise<{ group: { id: string; group_name: string; group_avatar_url?: string; created_by: string; is_admin: boolean; members: Array<{ user_id: string; username: string; display_name?: string; avatar_url?: string; role: string; joined_at: string }> } }> {
+    return this.request(`/v1/dms/groups/${groupId}`);
+  }
+
+  /** Met à jour le groupe (admin) : nom et/ou photo. */
+  public static async updateGroup(groupId: string, data: { name?: string; avatar_url?: string | null }): Promise<{ success: boolean; group?: { group_name: string; group_avatar_url: string | null } }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Supprime définitivement le groupe (admin). */
+  public static async deleteGroup(groupId: string): Promise<{ success: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}`, { method: 'DELETE' });
+  }
+
+  /** Transfère le rôle d'administrateur du groupe à un membre. */
+  public static async transferGroupAdmin(groupId: string, userId: string | number): Promise<{ success: boolean; new_admin: number }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/groups/${groupId}/members/${userId}/transfer-admin`, { method: 'POST' });
+  }
+
+  /** Masque un message pour soi uniquement (« supprimer pour moi »). */
+  public static async hideMessage(messageId: string): Promise<{ success: boolean; hidden: boolean }> {
+    this.invalidateCache('/dms/');
+    return this.request(`/v1/dms/messages/${messageId}/hide`, { method: 'POST' });
+  }
+
+  /** Mémorise côté serveur une traduction de message (max 3 langues). */
+  public static async saveMessageTranslation(messageId: string, lang: string, text: string, detected?: string | null): Promise<{ success: boolean; translations: Record<string, { text: string; detected?: string | null; at?: string }> }> {
+    return this.request(`/v1/dms/messages/${messageId}/translations`, {
+      method: 'POST',
+      body: JSON.stringify({ lang, text, detected }),
+    });
+  }
+
+  /** Catalogue des outils mAI (lib/tools/index.json, filtré par réglages). */
+  public static async getMAITools(): Promise<{ tools: Array<{ id: string; name: string; slash_command: string; mention_tag: string; description: string; icon_name: string; category: string; sensitive: boolean }> }> {
+    return this.request('/v1/mai/tools');
+  }
+
+  /** Enregistre la liste des outils mAI activés (Paramètres → Outils mAI). */
+  public static async updateMAITools(enabledToolIds: string[]): Promise<{ success: boolean; enabled_tool_ids: string[] }> {
+    return this.request('/v1/mai/tools', {
+      method: 'POST',
+      body: JSON.stringify({ enabled_tool_ids: enabledToolIds }),
+    });
   }
 
   public static async reactToMessage(messageId: string, emoji: string): Promise<{ success: boolean; reacted: boolean; reactions: { emoji: string; count: number; mine: boolean }[] }> {
     this.invalidateCache('/dms/');
-    try {
-      return await this.request(`/v1/dms/messages/${messageId}/react`, {
-        method: 'POST',
-        body: JSON.stringify({ emoji }),
-      });
-    } catch {
-      return await this.request(`/api/vibe/dms/messages/${messageId}/react`, {
-        method: 'POST',
-        body: JSON.stringify({ emoji }),
-      });
-    }
+    return this.request(`/v1/dms/messages/${messageId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    });
   }
 
   public static async generateDMReply(
@@ -710,18 +1143,14 @@ export class ApiService {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-    } catch {
-      try {
-        return await this.request(`/v1/dms/generate-reply/${partnerId}`, {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-      } catch {
-        return await this.request(`/api/vibe/dms/generate-reply/${partnerId}`, {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-      }
+    } catch (error: any) {
+      // Une ancienne route de génération n'est essayée que si la première a
+      // réellement disparu ; jamais après un 401/429/500 ou une erreur réseau.
+      if (!this.shouldRetryVibeAlias(error)) throw error;
+      return this.request(`/v1/dms/generate-reply/${partnerId}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
     }
   }
 
@@ -743,11 +1172,7 @@ export class ApiService {
   }
 
   public static async getBlockedUsers(): Promise<{ blocked: Array<{ id: string; blocked_user_id: string; blocked_username?: string; blocked_display_name?: string; blocked_avatar_url?: string; created_at: string }> }> {
-    try {
-      return await this.request('/v1/dms/blocked');
-    } catch {
-      return await this.request('/api/vibe/dms/blocked');
-    }
+    return this.request('/v1/dms/blocked');
   }
 
   // ─────────────────────────────────────────────
@@ -755,25 +1180,14 @@ export class ApiService {
   // ─────────────────────────────────────────────
   public static async muteUser(username: string, muted: boolean): Promise<{ success: boolean; muted: boolean }> {
     const clean = username.trim().replace(/^@/, '');
-    try {
-      return await this.request(`/v1/users/${encodeURIComponent(clean)}/mute`, {
-        method: 'POST',
-        body: JSON.stringify({ muted }),
-      });
-    } catch {
-      return await this.request(`/api/vibe/users/${encodeURIComponent(clean)}/mute`, {
-        method: 'POST',
-        body: JSON.stringify({ muted }),
-      });
-    }
+    return this.request(`/v1/users/${encodeURIComponent(clean)}/mute`, {
+      method: 'POST',
+      body: JSON.stringify({ muted }),
+    });
   }
 
   public static async getMutedUsers(): Promise<{ muted: Array<{ id: string; muted_user_id: string; muted_username?: string; muted_display_name?: string; muted_avatar_url?: string; created_at: string }> }> {
-    try {
-      return await this.request('/v1/users/muted');
-    } catch {
-      return await this.request('/api/vibe/users/muted');
-    }
+    return this.request('/v1/users/muted');
   }
 
   public static async reportConversation(
@@ -814,49 +1228,29 @@ export class ApiService {
   /** Heartbeat « en train d'écrire » d'un DM (throttlé côté appelant). */
   public static async sendTyping(partnerId: string | number, typing: boolean = true): Promise<void> {
     const payload = JSON.stringify({ partner_id: partnerId, typing });
-    try {
-      await this.request('/v1/dms/typing', { method: 'POST', body: payload });
-    } catch {
-      await this.request('/api/vibe/dms/typing', { method: 'POST', body: payload });
-    }
+    await this.request('/v1/dms/typing', { method: 'POST', body: payload });
   }
 
   // ─────────────────────────────────────────────
   // AUDIENCE — CERCLE PRIVÉ (visibilité des posts)
   // ─────────────────────────────────────────────
   public static async getCircle(): Promise<{ members: Array<{ id: string | number; username: string; display_name?: string; avatar_url?: string; is_verified?: boolean; added_at?: string }> }> {
-    try {
-      return await this.cachedRequest('/v1/circle', 20000);
-    } catch {
-      return await this.cachedRequest('/api/vibe/circle', 20000);
-    }
+    return this.cachedRequest('/v1/circle', 20000);
   }
 
   public static async addToCircle(username: string): Promise<{ success: boolean }> {
     this.invalidateCache('/circle');
-    try {
-      return await this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/circle/${encodeURIComponent(username)}`, { method: 'POST' });
-    }
+    return this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'POST' });
   }
 
   public static async removeFromCircle(username: string): Promise<{ success: boolean }> {
     this.invalidateCache('/circle');
-    try {
-      return await this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'DELETE' });
-    } catch {
-      return await this.request(`/api/vibe/circle/${encodeURIComponent(username)}`, { method: 'DELETE' });
-    }
+    return this.request(`/v1/circle/${encodeURIComponent(username)}`, { method: 'DELETE' });
   }
 
   /** @username est-il dans mon cercle ? (état du bouton sur les profils) */
   public static async checkCircle(username: string): Promise<{ in_circle: boolean }> {
-    try {
-      return await this.request(`/v1/circle/check/${encodeURIComponent(username)}`);
-    } catch {
-      return await this.request(`/api/vibe/circle/check/${encodeURIComponent(username)}`);
-    }
+    return this.request(`/v1/circle/check/${encodeURIComponent(username)}`);
   }
 
   // ─────────────────────────────────────────────
@@ -868,31 +1262,19 @@ export class ApiService {
     tone?: string
   ): Promise<{ success: boolean; text: string }> {
     const payload = JSON.stringify({ text, action, tone });
-    try {
-      return await this.request('/v1/ai/text', { method: 'POST', body: payload });
-    } catch {
-      return await this.request('/api/vibe/ai/text', { method: 'POST', body: payload });
-    }
+    return this.request('/v1/ai/text', { method: 'POST', body: payload });
   }
 
   /** Traduction d'une publication (DeepL, repli mAI côté serveur, cache inclus). */
   public static async translatePost(postId: string, targetLang: string): Promise<TranslateResult> {
     const payload = JSON.stringify({ post_id: postId, target_lang: targetLang });
-    try {
-      return await this.request('/v1/translate', { method: 'POST', body: payload });
-    } catch {
-      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
-    }
+    return this.request('/v1/translate', { method: 'POST', body: payload });
   }
 
   /** Traduction d'un commentaire/réponse (DeepL, repli mAI côté serveur). */
   public static async translateComment(commentId: string, targetLang: string): Promise<TranslateResult> {
     const payload = JSON.stringify({ comment_id: commentId, target_lang: targetLang });
-    try {
-      return await this.request('/v1/translate', { method: 'POST', body: payload });
-    } catch {
-      return await this.request('/api/vibe/translate', { method: 'POST', body: payload });
-    }
+    return this.request('/v1/translate', { method: 'POST', body: payload });
   }
 
   // ─────────────────────────────────────────────
@@ -900,11 +1282,7 @@ export class ApiService {
   // ─────────────────────────────────────────────
   public static async getSpeechVoices(): Promise<{ voices: Array<{ id: string; name: string; gender?: string; languages?: string[] }> }> {
     const extract = (res: any) => ({ voices: res?.voices || res?.data || (Array.isArray(res) ? res : []) });
-    try {
-      return extract(await this.request('/v1/speech/voices'));
-    } catch {
-      return extract(await this.request('/api/vibe/speech/voices'));
-    }
+    return extract(await this.request('/v1/speech/voices'));
   }
 
   /** Synthèse vocale d'un texte → URL de lecture (data URL audio). */
@@ -916,7 +1294,8 @@ export class ApiService {
       return_json: true,
     });
 
-    const endpoints = ['/v1/speech', '/speech', '/v1/audio/speech', '/api/vibe/speech'];
+    // Les alias /api/vibe sont ajoutés par request() après un 404/405.
+    const endpoints = ['/v1/speech', '/speech', '/v1/audio/speech'];
     let lastError: any = null;
 
     for (const ep of endpoints) {
@@ -930,6 +1309,9 @@ export class ApiService {
           return { url: audioUrl };
         }
       } catch (err: any) {
+        // Les variantes TTS ne sont essayées que si la route précédente a
+        // disparu ; ne pas rejouer une génération après une erreur métier/réseau.
+        if (!this.shouldRetryVibeAlias(err)) throw err;
         lastError = err;
       }
     }
@@ -1001,79 +1383,116 @@ export class ApiService {
     message: string,
     execute_tool?: { name: string; args: any },
     model?: string,
-    context?: { post_id?: string }
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string; requiresApproval?: boolean; pendingTool?: { name: string; args: any }; conversation_id?: string }> {
-    const payload = { message, execute_tool, model, context };
-    try {
-      return await this.request('/v1/mai/chat', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      return await this.request('/api/vibe/mai/chat', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    }
+    context?: { post_id?: string },
+    conversationId?: string
+  ): Promise<{
+    reply: string;
+    toolExecuted?: any;
+    toolCalls?: MaiToolCall[];
+    modelUsed?: string;
+    requiresApproval?: boolean;
+    pendingTool?: { name: string; args: any };
+    conversation_id?: string | null;
+    user_message_id?: string | null;
+    assistant_message_id?: string | null;
+  }> {
+    const payload = { message, execute_tool, model, context, conversation_id: conversationId };
+    return this.request('/v1/mai/chat', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
-  /** Historique de la conversation mAI active (persistance serveur). */
-  public static async getMAIHistory(): Promise<{ conversation_id: string | null; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; created_at: string }> }> {
-    try {
-      return await this.request('/v1/mai/history');
-    } catch {
-      return await this.request('/api/vibe/mai/history');
-    }
+  /** Régénère la dernière réponse mAI de la conversation (sans rejouer tout le fil). */
+  public static async regenerateMAI(opts?: { model?: string; postId?: string; conversationId?: string }): Promise<{ success: boolean; reply: string; message_id: string | null; modelUsed?: string; conversation_id?: string | null }> {
+    const payload = JSON.stringify({
+      model: opts?.model,
+      context: opts?.postId ? { post_id: opts.postId } : undefined,
+      conversation_id: opts?.conversationId,
+    });
+    return this.request('/v1/mai/regenerate', { method: 'POST', body: payload });
+  }
+
+  /** Historique d'une conversation mAI (persistance serveur, multi-conversations). */
+  public static async getMAIHistory(conversationId?: string, limit?: number, offset?: number): Promise<{
+    conversation_id: string | null;
+    messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; tool_calls?: MaiToolCall[]; created_at: string }>;
+    has_more?: boolean;
+  }> {
+    const params = new URLSearchParams();
+    if (conversationId) params.set('conversation_id', conversationId);
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`/v1/mai/history${qs}`);
   }
 
   /** Démarre une nouvelle conversation mAI (vide l'historique actif). */
   public static async newMAIConversation(): Promise<{ success: boolean; conversation_id: string }> {
-    try {
-      return await this.request('/v1/mai/history/new', { method: 'POST' });
-    } catch {
-      return await this.request('/api/vibe/mai/history/new', { method: 'POST' });
-    }
+    return this.request('/v1/mai/history/new', { method: 'POST' });
+  }
+
+  /** Liste des conversations mAI de l'utilisateur (page Studio). */
+  public static async getMAIConversations(): Promise<{ success: boolean; conversations: MAIConversationSummary[] }> {
+    return this.request('/v1/mai/conversations');
+  }
+
+  /** Renomme une conversation mAI. */
+  public static async renameMAIConversation(conversationId: string, title: string): Promise<{ success: boolean; conversation: { id: string; title: string } }> {
+    const body = JSON.stringify({ title });
+    return this.request(`/v1/mai/conversations/${conversationId}/rename`, { method: 'POST', body });
+  }
+
+  /** Supprime une conversation mAI (messages en cascade). */
+  public static async deleteMAIConversation(conversationId: string): Promise<{ success: boolean; deleted: string }> {
+    return this.request(`/v1/mai/conversations/${conversationId}`, { method: 'DELETE' });
+  }
+
+  /** Duplique une conversation mAI (messages copiés). */
+  public static async duplicateMAIConversation(conversationId: string): Promise<{ success: boolean; conversation_id: string }> {
+    return this.request(`/v1/mai/conversations/${conversationId}/duplicate`, { method: 'POST' });
   }
 
   /** Exécute un outil mAI explicitement approuvé par l'utilisateur. */
   public static async executeMAITool(
     name: string,
     args: any = {},
-    model?: string
-  ): Promise<{ reply: string; toolExecuted?: any; modelUsed?: string }> {
-    try {
-      return await this.request('/v1/mai/execute-tool', {
-        method: 'POST',
-        body: JSON.stringify({ name, args, model }),
-      });
-    } catch {
-      return await this.request('/api/vibe/mai/execute-tool', {
-        method: 'POST',
-        body: JSON.stringify({ name, args, model }),
-      });
-    }
+    model?: string,
+    approve: boolean = false,
+    conversationId?: string
+  ): Promise<{
+    reply: string;
+    toolExecuted?: any;
+    toolCalls?: MaiToolCall[];
+    modelUsed?: string;
+    requiresApproval?: boolean;
+    pendingTool?: { name: string; args: any };
+    conversation_id?: string | null;
+    assistant_message_id?: string | null;
+  }> {
+    const body = JSON.stringify({ name, args, model, approve, conversation_id: conversationId });
+    return this.request('/v1/mai/execute-tool', { method: 'POST', body });
+  }
+
+  /** Refuse l'exécution d'un outil sensible (flux d'approbation persisté). */
+  public static async refuseMAITool(
+    name: string,
+    args: any = {},
+    conversationId?: string
+  ): Promise<{ success: boolean; reply: string; toolCalls?: MaiToolCall[]; conversation_id?: string | null; message_id?: string | null }> {
+    const body = JSON.stringify({ name, args, conversation_id: conversationId });
+    return this.request('/v1/mai/tool-refused', { method: 'POST', body });
   }
 
   public static async getMAIQuotas(): Promise<MAIQuotas> {
-    try {
-      return await this.request('/v1/mai/quotas');
-    } catch {
-      return await this.request('/api/vibe/mai/quotas');
-    }
+    return this.request('/v1/mai/quotas');
   }
 
   public static async modulateText(text: string, tone: string = 'executive'): Promise<{ success: boolean; modulated: string }> {
-    try {
-      return await this.request('/v1/mai/modulate', {
-        method: 'POST',
-        body: JSON.stringify({ text, tone }),
-      });
-    } catch {
-      return await this.request('/api/vibe/mai/modulate', {
-        method: 'POST',
-        body: JSON.stringify({ text, tone }),
-      });
-    }
+    return this.request('/v1/mai/modulate', {
+      method: 'POST',
+      body: JSON.stringify({ text, tone }),
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -1082,154 +1501,76 @@ export class ApiService {
   public static async getProfile(username: string): Promise<{ profile: Profile; posts: Post[] }> {
     const cleanUser = username.trim().replace(/^@/, '');
     const endpoint = `/v1/profiles/${encodeURIComponent(cleanUser)}`;
-    try {
-      return await this.cachedRequest(endpoint, 30000);
-    } catch {
-      return await this.cachedRequest(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}`, 30000);
-    }
+    return this.cachedRequest(endpoint, 30000);
   }
 
   public static async updateProfile(data: Partial<Profile>): Promise<{ success: boolean }> {
-    try {
-      return await this.request('/v1/profile/update', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
-    } catch {
-      return await this.request('/api/vibe/profile/update', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
-    }
+    // Sans invalidation, le profil GET en cache (30 s) réaffichait l'ancien pseudo/tags après save
+    this.invalidateCache('/profiles/');
+    return this.request('/v1/profile/update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   }
 
   public static async uploadAvatar(file: File): Promise<{ avatarUrl: string; success: boolean }> {
-    const token = this.getToken();
-    const formData = new FormData();
-    formData.append('avatar', file);
-
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
-    try {
-      const res = await fetch(`${API_BASE}/v1/upload-avatar`, {
-        method: 'POST',
-        headers,
-        body: formData,
-      });
-      if (res.ok) return await res.json();
-    } catch {}
-
-    const resFallback = await fetch(`${API_BASE}/upload-avatar`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-    if (!resFallback.ok) {
-      const err = await resFallback.json().catch(() => ({}));
-      throw new Error(err.error || "Erreur lors de l'upload de l'avatar.");
-    }
-    return await resFallback.json();
+    return this.uploadWithFallback<{ avatarUrl: string; success: boolean }>(
+      '/v1/upload-avatar',
+      '/upload-avatar',
+      'avatar',
+      file,
+      "Erreur lors de l'upload de l'avatar."
+    );
   }
 
   public static async uploadFile(file: File): Promise<{ url: string; pathname: string; contentType: string }> {
-    const token = this.getToken();
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
-    try {
-      const res = await fetch(`${API_BASE}/v1/upload-file`, {
-        method: 'POST',
-        headers,
-        body: formData,
-      });
-      if (res.ok) return await res.json();
-    } catch {}
-
-    const resFallback = await fetch(`${API_BASE}/upload-file`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-    if (!resFallback.ok) {
-      const err = await resFallback.json().catch(() => ({}));
-      throw new Error(err.error || "Erreur lors de l'upload du fichier.");
-    }
-    return await resFallback.json();
+    return this.uploadWithFallback<{ url: string; pathname: string; contentType: string }>(
+      '/v1/upload-file',
+      '/upload-file',
+      'file',
+      file,
+      "Erreur lors de l'upload du fichier."
+    );
   }
 
   public static async updateAvatar(avatarUrl: string): Promise<{ success: boolean; avatarUrl: string }> {
-    try {
-      return await this.request('/v1/profile/avatar', {
-        method: 'POST',
-        body: JSON.stringify({ avatarUrl }),
-      });
-    } catch {
-      return await this.request('/api/vibe/profile/avatar', {
-        method: 'POST',
-        body: JSON.stringify({ avatarUrl }),
-      });
-    }
+    return this.request('/v1/profile/avatar', {
+      method: 'POST',
+      body: JSON.stringify({ avatarUrl }),
+    });
   }
 
   public static async toggleFollow(username: string): Promise<{ success: boolean; following: boolean }> {
     const cleanUser = username.trim().replace(/^@/, '');
-    try {
-      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/follow`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/follow`, { method: 'POST' });
-    }
+    return this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/follow`, { method: 'POST' });
   }
 
   /** Statut de l'abonnement aux notifications de posts d'un compte. */
   public static async getPostSubscription(username: string): Promise<{ success: boolean; subscribed: boolean }> {
     const cleanUser = username.trim().replace(/^@/, '');
-    try {
-      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`);
-    } catch {
-      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/subscribe`);
-    }
+    return this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`);
   }
 
   /** S'abonner / se désabonner aux notifications de posts d'un compte (toggle). */
   public static async togglePostSubscription(username: string): Promise<{ success: boolean; subscribed: boolean }> {
     const cleanUser = username.trim().replace(/^@/, '');
-    try {
-      return await this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`, { method: 'POST' });
-    } catch {
-      return await this.request(`/api/vibe/profiles/${encodeURIComponent(cleanUser)}/subscribe`, { method: 'POST' });
-    }
+    return this.request(`/v1/profiles/${encodeURIComponent(cleanUser)}/subscribe`, { method: 'POST' });
   }
 
   // ─────────────────────────────────────────────
   // NOTIFICATIONS & SETTINGS
   // ─────────────────────────────────────────────
   public static async getNotifications(): Promise<{ notifications: NotificationItem[] }> {
-    try {
-      return await this.request('/v1/notifications');
-    } catch {
-      return await this.request('/api/vibe/notifications');
-    }
+    return this.request('/v1/notifications');
   }
 
   /** Badges légers : un seul appel, aucune liste chargée. */
   public static async getUnreadCounts(): Promise<{ unread_notifications: number; unread_messages: number }> {
-    try {
-      return await this.request('/v1/notifications/unread_count');
-    } catch {
-      return await this.request('/api/vibe/notifications/unread_count');
-    }
+    return this.request('/v1/notifications/unread_count');
   }
 
   public static async markNotificationsRead(): Promise<{ success: boolean }> {
-    try {
-      return await this.request('/v1/notifications/read', { method: 'POST' });
-    } catch {
-      return await this.request('/api/vibe/notifications/read', { method: 'POST' });
-    }
+    return this.request('/v1/notifications/read', { method: 'POST' });
   }
 
   public static async markNotificationRead(id: string, isRead = true): Promise<{ success: boolean }> {
@@ -1239,18 +1580,12 @@ export class ApiService {
         method: 'POST',
         body: payload,
       });
-    } catch {
-      try {
-        return await this.request('/v1/notifications/read', {
-          method: 'POST',
-          body: payload,
-        });
-      } catch {
-        return await this.request('/api/vibe/notifications/read', {
-          method: 'POST',
-          body: payload,
-        });
-      }
+    } catch (error: any) {
+      if (!this.shouldRetryVibeAlias(error)) throw error;
+      return this.request('/v1/notifications/read', {
+        method: 'POST',
+        body: payload,
+      });
     }
   }
 
@@ -1258,61 +1593,40 @@ export class ApiService {
     const payload = JSON.stringify({ id });
     try {
       return await this.request(`/v1/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    } catch {
-      try {
-        return await this.request('/v1/notifications/delete', {
-          method: 'POST',
-          body: payload,
-        });
-      } catch {
-        return await this.request(`/api/vibe/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      }
+    } catch (error: any) {
+      if (!this.shouldRetryVibeAlias(error)) throw error;
+      return this.request('/v1/notifications/delete', {
+        method: 'POST',
+        body: payload,
+      });
     }
   }
 
   public static async clearAllNotifications(): Promise<{ success: boolean }> {
     try {
       return await this.request('/v1/notifications', { method: 'DELETE' });
-    } catch {
-      try {
-        return await this.request('/v1/notifications/delete', {
-          method: 'POST',
-          body: JSON.stringify({ all: true }),
-        });
-      } catch {
-        return await this.request('/api/vibe/notifications/clear', { method: 'POST' });
-      }
+    } catch (error: any) {
+      if (!this.shouldRetryVibeAlias(error)) throw error;
+      return this.request('/v1/notifications/delete', {
+        method: 'POST',
+        body: JSON.stringify({ all: true }),
+      });
     }
   }
 
   public static async getSettings(): Promise<{ settings: UserSettings }> {
-    try {
-      return await this.request('/v1/settings');
-    } catch {
-      return await this.request('/api/vibe/settings');
-    }
+    return this.request('/v1/settings');
   }
 
   public static async updateSettings(settings: Partial<UserSettings>): Promise<{ success: boolean }> {
-    try {
-      return await this.request('/v1/settings/update', {
-        method: 'POST',
-        body: JSON.stringify(settings),
-      });
-    } catch {
-      return await this.request('/api/vibe/settings/update', {
-        method: 'POST',
-        body: JSON.stringify(settings),
-      });
-    }
+    return this.request('/v1/settings/update', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    });
   }
 
   public static async exportData(): Promise<any> {
-    try {
-      return await this.request('/v1/privacy/export');
-    } catch {
-      return await this.request('/api/vibe/privacy/export');
-    }
+    return this.request('/v1/privacy/export');
   }
 
   public static async logUsage(endpoint: string, tokens: number = 10): Promise<void> {

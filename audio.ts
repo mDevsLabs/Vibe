@@ -313,9 +313,9 @@ export function registerAudioRoutes(app: Hono) {
         weeklyLimit,
       });
     } catch (err: any) {
+      console.error("[Speech] usage error:", err?.message || err);
       return c.json(
         {
-          details: err.message,
           error: "Erreur lors de la récupération de l'usage Speech.",
         },
         500
@@ -365,8 +365,9 @@ export function registerAudioRoutes(app: Hono) {
 
       return c.json({ data: formattedHistory, success: true });
     } catch (err: any) {
+      console.error("[Speech] history error:", err?.message || err);
       return c.json(
-        { details: err.message, error: "Erreur historique audio." },
+        { error: "Erreur historique audio." },
         500
       );
     }
@@ -418,8 +419,9 @@ export function registerAudioRoutes(app: Hono) {
 
       return c.json({ data: result[0] || null, success: true });
     } catch (err: any) {
+      console.error("[Speech] update history error:", err?.message || err);
       return c.json(
-        { details: err.message, error: "Erreur mise à jour audio." },
+        { error: "Erreur mise à jour audio." },
         500
       );
     }
@@ -470,8 +472,9 @@ export function registerAudioRoutes(app: Hono) {
 
       return c.json({ message: "Audio supprimé avec succès", success: true });
     } catch (err: any) {
+      console.error("[Speech] delete history error:", err?.message || err);
       return c.json(
-        { details: err.message, error: "Erreur suppression audio." },
+        { error: "Erreur suppression audio." },
         500
       );
     }
@@ -692,7 +695,6 @@ export function registerAudioRoutes(app: Hono) {
         console.error("[OpenRouter Speech] Erreur retournée:", errText);
         return c.json(
           {
-            details: errText,
             error: "Erreur retournée par le fournisseur OpenRouter pour Speech.",
           },
           openRouterRes.status
@@ -809,7 +811,6 @@ export function registerAudioRoutes(app: Hono) {
       console.error("[Speech API] Erreur serveur:", err);
       return c.json(
         {
-          details: err.message,
           error: "Erreur serveur lors du traitement Speech.",
         },
         500

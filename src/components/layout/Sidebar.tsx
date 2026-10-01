@@ -23,6 +23,7 @@ import { useAuth } from '../../context/AuthContext';
 import { VibeLogo } from './VibeLogo';
 import { VerifiedBadge } from '../common/VerifiedBadge';
 import { ProfileAvatar } from '../common/ProfileAvatar';
+import { GlobalSearchBar } from './GlobalSearchBar';
 
 interface SidebarProps {
   onOpenComposer: () => void;
@@ -33,7 +34,8 @@ interface SidebarProps {
 const NAV_ITEMS = [
   { path: '/', label: 'Accueil', icon: Home, exact: true },
   { path: '/explore', label: 'Explorer', icon: Compass },
-  { path: '/notifications', label: 'Notifications', icon: Bell, badgeKey: 'notifications' as const },
+  // En xl, cette entrée est remplacée par le bouton cloche en haut à droite du logo
+  { path: '/notifications', label: 'Notifications', icon: Bell, badgeKey: 'notifications' as const, compactOnly: true },
   { path: '/messages', label: 'Messages', icon: Mail, badgeKey: 'messages' as const },
   { path: '/books', label: 'Livres', icon: Library },
   { path: '/mai', label: 'mAI', icon: Sparkles },
@@ -75,19 +77,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="hidden sm:flex w-16 sm:w-20 xl:w-64 h-screen sticky top-0 border-r border-zinc-800 flex-col justify-between p-2 sm:p-3 xl:p-4 bg-black select-none z-30 shrink-0">
       {/* Brand & Nav List */}
       <div className="space-y-4">
-        {/* Brand Logo */}
-        <Link
-          to="/"
-          className="cursor-pointer mx-auto xl:mx-0 w-fit p-1.5 flex items-center justify-center"
-          title="Accueil Vibe"
-        >
-          <div className="xl:hidden">
-            <VibeLogo size={40} showText={false} />
-          </div>
-          <div className="hidden xl:block">
-            <VibeLogo size={40} showText={true} />
-          </div>
-        </Link>
+        {/* Brand Logo + bouton Notifications (déplacé en haut à droite du logo en xl) */}
+        <div className="flex items-center justify-center xl:justify-between xl:gap-2">
+          <Link
+            to="/"
+            className="cursor-pointer p-1.5 flex items-center justify-center"
+            title="Accueil Vibe"
+          >
+            <div className="xl:hidden">
+              <VibeLogo size={40} showText={false} />
+            </div>
+            <div className="hidden xl:block">
+              <VibeLogo size={40} showText={true} />
+            </div>
+          </Link>
+
+          <Link
+            to="/notifications"
+            onMouseEnter={() => pageLoaders['/notifications']?.()}
+            onFocus={() => pageLoaders['/notifications']?.()}
+            title="Notifications"
+            aria-label={`Notifications${unreadNotifications > 0 ? ` (${unreadNotifications} non lues)` : ''}`}
+            className={`hidden xl:flex relative w-10 h-10 rounded-full items-center justify-center shrink-0 transition-all ${
+              isActive('/notifications')
+                ? 'bg-zinc-900 text-white'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-950'
+            }`}
+          >
+            <Bell className="w-5 h-5" />
+            {unreadNotifications > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-5 h-5 px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center leading-none shadow-md shadow-rose-500/50">
+                {unreadNotifications > 99 ? '99+' : unreadNotifications}
+              </span>
+            )}
+          </Link>
+        </div>
+
+        {/* Recherche globale (écrans larges — complète le lien Explorer) */}
+        <div className="hidden xl:block px-1">
+          <GlobalSearchBar />
+        </div>
 
         {/* Navigation Items */}
         <nav className="space-y-1.5 flex flex-col items-center xl:items-stretch">
@@ -101,17 +130,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 ? unreadMessages
                 : 0;
 
+            const handleClick = (e: React.MouseEvent) => {
+              if (item.path === '/mai') {
+                e.preventDefault();
+                navigate(`/mai?new=${Date.now()}`);
+                window.dispatchEvent(new CustomEvent('vibe:mai:new_conversation'));
+              }
+            };
+
             return (
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={handleClick}
                 onMouseEnter={() => pageLoaders[item.path]?.()}
                 onFocus={() => pageLoaders[item.path]?.()}
                 className={`w-12 h-12 xl:w-full xl:h-auto p-0 xl:px-4 xl:py-3 rounded-full text-sm font-semibold transition-all flex items-center justify-center xl:justify-start gap-4 group relative ${
                   active
                     ? 'bg-zinc-900 text-white font-bold'
                     : 'text-zinc-400 hover:text-white hover:bg-zinc-950'
-                }`}
+                } ${item.compactOnly ? 'xl:hidden' : ''}`}
                 title={item.label}
               >
                 <div className="relative flex items-center justify-center">

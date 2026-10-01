@@ -18,17 +18,24 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [isSupported, setIsSupported] = useState(false);
+  const [isSupported, setIsSupported] = useState(() =>
+    typeof window !== 'undefined' && Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+  );
   const [error, setError] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
+  // Le callback vient des consommateurs (lambda recréée à chaque rendu) : le
+  // garder dans une ref évite de recréer/abandonner le recognizer à chaque rendu.
+  const onResultRef = useRef(onResult);
+  useEffect(() => {
+    onResultRef.current = onResult;
+  });
 
   useEffect(() => {
     const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      typeof window !== 'undefined' && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
     if (SpeechRecognition) {
-      setIsSupported(true);
       const recognition = new SpeechRecognition();
       recognition.continuous = continuous;
       recognition.interimResults = true;
@@ -55,7 +62,7 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
         if (currentFinal) {
           setTranscript((prev) => {
             const updated = (prev + ' ' + currentFinal).trim();
-            if (onResult) onResult(updated);
+            onResultRef.current?.(updated);
             return updated;
           });
         }
@@ -87,7 +94,7 @@ export function useSpeechRecognition(options: SpeechRecognitionHookOptions = {})
         } catch {}
       }
     };
-  }, [language, continuous, onResult]);
+  }, [language, continuous]);
 
   const startListening = useCallback(() => {
     if (!recognitionRef.current) {

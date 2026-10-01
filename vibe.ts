@@ -24,7 +24,7 @@ export {
   type PostCandidate,
   type RecommendationSignal,
 } from "./vibe-recommender.ts";
-export { MAI_TOOLS, MAIAgentFleet } from "./vibe-mai-fleet.ts";
+export { MAIAgentFleet } from "./vibe-mai-fleet.ts";
 export { registerVibePostsRoutes } from "./vibe-posts.ts";
 export { registerVibeFeedRoutes } from "./vibe-feed.ts";
 export { registerVibeUsersRoutes } from "./vibe-users.ts";
@@ -40,8 +40,10 @@ export function registerVibeRoutes(app: Hono) {
   const registerMulti = createRegisterMulti(app);
 
   // Mount modular route domains
-  registerVibePostsRoutes(app, registerMulti);
+  // Feed avant Posts : l'ordre d'enregistrement fait foi dans le routeur Hono,
+  // la route statique /v1/posts/top (feed) doit primer sur /v1/posts/:id (posts).
   registerVibeFeedRoutes(app, registerMulti);
+  registerVibePostsRoutes(app, registerMulti);
   registerVibeUsersRoutes(app, registerMulti);
   registerVibeDMsRoutes(app, registerMulti);
   registerVibeSettingsRoutes(app, registerMulti);

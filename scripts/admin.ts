@@ -1679,8 +1679,11 @@ export async function handleEditCustomerProfile(rl: readline.Interface, targetUs
       }
       case '3': {
         console.log(`\n${c.bold}Identifiants de compte :${c.reset}`);
-        const newUsername = (await rl.question(`  ➔ Nouveau Username (vide pour conserver "${full.username}") : `)).trim();
-        if (newUsername && newUsername !== full.username) {
+        const rawNewUsername = (await rl.question(`  ➔ Nouveau Username (vide pour conserver "${full.username}") : `)).trim().toLowerCase();
+        const newUsername = /^[a-z0-9_]{2,30}$/.test(rawNewUsername) ? rawNewUsername : '';
+        if (rawNewUsername && !newUsername) {
+          console.log(`  ${c.red}❌ Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _).${c.reset}`);
+        } else if (newUsername && newUsername !== full.username) {
           const exists = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${newUsername}) AND id != ${Number(full.id)} LIMIT 1`;
           if (exists.length > 0) {
             console.log(`  ${c.red}❌ Ce nom d'utilisateur est déjà utilisé par un autre compte.${c.reset}`);

@@ -15,15 +15,19 @@ import { MobileTabBar } from './components/layout/MobileTabBar';
 import { MAIDrawer } from './components/layout/MAIDrawer';
 import { FloatingAudioPlayer } from './components/feed/FloatingAudioPlayer';
 import { PostComposer } from './components/feed/PostComposer';
+import { OnboardingModal } from './components/common/OnboardingModal';
 import { HomePage } from './pages/HomePage';
 import { AuthModal } from './pages/AuthModal';
 import { PageSkeleton } from './components/common/PageSkeleton';
 import { Post } from './types/vibe';
-import { X, CheckCircle, Loader2 } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Info, Loader2 } from 'lucide-react';
 import { InAppToast } from './services/notificationService';
 import { ApiService } from './services/api';
 import { RealtimeService } from './services/realtimeService';
 import { OfflineBanner } from './components/common/OfflineBanner';
+import { PWAUpdatePrompt } from './components/common/PWAUpdatePrompt';
+import { applyAnimationsAttribute } from './services/animationPrefs';
+import { useVisualViewport } from './hooks/useVisualViewport';
 
 // Code splitting : chaque page est chargée à la demande
 const PostDetailPage = lazy(() =>
@@ -49,6 +53,12 @@ const SettingsPage = lazy(() =>
 );
 const BooksPage = lazy(() =>
   import('./pages/BooksPage').then((m) => ({ default: m.BooksPage }))
+);
+const BooksJoinPage = lazy(() =>
+  import('./pages/BooksJoinPage').then((m) => ({ default: m.BooksJoinPage }))
+);
+const StatsPage = lazy(() =>
+  import('./pages/StatsPage').then((m) => ({ default: m.StatsPage }))
 );
 
 // Restauration de la position de scroll par route (deep-link => haut de page)
@@ -82,7 +92,7 @@ function ScrollManager() {
 }
 
 function VibeApp() {
-  const { isAuthenticated, isLoadingSession } = useAuth();
+  const { isAuthenticated, isLoadingSession, showOnboarding, dismissOnboarding } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [isMAIDrawerOpen, setIsMAIDrawerOpen] = useState(false);
@@ -120,6 +130,13 @@ function VibeApp() {
       } catch {}
     }
   }, []);
+
+  useEffect(() => {
+    applyAnimationsAttribute();
+  }, []);
+
+  // Suit le clavier virtuel (iOS) : publie --vibe-kb-offset pour les zones de saisie
+  useVisualViewport();
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -232,7 +249,7 @@ function VibeApp() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white flex justify-center font-sans antialiased selection:bg-white selection:text-black">
+    <div className="min-h-dvh bg-black text-white flex justify-center font-sans antialiased selection:bg-white selection:text-black">
       <ScrollManager />
       <div className="w-full max-w-7xl flex relative">
         {/* Left Navigation Sidebar (Desktop / Tablet) */}
@@ -243,7 +260,7 @@ function VibeApp() {
         />
 
         {/* Center Main Viewport (Pleine largeur étendue) */}
-        <main className="flex-1 w-full min-h-screen border-r border-zinc-800 pb-20 sm:pb-0">
+        <main className="flex-1 w-full min-h-dvh border-r border-zinc-800 pb-[calc(5rem+env(safe-area-inset-bottom))] sm:pb-0">
           <Suspense fallback={<PageSkeleton />}>
             <Routes>
               <Route path="/" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
@@ -257,8 +274,11 @@ function VibeApp() {
               <Route path="/mai" element={<MAIStudioPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               {/* Livres : avant le catch-all /:username */}
+              <Route path="/books/join/:code" element={<BooksJoinPage />} />
               <Route path="/books" element={<BooksPage />} />
               <Route path="/books/:bookId" element={<BooksPage />} />
+              {/* Statistiques : accès header Profil uniquement, hors navigation */}
+              <Route path="/stats" element={<StatsPage />} />
               <Route path="/:username" element={<ProfileRoute />} />
               <Route path="*" element={<HomePage onOpenThread={handleOpenThread} onOpenProfile={handleOpenProfile} />} />
             </Routes>
@@ -330,31 +350,48 @@ function VibeApp() {
         {/* Floating In-App Toast Notifications */}
         {toasts.length > 0 && (
           <div className="fixed top-5 right-5 z-50 flex flex-col gap-2 max-w-sm pointer-events-none">
-            {toasts.map((toast) => (
-              <div
-                key={toast.id}
-                className="pointer-events-auto p-4 rounded-2xl bg-zinc-950/95 border border-zinc-700 shadow-2xl backdrop-blur-md flex items-start gap-3 text-xs text-white animate-fadeIn"
-              >
-                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <p className="font-bold text-white text-xs">{toast.title}</p>
-                  <p className="text-zinc-300 text-[11px] mt-0.5 leading-relaxed">{toast.message}</p>
-                </div>
-                <button
-                  onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
-                  className="text-zinc-400 hover:text-white p-0.5"
+            {toasts.map((toast) => {
+              const toastType = toast.type || 'success';
+              const ToastIcon =
+                toastType === 'error' ? AlertCircle : toastType === 'info' ? Info : CheckCircle;
+              const iconClass =
+                toastType === 'error'
+                  ? 'text-red-400'
+                  : toastType === 'info'
+                  ? 'text-sky-400'
+                  : 'text-emerald-400';
+              return (
+                <div
+                  key={toast.id}
+                  className="pointer-events-auto p-4 rounded-2xl bg-zinc-950/95 border border-zinc-700 shadow-2xl backdrop-blur-md flex items-start gap-3 text-xs text-white animate-fadeIn"
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
+                  <ToastIcon className={`w-4 h-4 shrink-0 mt-0.5 ${iconClass}`} />
+                  <div className="flex-1">
+                    <p className="font-bold text-white text-xs">{toast.title}</p>
+                    <p className="text-zinc-300 text-[11px] mt-0.5 leading-relaxed">{toast.message}</p>
+                  </div>
+                  <button
+                    onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+                    className="text-zinc-400 hover:text-white p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
         {/* Mini-lecteur audio flottant mAI (posts & fils de discussion) */}
         <FloatingAudioPlayer />
 
+        {/* Onboarding guidé (première visite, user_settings.onboarding_completed = false) */}
+        {showOnboarding && <OnboardingModal onDone={dismissOnboarding} />}
+
         {/* Offline status banner */}
         <OfflineBanner />
+
+        {/* PWA : bannière quand une nouvelle version est prête */}
+        <PWAUpdatePrompt />
       </div>
     </div>
   );

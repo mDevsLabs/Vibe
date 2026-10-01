@@ -973,10 +973,9 @@ export function registerImageRoutes(app: Hono) {
         userId,
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
+      console.error("[ImagesAPI] error:", err);
       return c.json(
         {
-          details: msg,
           error: "Erreur lors de la récupération de l'usage image.",
         },
         500
@@ -1026,9 +1025,9 @@ export function registerImageRoutes(app: Hono) {
 
       return c.json({ data: formattedHistory, success: true });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
+      console.error("[ImagesAPI] error:", err);
       return c.json(
-        { details: msg, error: "Erreur historique images." },
+        { error: "Erreur historique images." },
         500
       );
     }
@@ -1080,8 +1079,8 @@ export function registerImageRoutes(app: Hono) {
 
       return c.json({ data: result[0] || null, success: true });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
-      return c.json({ details: msg, error: "Erreur mise à jour image." }, 500);
+      console.error("[ImagesAPI] error:", err);
+      return c.json({ error: "Erreur mise à jour image." }, 500);
     }
   };
 
@@ -1403,14 +1402,13 @@ export function registerImageRoutes(app: Hono) {
         },
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
+      console.error("[ImagesAPI] error:", err);
       console.error("[ImagesAPI] Erreur serveur génération:", err);
       return c.json(
         {
           error: {
             code: "image_generation_failed",
-            details: msg,
-            message: `Erreur lors de la génération d'image : ${msg}`,
+            message: "Erreur lors de la génération d'image.",
             type: "api_error",
           },
         },
@@ -1451,8 +1449,8 @@ export function registerImageRoutes(app: Hono) {
       const data = await res.json().catch(() => ({}));
       return c.json(data, res.status as any);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
-      return c.json({ error: "Erreur proxy Midjourney CometAPI", details: msg }, 500);
+      console.error("[ImagesAPI] error:", err);
+      return c.json({ error: "Erreur proxy Midjourney CometAPI" }, 500);
     }
   };
 
@@ -1497,8 +1495,8 @@ export function registerImageRoutes(app: Hono) {
       const data = await res.json().catch(() => ({}));
       return c.json(data, res.status as any);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
-      return c.json({ error: "Erreur upscale image", details: msg }, 500);
+      console.error("[ImagesAPI] error:", err);
+      return c.json({ error: "Erreur upscale image" }, 500);
     }
   };
 
@@ -1522,8 +1520,8 @@ export function registerImageRoutes(app: Hono) {
       const data = await res.json().catch(() => ({}));
       return c.json(data, res.status as any);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inconnue";
-      return c.json({ error: "Erreur récupération tâche", details: msg }, 500);
+      console.error("[ImagesAPI] error:", err);
+      return c.json({ error: "Erreur récupération tâche" }, 500);
     }
   };
 

@@ -286,14 +286,14 @@ html.light button.bg-white:disabled,
 }
 
 /* Tous les boutons en mode clair : texte noir (sauf boutons sombres explicites) */
-html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950),
-[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) {
+html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950):not(.vibe-chat-send-btn),
+[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950):not(.vibe-chat-send-btn) {
   color: #000000 !important;
 }
 
 /* Icônes de boutons en mode clair : police et trait noirs (sauf boutons sombres ou icônes spécifiques) */
-html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400),
-[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400) {
+html.light button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950):not(.vibe-chat-send-btn) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400),
+[data-theme="light"] button:not(.text-white):not(.text-zinc-100):not(.text-zinc-200):not(.text-red-400):not(.text-red-500):not(.text-rose-500):not(.bg-black):not(.bg-zinc-900):not(.bg-zinc-950):not(.vibe-chat-send-btn) svg:not(.text-white):not(.text-zinc-100):not(.text-red-500):not(.text-rose-500):not(.fill-rose-500):not(.fill-red-500):not(.text-amber-400):not(.text-sky-400):not(.text-indigo-400) {
   color: #000000 !important;
   stroke: #000000 !important;
 }
@@ -451,6 +451,10 @@ html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
 /* ─────────────────────────────────────────────────────────────
  * SAFE AREAS & MOBILE (encoches iOS, barre d'onglets, clavier)
  * ───────────────────────────────────────────────────────────── */
+:root {
+  --vibe-kb-offset: 0px;
+}
+
 .pt-safe {
   padding-top: env(safe-area-inset-top, 0px);
 }
@@ -462,6 +466,10 @@ html.light .liquid-glass-panel .hover\:bg-white\/10:hover,
 }
 .bottom-safe {
   bottom: env(safe-area-inset-bottom, 0px);
+}
+.px-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 /* Header sticky : statut-bar iOS + hauteur de contenu standard */
@@ -510,6 +518,8 @@ html.light .vibe-menu svg,
 
 /* ─────────────────────────────────────────────────────────────
  * ANIMATIONS UI/UX (likes, médias, transitions, pull-to-refresh)
+ * Unifié : un seul `vibe-likeBurst` canonique (avec rotation subtile).
+ * Perf : que transform/opacity/filter, will-change limité au burst.
  * ───────────────────────────────────────────────────────────── */
 @keyframes vibe-fadeIn {
   from { opacity: 0; }
@@ -520,10 +530,11 @@ html.light .vibe-menu svg,
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 @keyframes vibe-likeBurst {
-  0% { transform: scale(1); }
-  35% { transform: scale(1.45); }
-  60% { transform: scale(0.9); }
-  100% { transform: scale(1); }
+  0% { transform: scale(1) rotate(0deg); }
+  25% { transform: scale(1.38) rotate(-7deg); }
+  50% { transform: scale(0.88) rotate(4deg); }
+  75% { transform: scale(1.15) rotate(-1deg); }
+  100% { transform: scale(1) rotate(0deg); }
 }
 @keyframes vibe-mediaIn {
   from { opacity: 0; filter: blur(6px); }
@@ -533,12 +544,99 @@ html.light .vibe-menu svg,
   from { opacity: 0; transform: translateY(-10px); }
   to { opacity: 1; transform: translateY(0); }
 }
+@keyframes vibe-slideLeft {
+  from { opacity: 0; transform: translateX(48px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes vibe-slideUp {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes vibe-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes vibe-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+@keyframes vibe-countPop {
+  0% { transform: scale(0.7); }
+  50% { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+@keyframes vibe-particleFloat {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.4); }
+  15% { opacity: 1; transform: translate(var(--px, 0px), var(--py, -18px)) scale(1); }
+  100% { opacity: 0; transform: translate(calc(var(--px, 0px) * 1.6), calc(var(--py, -18px) * 2.2)) scale(0.6); }
+}
+@keyframes vibe-shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+@keyframes vibe-messageIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 
 .animate-fadeIn { animation: vibe-fadeIn 0.25s ease-out both; }
 .animate-scaleUp { animation: vibe-scaleUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.animate-likeBurst { animation: vibe-likeBurst 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.animate-likeBurst { animation: vibe-likeBurst 0.42s cubic-bezier(0.17, 0.89, 0.32, 1.49); will-change: transform; }
 .animate-mediaIn { animation: vibe-mediaIn 0.4s ease-out both; }
 .animate-slideDown { animation: vibe-slideDown 0.3s ease-out both; }
+.animate-slideLeft { animation: vibe-slideLeft 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.animate-slideUp { animation: vibe-slideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.animate-pop { animation: vibe-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.animate-shake { animation: vibe-shake 0.4s ease both; }
+.animate-countPop { animation: vibe-countPop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both; display: inline-block; }
+.animate-messageIn { animation: vibe-messageIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.animate-reactionPop { animation: vibe-pop 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both; display: inline-block; }
+
+/* Particules like (confetti léger, transform/opacity only) */
+.vibe-particle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  pointer-events: none;
+  animation: vibe-particleFloat 0.7s ease-out forwards;
+  will-change: transform, opacity;
+}
+
+/* Entrée feed stagger (délai via --vibe-delay) */
+.vibe-stagger-item {
+  animation: vibe-slideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--vibe-delay, 0ms);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
+}
+
+/* Skeleton shimmer (remplace animate-pulse pour perf perçue) */
+.vibe-shimmer {
+  background: linear-gradient(90deg, var(--chat-surface-muted) 25%, var(--chat-hover) 50%, var(--chat-surface-muted) 75%);
+  background-size: 200% 100%;
+  animation: vibe-shimmer 1.4s linear infinite;
+}
+
+/* Désactivation globale via [data-animations="off"] + reduced-motion */
+[data-animations="off"] *, [data-animations="off"] *::before, [data-animations="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 /* Transitions de vue : fondu/coulisse si l'API View Transitions est dispo */
 @media (prefers-reduced-motion: no-preference) {
@@ -582,16 +680,6 @@ html.light .rte-content,
 html.light .rich-content,
 [data-theme="light"] .rich-content {
   color: #000000 !important;
-}
-
-html.light .rte-content *:not(a):not(code),
-[data-theme="light"] .rte-content *:not(a):not(code) {
-  color: #000000 !important;
-}
-
-html.dark .rte-content *:not(a):not(code),
-[data-theme="dark"] .rte-content *:not(a):not(code) {
-  color: #ffffff !important;
 }
 
 .rte-content:empty::before,
@@ -654,6 +742,102 @@ html.dark .rte-content[data-empty="true"]::before,
 .rich-content a.rich-link:hover { text-decoration: underline; }
 .rich-content b, .rich-content strong { font-weight: 700; color: inherit; }
 .rte-content b, .rte-content strong { font-weight: 700; }
+
+/* ─────────────────────────────────────────────────────────────
+ * CONTENU ENRICHI — paragraphes, titres, code coloré, surlignage,
+ * formules KaTeX, tables et palette de couleurs Vibe.
+ * ───────────────────────────────────────────────────────────── */
+.rich-content p, .rte-content p { margin: 0.35rem 0; }
+.rich-content > :first-child, .rte-content > :first-child { margin-top: 0; }
+.rich-content > :last-child, .rte-content > :last-child { margin-bottom: 0; }
+
+.rich-content h1, .rich-content h2,
+.rte-content h1, .rte-content h2 {
+  font-size: 1.05rem;
+  font-weight: 800;
+  margin: 0.5rem 0 0.25rem;
+}
+.rich-content h3, .rich-content h4, .rich-content h5, .rich-content h6,
+.rte-content h3, .rte-content h4, .rte-content h5, .rte-content h6 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 0.4rem 0 0.2rem;
+}
+
+.rich-content pre, .rte-content pre {
+  background: var(--color-zinc-900);
+  border: 1px solid var(--color-zinc-800);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 0.82em;
+  line-height: 1.5;
+  tab-size: 2;
+}
+.rich-content pre code, .rte-content pre code {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  white-space: inherit;
+  font-size: 1em;
+}
+
+.rich-content mark, .rte-content mark {
+  background: rgba(250, 204, 21, 0.35);
+  color: inherit;
+  padding: 0 0.15em;
+  border-radius: 0.2em;
+}
+
+.rich-content table { border-collapse: collapse; margin: 0.4rem 0; font-size: 0.85em; }
+.rich-content th, .rich-content td { border: 1px solid var(--color-zinc-800); padding: 0.2rem 0.5rem; }
+.rich-content th { font-weight: 700; background: var(--color-zinc-900); }
+
+.rich-content .katex, .rte-content .katex { font-size: 1.05em; }
+.rich-content .katex-display, .rte-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25rem 0;
+  margin: 0.5rem 0;
+}
+
+/* Palette de couleurs de texte Vibe ({rouge}texte{/}) */
+.vibe-color-rouge { color: #ef4444; }
+.vibe-color-orange { color: #f97316; }
+.vibe-color-ambre { color: #eab308; }
+.vibe-color-vert { color: #22c55e; }
+.vibe-color-emeraude { color: #10b981; }
+.vibe-color-bleu { color: #3b82f6; }
+.vibe-color-violet { color: #8b5cf6; }
+.vibe-color-rose { color: #ec4899; }
+.vibe-color-gris { color: #71717a; }
+
+/* Coloration highlight.js (tokens lisibles en thème clair et sombre) */
+.rich-content .hljs-comment, .rte-content .hljs-comment { color: #71717a; font-style: italic; }
+.rich-content .hljs-keyword, .rich-content .hljs-literal, .rich-content .hljs-built_in,
+.rich-content .hljs-meta,
+.rte-content .hljs-keyword, .rte-content .hljs-literal, .rte-content .hljs-built_in,
+.rte-content .hljs-meta { color: #a855f7; }
+.rich-content .hljs-string, .rich-content .hljs-attr, .rich-content .hljs-regexp,
+.rte-content .hljs-string, .rte-content .hljs-attr, .rte-content .hljs-regexp { color: #16a34a; }
+.rich-content .hljs-number, .rich-content .hljs-symbol, .rich-content .hljs-variable,
+.rich-content .hljs-template-variable,
+.rte-content .hljs-number, .rte-content .hljs-symbol, .rte-content .hljs-variable,
+.rte-content .hljs-template-variable { color: #d97706; }
+.rich-content .hljs-title, .rich-content .hljs-function, .rich-content .hljs-section,
+.rte-content .hljs-title, .rte-content .hljs-function, .rte-content .hljs-section { color: #2563eb; }
+.rich-content .hljs-type, .rich-content .hljs-tag, .rich-content .hljs-name,
+.rich-content .hljs-attribute,
+.rte-content .hljs-type, .rte-content .hljs-tag, .rte-content .hljs-name,
+.rte-content .hljs-attribute { color: #dc2626; }
+
+/* Les citations en ligne (line-clamp) ne doivent pas casser sur les <p> */
+:where(.line-clamp-2, .line-clamp-3, .line-clamp-4, .line-clamp-5, .line-clamp-6) .rich-content > p {
+  display: inline;
+}
 
 /* ══════════════════════════════════════════════════════════════════════
    VIBE MESSAGES & CHAT SYSTEM — Built from the app-wide global theme
@@ -887,6 +1071,28 @@ html.dark .vibe-chat-send-btn:hover:not(:disabled),
   filter: none;
 }
 
+/* Thème clair : icône blanche sur le fond noir du bouton d'envoi (l'override
+   global « boutons clairs » exclut .vibe-chat-send-btn, on force ici l'inverse). */
+html.light .vibe-chat-send-btn,
+[data-theme="light"] .vibe-chat-send-btn {
+  color: var(--bg-primary) !important;
+}
+html.light .vibe-chat-send-btn svg,
+[data-theme="light"] .vibe-chat-send-btn svg {
+  color: var(--bg-primary) !important;
+  stroke: var(--bg-primary) !important;
+}
+
+/* Flash d'envoi réussi (classe, car l'inline style ne bat pas les !important) */
+.vibe-chat-send-btn.just-sent {
+  background-color: #22c55e !important;
+  color: #ffffff !important;
+}
+.vibe-chat-send-btn.just-sent svg {
+  color: #ffffff !important;
+  stroke: #ffffff !important;
+}
+
 /* Boutons ronds utilitaires de la page messages (retour, X, options) */
 .vibe-chat-icon-btn {
   color: var(--text-secondary) !important;
@@ -992,4 +1198,52 @@ html.dark .vibe-chat-send-btn:hover:not(:disabled),
 .vibe-chat-modal-card * {
   color: var(--text-primary) !important;
 }
+
+/* ─────────────────────────────────────────────────────────────
+ * INTERACTIONS TACTILES & ANIMATIONS DE LIKES (MOBILE FIRST)
+ * NOTE : `vibe-likeBurst` canonique défini plus haut. Alias conservé
+ * pour compatibilité avec les usages existants de `likeBurst`.
+ * ───────────────────────────────────────────────────────────── */
+.animate-likeBurst {
+  animation: vibe-likeBurst 0.42s cubic-bezier(0.17, 0.89, 0.32, 1.49);
+  will-change: transform;
+}
+
+@keyframes heartFloat {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.2);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.35);
+  }
+  45% {
+    opacity: 1;
+    transform: translate(-50%, -55%) scale(1.15);
+  }
+  75% {
+    opacity: 0.9;
+    transform: translate(-50%, -70%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -95%) scale(0.7);
+  }
+}
+
+.animate-heartFloat {
+  animation: heartFloat 0.75s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+/* Optimisations tactiles mobiles & PWA */
+@media (max-width: 768px) {
+  button, a, [role="button"] {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
 

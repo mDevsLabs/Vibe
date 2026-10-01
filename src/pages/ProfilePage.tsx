@@ -25,17 +25,26 @@ import {
   Ban,
   Users,
   Bell,
-  BellRing
+  BellRing,
+  BarChart2,
+  CalendarClock,
+  Link2,
+  MapPin
 } from 'lucide-react';
-import type { Profile, Post } from '../types/vibe';
+import type { Profile, Post, ProfileListUser } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { NotificationService } from '../services/notificationService';
+import { useConfirmDialog } from '../components/common/ConfirmDialog';
+import { haptics } from '../services/haptics';
 import { PostCard } from '../components/feed/PostCard';
+import { ScheduledCalendar } from '../components/feed/ScheduledCalendar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { RichContent } from '../components/common/RichContent';
 import { ProfileShareModal } from '../components/profile/ProfileShareModal';
-import { NotificationService } from '../services/notificationService';
+import { TagInput } from '../components/common/TagInput';
+import { RichTextEditor, type RichTextEditorHandle } from '../components/common/RichTextEditor';
 
 interface ProfilePageProps {
   username?: string;
@@ -62,7 +71,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [isLoadingLiked, setIsLoadingLiked] = useState(false);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes'>('posts');
+  const [activeTab, setActiveTab] = useState<'posts' | 'replies' | 'media' | 'likes' | 'stats' | 'scheduled'>('posts');
+  const [creatorStats, setCreatorStats] = useState<{ total_views: number; total_likes: number; total_reposts: number; total_replies: number; posts_count: number; top_post: Post | null; daily: Array<{ day: string; views: number; posts: number }> } | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
   const [isFollowing, setIsFollowing] = useState(false);
   const [isPostNotifOn, setIsPostNotifOn] = useState(false);
   // Cercle Privé : ce membre fait-il partie de MON cercle ?
@@ -72,15 +83,27 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [editError, setEditError] = useState<string | null>(null);
   // Modération sur les profils d'autrui : mute (silencieux) / block (visible)
   const [showModMenu, setShowModMenu] = useState(false);
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [blockedByMe, setBlockedByMe] = useState(false);
   const [blockedMe, setBlockedMe] = useState(false);
   const [mutedByMe, setMutedByMe] = useState(false);
+
+  // Listes abonnés / abonnements (modale) + vues du profil (soi-même)
+  const [followersModal, setFollowersModal] = useState<'followers' | 'following' | null>(null);
+  const [followList, setFollowList] = useState<ProfileListUser[]>([]);
+  const [followListOffset, setFollowListOffset] = useState(0);
+  const [followListHasMore, setFollowListHasMore] = useState(false);
+  const [isLoadingFollowList, setIsLoadingFollowList] = useState(false);
+  const [followBusyIds, setFollowBusyIds] = useState<Set<string>>(new Set());
+  const [profileViews, setProfileViews] = useState<{ total: number; series: Array<{ day: string; views: number }> } | null>(null);
 
   // Edit fields
   const [editUsername, setEditUsername] = useState('');
   const [editName, setEditName] = useState('');
   const [editBio, setEditBio] = useState('');
-  const [editInterests, setEditInterests] = useState('');
+  const [editInterests, setEditInterests] = useState<string[]>([]);
+  const [editWebsite, setEditWebsite] = useState('');
+  const [editLocation, setEditLocation] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
   const [editBanner, setEditBanner] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -89,6 +112,67 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
+  const bioEditorRef = useRef<RichTextEditorHandle>(null);
+
+  // ── Listes d'abonnés / abonnements (modale + pagination) ──
+  const loadFollowList = useCallback(async (kind: 'followers' | 'following', offset: number) => {
+    setIsLoadingFollowList(true);
+    try {
+      const res = kind === 'followers'
+        ? await ApiService.getProfileFollowers(targetUsername, 20, offset)
+        : await ApiService.getProfileFollowing(targetUsername, 20, offset);
+      const users = (res.users || []) as ProfileListUser[];
+      setFollowList((prev) => (offset === 0 ? users : [...prev, ...users]));
+      setFollowListOffset(offset + users.length);
+      setFollowListHasMore(Boolean(res.has_more));
+    } catch (err: any) {
+      NotificationService.showInAppToast('Erreur', err?.message || 'Impossible de charger la liste.', 'error');
+    } finally {
+      setIsLoadingFollowList(false);
+    }
+  }, [targetUsername]);
+
+  const openFollowModal = (kind: 'followers' | 'following') => {
+    haptics.light();
+    setFollowersModal(kind);
+    setFollowList([]);
+    setFollowListOffset(0);
+    setFollowListHasMore(false);
+    loadFollowList(kind, 0);
+  };
+
+  const handleToggleFollowInList = async (u: ProfileListUser) => {
+    if (!user || String(u.id) === String(user.id)) return;
+    setFollowBusyIds((prev) => new Set(prev).add(String(u.id)));
+    try {
+      const res = await ApiService.toggleFollow(u.username);
+      setFollowList((list) => list.map((x) => (String(x.id) === String(u.id) ? { ...x, is_following: res.following } : x)));
+      haptics.success();
+    } catch {
+      haptics.error();
+    } finally {
+      setFollowBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(String(u.id));
+        return next;
+      });
+    }
+  };
+
+  // Vues du profil (soi-même, onglet Stats) — 30 jours
+  useEffect(() => {
+    if (!isSelf || activeTab !== 'stats') return;
+    let cancelled = false;
+    ApiService.getProfileViews('30d')
+      .then((res) => {
+        if (!cancelled) setProfileViews({ total: res.total || 0, series: res.series || [] });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isSelf, activeTab]);
+
 
   const fetchProfile = useCallback(async () => {
     setIsLoadingProfile(true);
@@ -104,7 +188,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       setEditUsername(data.profile.username || targetUsername);
       setEditName(data.profile.displayName || '');
       setEditBio(data.profile.bio || '');
-      setEditInterests(data.profile.interests ? data.profile.interests.join(', ') : '');
+      setEditInterests(data.profile.interests ?? []);
+      setEditWebsite(data.profile.website || '');
+      setEditLocation(data.profile.location || '');
       setEditAvatar(data.profile.avatarUrl || '');
       setEditBanner(data.profile.bannerUrl || '');
     } catch (err: any) {
@@ -114,6 +200,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         setEditName(authProfile.displayName || '');
         setEditBio(authProfile.bio || '');
         setEditAvatar(authProfile.avatarUrl || '');
+        setEditInterests(authProfile.interests ?? []);
+        setEditWebsite(authProfile.website || '');
+        setEditLocation(authProfile.location || '');
+        setEditBanner(authProfile.bannerUrl || '');
       } else {
         setProfileError(err?.message || 'Impossible de charger ce profil.');
       }
@@ -124,7 +214,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   useEffect(() => {
     if (!username && isLoadingSession) return;
-    fetchProfile();
+    queueMicrotask(() => {
+      fetchProfile();
+    });
     // État du bouton « Cercle Privé » (profils d'autrui uniquement)
     if (!isSelf && targetUsername) {
       ApiService.checkCircle(targetUsername)
@@ -133,6 +225,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       ApiService.getPostSubscription(targetUsername)
         .then((res) => setIsPostNotifOn(Boolean(res?.subscribed)))
         .catch(() => setIsPostNotifOn(false));
+      // Visite profil : comptage serveur anti-spam (fire-and-forget)
+      ApiService.trackProfileView(targetUsername, 'profile').catch(() => {});
     } else {
       setIsInCircle(false);
       setIsPostNotifOn(false);
@@ -149,15 +243,31 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   // Charger les publications aimées au clic sur l'onglet 'likes'
   useEffect(() => {
     if (activeTab === 'likes' && likedPosts.length === 0) {
-      setIsLoadingLiked(true);
-      ApiService.getUserLikedPosts(targetUsername)
-        .then((res) => setLikedPosts(res.posts || []))
-        .catch(() => setLikedPosts([]))
-        .finally(() => setIsLoadingLiked(false));
+      queueMicrotask(() => {
+        setIsLoadingLiked(true);
+        ApiService.getUserLikedPosts(targetUsername)
+          .then((res) => setLikedPosts(res.posts || []))
+          .catch(() => setLikedPosts([]))
+          .finally(() => setIsLoadingLiked(false));
+      });
     }
   }, [activeTab, targetUsername, likedPosts.length]);
 
+  // Charger les stats créateur à l'ouverture de l'onglet 'stats' (soi-même)
+  useEffect(() => {
+    if (activeTab === 'stats' && isSelf && !creatorStats && !isLoadingStats) {
+      queueMicrotask(() => {
+        setIsLoadingStats(true);
+        ApiService.getCreatorStats()
+          .then((res) => setCreatorStats(res))
+          .catch(() => setCreatorStats(null))
+          .finally(() => setIsLoadingStats(false));
+      });
+    }
+  }, [activeTab, isSelf, creatorStats, isLoadingStats]);
+
   const handleFollowToggle = async () => {
+    haptics.medium();
     const next = !isFollowing;
     setIsFollowing(next);
     // Mise à jour immédiate des compteurs affichés
@@ -239,9 +349,12 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const handleToggleBlock = async () => {
     setShowModMenu(false);
     if (!blockedByMe) {
-      const ok = window.confirm(
-        `Bloquer @${targetUsername} ?\n\nCette action coupe tout contact de manière visible : messages, abonnement et notifications. @${targetUsername} ne pourra plus interagir avec vous.`
-      );
+      const ok = await confirm({
+        title: `Bloquer @${targetUsername} ?`,
+        message: 'Cette action coupe tout contact de manière visible : messages, abonnement et notifications.',
+        confirmLabel: 'Bloquer',
+        tone: 'danger',
+      });
       if (!ok) return;
     }
     const targetId = String(profile?.id || '');
@@ -286,7 +399,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         await refreshProfile();
       }
     } catch (err: any) {
-      alert(`Erreur upload photo de profil : ${err.message}`);
+      NotificationService.showInAppToast('Erreur', `Upload photo de profil impossible : ${err.message}`, 'error');
     } finally {
       setIsUploadingAvatar(false);
       if (avatarInputRef.current) avatarInputRef.current.value = '';
@@ -306,7 +419,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         await fetchProfile();
       }
     } catch (err: any) {
-      alert(`Erreur upload bannière : ${err.message}`);
+      NotificationService.showInAppToast('Erreur', `Upload bannière impossible : ${err.message}`, 'error');
     } finally {
       setIsUploadingBanner(false);
       if (bannerInputRef.current) bannerInputRef.current.value = '';
@@ -318,11 +431,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     setEditError(null);
     setIsSaving(true);
     try {
-      const interestsArray = editInterests.split(',').map((s) => s.trim()).filter(Boolean);
       const cleanUser = editUsername.trim().toLowerCase().replace(/^@/, '');
 
-      if (cleanUser && cleanUser.length < 2) {
-        setEditError("Le nom d'utilisateur doit comporter au moins 2 caractères (lettres, chiffres, _).");
+      if (cleanUser && !/^[a-z0-9_]{2,30}$/.test(cleanUser)) {
+        setEditError("Le nom d'utilisateur doit comporter entre 2 et 30 caractères (lettres minuscules, chiffres, _).");
         setIsSaving(false);
         return;
       }
@@ -330,10 +442,12 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       const res = await ApiService.updateProfile({
         username: cleanUser || undefined,
         displayName: editName.trim(),
-        bio: editBio.trim(),
-        interests: interestsArray,
+        bio: bioEditorRef.current?.getHTML() ?? editBio,
+        interests: editInterests,
         avatarUrl: editAvatar,
         bannerUrl: editBanner,
+        website: editWebsite.trim(),
+        location: editLocation.trim(),
       } as any);
 
       // Synchroniser l'utilisateur avec la réponse du serveur (username modifié inclus)
@@ -341,7 +455,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       const finalUsername = updatedProfile?.username || cleanUser;
       if (finalUsername) {
         updateUser({ username: finalUsername, avatar_url: updatedProfile?.avatarUrl || editAvatar });
-        window.history.replaceState(null, '', `/@${finalUsername}`);
+        navigate(`/@${finalUsername}`, { replace: true });
       }
       await refreshProfile();
       await fetchProfile();
@@ -354,11 +468,13 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   };
 
   const activeAvatar = profile?.avatarUrl || (isSelf ? authProfile?.avatarUrl || user?.avatar_url : null);
-  const isVerified = Boolean(
+  // Coche bleue masquée par le propriétaire (réglage hide_verified_badge)
+  const hideVerifiedBadge = Boolean(profile?.hide_verified_badge);
+  const isVerified = !hideVerifiedBadge && Boolean(
     profile?.is_verified ||
     (profile as any)?.isVerified ||
     (isSelf && user?.is_verified) ||
-    ['plus', 'pro', 'max'].includes(((isSelf ? user?.tier : (profile as any)?.tier) || '').toLowerCase().trim())
+    ['plus', 'pro', 'max'].includes(((isSelf ? user?.tier : profile?.tier) || '').toLowerCase().trim())
   );
 
   const displayedPosts = useMemo(() => {
@@ -419,6 +535,17 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
               title="Paramètres & Personnalisation"
             >
               <SettingsIcon className="w-4 h-4" />
+            </button>
+          )}
+          {isSelf && (
+            <button
+              onClick={() => navigate('/stats')}
+              data-tour="profile-stats-button"
+              className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors"
+              title="Mes statistiques créateur"
+              aria-label="Voir mes statistiques"
+            >
+              <BarChart2 className="w-4 h-4" />
             </button>
           )}
           <button
@@ -603,7 +730,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-extrabold text-white tracking-tight">{profile?.displayName || targetUsername}</h2>
-              <VerifiedBadge isVerified={isVerified} tier={isSelf ? user?.tier : (profile as any)?.tier} size="md" />
+              <VerifiedBadge isVerified={isVerified} tier={hideVerifiedBadge ? undefined : isSelf ? user?.tier : profile?.tier} size="md" />
             </div>
             <span className="text-xs text-zinc-500 font-mono">@{targetUsername}</span>
           </div>
@@ -618,14 +745,37 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           {/* Interests Tags */}
           {profile?.interests && profile.interests.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1">
-              {profile.interests.map((tag) => (
+              {profile.interests.map((tag, index) => (
                 <span
-                  key={tag}
+                  key={`${tag}-${index}`}
                   className="px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 text-[11px] font-medium"
                 >
                   {tag}
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* Site web & localisation */}
+          {(profile?.website || profile?.location) && (
+            <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-500 font-mono">
+              {profile?.website && (
+                <a
+                  href={profile.website}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 hover:text-zinc-300 transition-colors max-w-full"
+                >
+                  <Link2 className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{profile.website.replace(/^https?:\/\//i, '')}</span>
+                </a>
+              )}
+              {profile?.location && (
+                <div className="flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5" />
+                  <span>{profile.location}</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -648,14 +798,24 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             )}
           </div>
 
-          {/* Followers / Following Counters */}
+          {/* Followers / Following Counters (listes cliquables) */}
           <div className="flex items-center gap-4 text-xs pt-1">
-            <span className="text-zinc-400">
+            <button
+              type="button"
+              onClick={() => openFollowModal('following')}
+              className="text-zinc-400 hover:text-white transition-colors"
+              title="Voir les abonnements"
+            >
               <strong className="text-white font-bold">{profile?.followingCount || 0}</strong> abonnements
-            </span>
-            <span className="text-zinc-400">
+            </button>
+            <button
+              type="button"
+              onClick={() => openFollowModal('followers')}
+              className="text-zinc-400 hover:text-white transition-colors"
+              title="Voir les abonnés"
+            >
               <strong className="text-white font-bold">{profile?.followersCount || 0}</strong> abonnés
-            </span>
+            </button>
           </div>
         </div>
       </div>
@@ -686,12 +846,15 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       )}
 
       {/* Sub-Tabs */}
-      <div className="flex border-b border-zinc-800 bg-zinc-950">
+      <div className="flex border-b border-zinc-800 bg-zinc-950 overflow-x-auto">
         {(['posts', 'replies', 'media', 'likes'] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
-            className="flex-1 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+            onClick={() => {
+              haptics.light();
+              setActiveTab(tab);
+            }}
+            className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
           >
             <span className={activeTab === tab ? 'text-white' : 'text-zinc-500'}>
               {tab === 'posts' ? 'Vibes' : tab === 'replies' ? 'Réponses' : tab === 'media' ? 'Médias' : 'J’aime'}
@@ -701,9 +864,135 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             )}
           </button>
         ))}
+        {isSelf && (
+          <>
+            <button
+              onClick={() => {
+                haptics.light();
+                setActiveTab('stats');
+              }}
+              className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+              title="Statistiques créateur (30 jours)"
+            >
+              <span className={`inline-flex items-center gap-1 ${activeTab === 'stats' ? 'text-white' : 'text-zinc-500'}`}>
+                <BarChart2 className="w-3.5 h-3.5" />
+                Stats
+              </span>
+              {activeTab === 'stats' && (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )}
+            </button>
+            <button
+              onClick={() => {
+                haptics.light();
+                setActiveTab('scheduled');
+              }}
+              className="flex-1 min-w-20 py-3 text-center text-xs font-semibold uppercase tracking-wider relative transition-colors hover:bg-zinc-900"
+              title="Posts programmés"
+            >
+              <span className={`inline-flex items-center gap-1 ${activeTab === 'scheduled' ? 'text-white' : 'text-zinc-500'}`}>
+                <CalendarClock className="w-3.5 h-3.5" />
+                Programmés
+              </span>
+              {activeTab === 'scheduled' && (
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-1 bg-white rounded-full" />
+              )}
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Real Posts Stream from DB */}
+      {/* Panneau statistiques créateur (soi-même, 30 jours) */}
+      {isSelf && activeTab === 'stats' && (
+        <div className="p-4">
+          {isLoadingStats ? (
+            <div className="p-12 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
+              <Loader2 className="w-6 h-6 animate-spin text-zinc-500" />
+              <span>Chargement des statistiques…</span>
+            </div>
+          ) : !creatorStats ? (
+            <p className="p-12 text-center text-zinc-500 text-xs">Statistiques indisponibles.</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {[
+                  { label: 'Vues (30 j)', value: creatorStats.total_views },
+                  { label: 'Likes (30 j)', value: creatorStats.total_likes },
+                  { label: 'Reposts (30 j)', value: creatorStats.total_reposts },
+                  { label: 'Réponses (30 j)', value: creatorStats.total_replies },
+                  { label: 'Posts (30 j)', value: creatorStats.posts_count },
+                ].map((c) => (
+                  <div key={c.label} className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                    <p className="text-lg font-bold text-white">{c.value}</p>
+                    <p className="text-[11px] text-zinc-500">{c.label}</p>
+                  </div>
+                ))}
+              </div>
+              {/* Vues du profil (visiteurs de ta page, 30 jours) */}
+              <div className="mt-3 rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 mb-1">
+                  Vues du profil (30 j)
+                </p>
+                <p className="text-lg font-bold text-white">{profileViews ? profileViews.total : '—'}</p>
+                {profileViews && profileViews.series.length > 0 && (
+                  <div className="flex items-end gap-1 h-12 mt-2">
+                    {profileViews.series.map((d, i) => {
+                      const maxV = Math.max(1, ...profileViews.series.map((x) => Number(x.views || 0)));
+                      return (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-t-sm bg-sky-400/70"
+                          style={{ height: `${Math.max(6, (Number(d.views || 0) / maxV) * 100)}%` }}
+                          title={`${d.day} : ${d.views} vues`}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              {creatorStats.top_post && (
+                <div className="mt-3 rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                  <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 mb-1">
+                    Post le plus engagé
+                  </p>
+                  <PostCard
+                    post={creatorStats.top_post}
+                    onOpenThread={onOpenThread}
+                    onOpenProfile={onOpenProfile}
+                  />
+                </div>
+              )}
+              {creatorStats.daily?.length > 0 && (
+                <>
+                  <p className="mt-4 mb-2 text-[11px] font-mono uppercase tracking-wider text-zinc-500">
+                    Vues quotidiennes
+                  </p>
+                  <div className="flex items-end gap-1.5 h-24 rounded-2xl bg-zinc-950 border border-zinc-800 p-3">
+                    {creatorStats.daily.map((d, i) => {
+                      const max = Math.max(1, ...creatorStats.daily.map((x) => Number(x.views || 0)));
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-center justify-end h-full gap-1">
+                          <div
+                            className="w-full rounded-t-md bg-white/80"
+                            style={{ height: `${Math.max(4, (Number(d.views || 0) / max) * 100)}%` }}
+                            title={`${d.day} : ${d.views} vues`}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Panneau posts programmés (soi-même, calendrier drag & drop) */}
+      {isSelf && activeTab === 'scheduled' && <ScheduledCalendar />}
+
+      {/* Real Posts Stream from DB (masqué sur les onglets stats/programmés) */}
+      {activeTab !== 'stats' && activeTab !== 'scheduled' && (
       <div className="divide-y divide-zinc-900">
         {(isLoadingProfile || (activeTab === 'likes' && isLoadingLiked)) && (
           <div className="p-16 text-center text-zinc-400 text-sm flex flex-col items-center gap-3">
@@ -753,19 +1042,28 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Edit Profile & Avatar Modal (File Uploads Only, No URL input) */}
       {isEditOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
-          <div className="w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4 animate-scaleUp">
-            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+          {/* Panneau limité à la hauteur de l'écran : l'en-tête (croix de sortie)
+              et les boutons d'action restent toujours visibles, les champs
+              défilent au centre */}
+          <div className="w-full max-w-lg max-h-[92dvh] bg-zinc-950 border border-zinc-800 rounded-3xl shadow-2xl animate-scaleUp flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 shrink-0">
               <h3 className="font-bold text-base text-white">Modifier le profil</h3>
-              <button onClick={() => setIsEditOpen(false)} className="p-1 rounded-full text-zinc-400 hover:text-white">
+              <button
+                onClick={() => setIsEditOpen(false)}
+                className="p-1 rounded-full text-zinc-400 hover:text-white"
+                title="Fermer"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveProfile} className="space-y-4">
+            <form onSubmit={handleSaveProfile} className="flex flex-col min-h-0 flex-1">
+              <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1 min-h-0">
               {editError && (
                 <div className="p-3 rounded-2xl bg-red-950/40 border border-red-800/80 text-red-300 text-xs flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
@@ -775,13 +1073,19 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
               {/* Username Input */}
               <div className="space-y-1">
-                <label className="text-xs font-mono uppercase text-zinc-400">Nom d’utilisateur (@pseudo)</label>
+                <div className="flex items-center justify-between">
+                  <label htmlFor="profile-username" className="text-xs font-mono uppercase text-zinc-400">Nom d’utilisateur (@pseudo)</label>
+                  <span className="text-[10px] font-mono text-zinc-500">{editUsername.length}/30</span>
+                </div>
                 <input
+                  id="profile-username"
                   type="text"
                   value={editUsername}
+                  maxLength={30}
                   onChange={(e) => setEditUsername(e.target.value.toLowerCase().replace(/[^a-zA-Z0-9_]/g, ''))}
                   className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white font-mono focus:outline-none focus:border-zinc-500"
                 />
+                <p className="text-[10px] text-zinc-500">2 à 30 caractères : lettres minuscules, chiffres et _.</p>
               </div>
 
               {/* Display Name */}
@@ -795,27 +1099,45 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 />
               </div>
 
-              {/* Bio */}
+              {/* Bio — éditeur riche compact (gras, liens, surlignage, formules…) */}
               <div className="space-y-1">
                 <label className="text-xs font-mono uppercase text-zinc-400">Biographie</label>
-                <textarea
-                  value={editBio}
-                  onChange={(e) => setEditBio(e.target.value)}
-                  rows={3}
-                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
-                />
+                <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2.5">
+                  <RichTextEditor ref={bioEditorRef} initialHTML={editBio} compact placeholder="Parlez de vous…" />
+                </div>
               </div>
 
-              {/* Interests */}
+              {/* Interests — tags (max 5, 30 caractères chacun) */}
               <div className="space-y-1">
-                <label className="text-xs font-mono uppercase text-zinc-400">Centres d’intérêt</label>
-                <input
-                  type="text"
-                  value={editInterests}
-                  onChange={(e) => setEditInterests(e.target.value)}
-                  placeholder="IA, Design, Tech, Cinéma"
-                  className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
-                />
+                <label htmlFor="profile-interests" className="text-xs font-mono uppercase text-zinc-400">Centres d’intérêt</label>
+                <TagInput id="profile-interests" value={editInterests} onChange={setEditInterests} />
+              </div>
+
+              {/* Site web & localisation */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-mono uppercase text-zinc-400">Site web</label>
+                  <input
+                    type="text"
+                    value={editWebsite}
+                    onChange={(e) => setEditWebsite(e.target.value)}
+                    maxLength={255}
+                    placeholder="https://mon-site.fr"
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
+                  />
+                  <p className="text-[10px] text-zinc-500">Le https:// est ajouté automatiquement si absent.</p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-mono uppercase text-zinc-400">Localisation</label>
+                  <input
+                    type="text"
+                    value={editLocation}
+                    onChange={(e) => setEditLocation(e.target.value)}
+                    maxLength={100}
+                    placeholder="Paris, France"
+                    className="w-full p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-sm text-white focus:outline-none focus:border-zinc-500"
+                  />
+                </div>
               </div>
 
               {/* Verified Badge Info — réservé aux abonnements payants */}
@@ -854,7 +1176,9 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 </button>
               </div>
 
-              <div className="flex justify-end gap-2 pt-3">
+              </div>
+
+              <div className="flex justify-end gap-2 px-6 py-4 border-t border-zinc-800 shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsEditOpen(false)}
@@ -875,6 +1199,88 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         </div>
       )}
 
+      {/* Modale abonnés / abonnements (pagination + boutons Suivre) */}
+      {followersModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn"
+          onClick={() => setFollowersModal(null)}
+        >
+          <div
+            className="w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-3xl p-5 space-y-3 animate-scaleUp"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Users className="w-4 h-4" />
+                {followersModal === 'followers' ? 'Abonnés' : 'Abonnements'}
+              </h3>
+              <button onClick={() => setFollowersModal(null)} className="text-zinc-500 hover:text-white" title="Fermer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="max-h-80 overflow-y-auto divide-y divide-zinc-900 rounded-2xl border border-zinc-800">
+              {isLoadingFollowList && followList.length === 0 && (
+                <div className="p-6 text-center">
+                  <Loader2 className="w-5 h-5 animate-spin text-zinc-500 inline" />
+                </div>
+              )}
+              {!isLoadingFollowList && followList.length === 0 && (
+                <p className="p-6 text-center text-xs text-zinc-500">
+                  {followersModal === 'followers' ? 'Aucun abonné pour le moment.' : 'Aucun abonnement pour le moment.'}
+                </p>
+              )}
+              {followList.map((u) => (
+                <div key={String(u.id)} className="flex items-center gap-2.5 px-3 py-2">
+                  <ProfileAvatar
+                    src={u.avatar_url}
+                    fallbackName={u.username}
+                    size="sm"
+                    alt={u.username}
+                    onClick={() => {
+                      setFollowersModal(null);
+                      onOpenProfile(u.username);
+                    }}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <button
+                      onClick={() => {
+                        setFollowersModal(null);
+                        onOpenProfile(u.username);
+                      }}
+                      className="block max-w-full truncate text-xs font-semibold text-white hover:underline text-left"
+                    >
+                      {u.display_name || u.username}
+                      {u.is_verified && <VerifiedBadge isVerified={true} size="xs" />}
+                    </button>
+                    <p className="text-[10px] text-zinc-500 truncate">@{u.username}</p>
+                  </div>
+                  {String(u.id) !== String(user?.id) && (
+                    <button
+                      onClick={() => handleToggleFollowInList(u)}
+                      disabled={followBusyIds.has(String(u.id))}
+                      className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-bold transition-colors disabled:opacity-40 ${
+                        u.is_following ? 'bg-zinc-900 border border-zinc-700 text-zinc-300' : 'bg-white text-black'
+                      }`}
+                    >
+                      {followBusyIds.has(String(u.id)) ? '…' : u.is_following ? 'Suivi' : 'Suivre'}
+                    </button>
+                  )}
+                </div>
+              ))}
+              {followListHasMore && (
+                <button
+                  onClick={() => followersModal && loadFollowList(followersModal, followListOffset)}
+                  disabled={isLoadingFollowList}
+                  className="w-full py-2.5 text-center text-[11px] font-semibold text-zinc-400 hover:text-white disabled:opacity-40"
+                >
+                  {isLoadingFollowList ? 'Chargement…' : 'Charger plus'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Profile Share Modal (Carte HD, QR Code Amélioré, Liens) */}
       <ProfileShareModal
         isOpen={isShareOpen}
@@ -882,8 +1288,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         profile={profile}
         targetUsername={targetUsername}
         isVerified={isVerified}
-        tier={isSelf ? user?.tier : (profile as any)?.tier}
+        tier={hideVerifiedBadge ? undefined : isSelf ? user?.tier : profile?.tier}
       />
+
+      {confirmDialog}
     </div>
   );
 };

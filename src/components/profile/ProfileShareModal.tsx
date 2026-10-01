@@ -1,17 +1,17 @@
 /**
  * ============================================================================
  * VIBE SOCIAL PLATFORM — PROFILE SHARE MODAL (src/components/profile/ProfileShareModal.tsx)
- * Partage de profil minimaliste (noir & blanc) : QR Code avec logo intégré,
- * copie du lien & téléchargement du QR. Aucune configuration de couleur,
- * aucun partage externe, aucune intégration web.
+ * Carte de partage du profil (1080×1350), épurée : nom + coche bleue, @pseudo
+ * et QR Code avec logo intégré. Téléchargement PNG, partage natif et copie du
+ * lien.
  * ============================================================================
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { X, Copy, Check, Download, Loader2, AlertCircle } from 'lucide-react';
+import { X, Copy, Check, Download, Loader2, AlertCircle, Share2 } from 'lucide-react';
 import type { Profile } from '../../types/vibe';
-import { VerifiedBadge } from '../common/VerifiedBadge';
+import { haptics } from '../../services/haptics';
 
 interface ProfileShareModalProps {
   isOpen: boolean;
@@ -22,8 +22,32 @@ interface ProfileShareModalProps {
   tier?: string | null;
 }
 
-const QR_CANVAS_SIZE = 560; // rendu haute définition (affiché en ~240px)
-const LOGO_SIZE_RATIO = 0.24;
+const CARD_W = 1080;
+const CARD_H = 1350;
+const QR_BADGE_SIZE = 340;
+const QR_SIZE = 280;
+const FONT_STACK = '"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
+function loadImage(src: string | null | undefined, crossOrigin = false): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    if (!src) {
+      resolve(null);
+      return;
+    }
+    const img = new Image();
+    if (crossOrigin) img.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => resolve(null), 6000);
+    img.onload = () => {
+      clearTimeout(timer);
+      resolve(img.naturalWidth > 0 ? img : null);
+    };
+    img.onerror = () => {
+      clearTimeout(timer);
+      resolve(null);
+    };
+    img.src = src;
+  });
+}
 
 export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
   isOpen,
@@ -31,7 +55,6 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
   profile,
   targetUsername,
   isVerified = false,
-  tier = null,
 }) => {
   const [isCopied, setIsCopied] = useState(false);
   const [isGenerating, setIsGenerating] = useState(true);
@@ -40,91 +63,126 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
 
   const cleanUsername = targetUsername.replace(/^@/, '');
   const displayName = profile?.displayName || cleanUsername;
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://vibe.app';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://mai-vibe.vercel.app';
   const profileUrl = `${origin}/@${cleanUsername}`;
 
   /**
-   * Dessine le QR Code noir & blanc avec le logo Vibe intégré au centre :
-   * matrice générée par `qrcode` (niveau H de correction pour compenser
-   * la zone couverte par le logo), rendu manuel sur canvas.
+   * Compose la carte de partage (1080×1350) sur canvas, épurée : nom
+   * (+ coche bleue dessinée), @pseudo et QR Code avec logo intégré.
    */
-  const drawQR = useCallback(async () => {
+  const drawCard = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || !isOpen) return;
     setIsGenerating(true);
     setError(null);
     try {
-      const qr = QRCode.create(profileUrl, { errorCorrectionLevel: 'H' });
-      const size = qr.modules.size;
-      const data = qr.modules.data;
-
-      const quietZone = 2; // modules de marge blanche
-      const totalCells = size + quietZone * 2;
-      const cell = QR_CANVAS_SIZE / totalCells;
-
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('Canvas indisponible');
-      canvas.width = QR_CANVAS_SIZE;
-      canvas.height = QR_CANVAS_SIZE;
+      canvas.width = CARD_W;
+      canvas.height = CARD_H;
 
-      // Fond blanc (QR noir sur blanc, thème minimaliste)
+      ctx.fillStyle = '#09090b';
+      ctx.fillRect(0, 0, CARD_W, CARD_H);
+
+      // 1. Identité : nom (avec coche bleue), @pseudo
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+
+      const nameY = 430;
+      ctx.font = `800 64px ${FONT_STACK}`;
+      ctx.fillStyle = '#fafafa';
+      const nameMaxWidth = CARD_W - 260;
+      const nameWidth = Math.min(ctx.measureText(displayName).width, nameMaxWidth);
+      ctx.fillText(displayName, CARD_W / 2, nameY, nameMaxWidth);
+
+      if (isVerified) {
+        const checkR = 28;
+        const checkX = Math.min(CARD_W / 2 + nameWidth / 2 + checkR + 16, CARD_W - 84);
+        const checkY = nameY - 21;
+        ctx.beginPath();
+        ctx.arc(checkX, checkY, checkR, 0, Math.PI * 2);
+        ctx.fillStyle = '#1D9BF0';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 7;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(checkX - 13, checkY);
+        ctx.lineTo(checkX - 3, checkY + 11);
+        ctx.lineTo(checkX + 14, checkY - 11);
+        ctx.stroke();
+      }
+
+      ctx.font = `500 40px ${FONT_STACK}`;
+      ctx.fillStyle = '#a1a1aa';
+      ctx.fillText(`@${cleanUsername}`, CARD_W / 2, nameY + 74);
+
+      // 2. QR Code sur pastille blanche avec logo intégré
+      const qrBadgeX = (CARD_W - QR_BADGE_SIZE) / 2;
+      const qrBadgeY = 620;
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, QR_CANVAS_SIZE, QR_CANVAS_SIZE);
+      ctx.beginPath();
+      ctx.roundRect(qrBadgeX, qrBadgeY, QR_BADGE_SIZE, QR_BADGE_SIZE, 40);
+      ctx.fill();
+
+      const qr = QRCode.create(profileUrl, { errorCorrectionLevel: 'H' });
+      const qrSize = qr.modules.size;
+      const qrData = qr.modules.data;
+      const quietZone = 2;
+      const totalCells = qrSize + quietZone * 2;
+      const cell = QR_SIZE / totalCells;
+      const qrOrigin = qrBadgeX + (QR_BADGE_SIZE - QR_SIZE) / 2;
+
       ctx.fillStyle = '#000000';
-      for (let row = 0; row < size; row++) {
-        for (let col = 0; col < size; col++) {
-          if (data[row * size + col]) {
-            const x = (col + quietZone) * cell;
-            const y = (row + quietZone) * cell;
-            ctx.fillRect(x, y, Math.ceil(cell), Math.ceil(cell));
+      for (let row = 0; row < qrSize; row++) {
+        for (let col = 0; col < qrSize; col++) {
+          if (qrData[row * qrSize + col]) {
+            ctx.fillRect(
+              qrOrigin + (col + quietZone) * cell,
+              qrBadgeY + (QR_BADGE_SIZE - QR_SIZE) / 2 + (row + quietZone) * cell,
+              Math.ceil(cell),
+              Math.ceil(cell)
+            );
           }
         }
       }
 
-      // Logo au centre, sur une pastille blanche arrondie
-      const logo = new Image();
-      logo.src = '/logo.png';
-      await new Promise<void>((resolve) => {
-        if (logo.complete && logo.naturalWidth > 0) {
-          resolve();
-          return;
-        }
-        logo.onload = () => resolve();
-        logo.onerror = () => resolve();
-        setTimeout(() => resolve(), 4000);
-      });
-
-      if (logo.naturalWidth > 0) {
-        const logoSize = QR_CANVAS_SIZE * LOGO_SIZE_RATIO;
-        const lx = (QR_CANVAS_SIZE - logoSize) / 2;
-        const ly = (QR_CANVAS_SIZE - logoSize) / 2;
+      // Logo au centre du QR, sur une pastille blanche arrondie (correction H)
+      const logo = await loadImage('/logo.png');
+      if (logo) {
+        const logoSize = QR_SIZE * 0.24;
+        const qrCenterY = qrBadgeY + QR_BADGE_SIZE / 2;
+        const lx = CARD_W / 2 - logoSize / 2;
+        const ly = qrCenterY - logoSize / 2;
         const pad = logoSize * 0.12;
         const badgeSize = logoSize + pad * 2;
-        const radius = badgeSize * 0.22;
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.roundRect(lx - pad, ly - pad, badgeSize, badgeSize, radius);
+        ctx.roundRect(lx - pad, ly - pad, badgeSize, badgeSize, badgeSize * 0.22);
         ctx.fill();
         ctx.drawImage(logo, lx, ly, logoSize, logoSize);
       }
+
       setIsGenerating(false);
     } catch (err: any) {
-      console.warn('[ProfileShare] Erreur génération QR:', err);
-      setError('Impossible de générer le QR Code.');
+      console.warn('[ProfileShare] Erreur génération carte:', err);
+      setError('Impossible de générer la carte de partage.');
       setIsGenerating(false);
     }
-  }, [isOpen, profileUrl]);
+  }, [isOpen, displayName, cleanUsername, profileUrl, isVerified]);
 
   useEffect(() => {
     if (isOpen) {
-      setIsCopied(false);
-      drawQR();
+      setIsCopied((prev) => (prev ? false : prev));
+      void drawCard();
     }
-  }, [isOpen, drawQR]);
+  }, [isOpen, drawCard]);
 
   const handleCopyLink = async () => {
     try {
       await navigator.clipboard.writeText(profileUrl);
+      haptics.success();
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2200);
     } catch {
@@ -142,25 +200,59 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
     }
   };
 
-  const handleDownloadQR = () => {
+  const handleDownloadCard = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || isGenerating) return;
     try {
       canvas.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `vibe-qr-${cleanUsername}.png`;
+        a.download = `vibe-profil-${cleanUsername}.png`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1500);
+        haptics.success();
       }, 'image/png');
     } catch (err) {
-      console.warn('[ProfileShare] Erreur téléchargement QR:', err);
+      console.warn('[ProfileShare] Erreur téléchargement carte:', err);
     }
   };
+
+  const handleShare = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || isGenerating) return;
+    const nav = navigator as any;
+    try {
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const file = blob ? new File([blob], `vibe-profil-${cleanUsername}.png`, { type: 'image/png' }) : null;
+      if (file && nav.canShare?.({ files: [file] })) {
+        await nav.share({
+          files: [file],
+          title: `Profil de @${cleanUsername} sur Vibe`,
+          text: `Découvre le profil de @${cleanUsername} sur Vibe`,
+        });
+        haptics.success();
+        return;
+      }
+      if (nav.share) {
+        await nav.share({
+          title: `@${cleanUsername} sur Vibe`,
+          text: `Découvre le profil de @${cleanUsername} sur Vibe`,
+          url: profileUrl,
+        });
+        haptics.success();
+        return;
+      }
+      await handleCopyLink();
+    } catch {
+      // Partage annulé par l'utilisateur : silencieux
+    }
+  };
+
+  const canShare = typeof navigator !== 'undefined' && 'share' in navigator;
 
   if (!isOpen) return null;
 
@@ -186,40 +278,19 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
           </button>
         </div>
 
-        {/* Corps : identité + QR Code minimaliste */}
-        <div className="p-6 flex flex-col items-center space-y-5">
-          <div className="flex items-center gap-3 self-stretch">
-            {profile?.avatarUrl && (
-              <img
-                src={profile.avatarUrl}
-                alt={displayName}
-                className="w-11 h-11 rounded-full border border-zinc-800 object-cover"
-              />
-            )}
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm font-bold text-black dark:text-white truncate">{displayName}</span>
-                <VerifiedBadge isVerified={isVerified} tier={tier ?? undefined} size="sm" />
-              </div>
-              <span className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">@{cleanUsername}</span>
-            </div>
-          </div>
-
-          <div className="relative p-3 bg-white border border-zinc-200 rounded-2xl shadow-sm">
+        {/* Corps : carte de partage + actions */}
+        <div className="p-5 flex flex-col items-center space-y-4">
+          <div className="relative rounded-2xl overflow-hidden border border-zinc-200 dark:border-zinc-800 shadow-sm">
             <canvas
               ref={canvasRef}
-              className="block w-60 h-60"
-              aria-label={`QR Code du profil @${cleanUsername}`}
+              className="block w-full max-w-[280px] aspect-[4/5]"
+              aria-label={`Carte de partage du profil @${cleanUsername}`}
             />
             {isGenerating && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white/90 rounded-2xl">
-                <Loader2 className="w-6 h-6 animate-spin text-black" />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+                <Loader2 className="w-6 h-6 animate-spin text-white" />
               </div>
             )}
-          </div>
-
-          <div className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-black border border-zinc-300 dark:border-zinc-800 text-center">
-            <span className="text-[11px] text-black dark:text-zinc-400 font-mono break-all">{profileUrl}</span>
           </div>
 
           {error && (
@@ -229,22 +300,33 @@ export const ProfileShareModal: React.FC<ProfileShareModalProps> = ({
             </div>
           )}
 
-          {/* Actions minimales : copier le lien, télécharger le QR */}
           <div className="w-full space-y-2">
             <button
+              onClick={handleDownloadCard}
+              disabled={isGenerating}
+              className="w-full py-3 rounded-2xl bg-white border border-zinc-300 text-black font-bold text-sm hover:bg-zinc-100 transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-40"
+            >
+              <Download className="w-4 h-4 text-black" />
+              <span className="text-black">Télécharger l'image</span>
+            </button>
+
+            {canShare && (
+              <button
+                onClick={handleShare}
+                disabled={isGenerating}
+                className="w-full py-3 rounded-2xl bg-black text-white dark:bg-zinc-900 dark:border dark:border-zinc-700 font-bold text-sm hover:opacity-90 transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>Partager</span>
+              </button>
+            )}
+
+            <button
               onClick={handleCopyLink}
-              className="w-full py-3 rounded-2xl bg-white border border-zinc-300 text-black font-bold text-sm hover:bg-zinc-100 transition-colors flex items-center justify-center gap-2 shadow-sm"
+              className="w-full py-3 rounded-2xl bg-zinc-100 border border-zinc-300 text-black font-semibold text-sm hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2"
             >
               {isCopied ? <Check className="w-4 h-4 text-black" /> : <Copy className="w-4 h-4 text-black" />}
               <span className="text-black">{isCopied ? 'Lien copié !' : 'Copier le lien'}</span>
-            </button>
-            <button
-              onClick={handleDownloadQR}
-              disabled={isGenerating}
-              className="w-full py-3 rounded-2xl bg-zinc-100 border border-zinc-300 text-black font-semibold text-sm hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
-            >
-              <Download className="w-4 h-4 text-black" />
-              <span className="text-black">Télécharger le QR Code</span>
             </button>
           </div>
         </div>

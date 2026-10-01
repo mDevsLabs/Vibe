@@ -28,9 +28,11 @@ import {
 import { NotificationItem } from '../types/vibe';
 import { ApiService } from '../services/api';
 import { NotificationService } from '../services/notificationService';
+import { haptics } from '../services/haptics';
 import { AppStorage } from '../services/storageAdapter';
 import { ProfileAvatar } from '../components/common/ProfileAvatar';
 import { VerifiedBadge } from '../components/common/VerifiedBadge';
+import { useConfirmDialog } from '../components/common/ConfirmDialog';
 
 type PermissionState = 'unsupported' | 'default' | 'granted' | 'denied';
 
@@ -81,10 +83,14 @@ function saveReadAllAt(timestamp: number) {
 
 export const NotificationsPage: React.FC = () => {
   const navigate = useNavigate();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [filter, setFilter] = useState<'all' | 'messages' | 'likes' | 'mentions' | 'verified'>('all');
   const [isLoading, setIsLoading] = useState(true);
-  const [permission, setPermission] = useState<PermissionState>('default');
+  const [permission, setPermission] = useState<PermissionState>(() => {
+    const state = NotificationService.getPermissionState();
+    return state === 'unsupported' ? 'unsupported' : (state as PermissionState);
+  });
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
   // Filtrage client de secours : comptes masqués/bloqués (le serveur filtre
   // déjà, ce set protège contre un backend pas encore à jour)
@@ -144,8 +150,6 @@ export const NotificationsPage: React.FC = () => {
 
   useEffect(() => {
     fetchNotifications();
-    const state = NotificationService.getPermissionState();
-    setPermission(state === 'unsupported' ? 'unsupported' : (state as PermissionState));
 
     // Temps réel via SSE : chaque notification est poussée par le serveur et
     // rediffusée en 'vibe:notification_received' (realtimeService).
@@ -175,6 +179,7 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const handleMarkAllAsRead = async () => {
+    haptics.success();
     saveReadAllAt(Date.now());
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
     window.dispatchEvent(new CustomEvent('vibe:realtime_unread', { detail: { unread_notifications: 0 } }));
@@ -188,6 +193,7 @@ export const NotificationsPage: React.FC = () => {
 
   const handleToggleRead = async (e: React.MouseEvent, notif: NotificationItem) => {
     e.stopPropagation();
+    haptics.light();
     const newStatus = !notif.is_read;
     saveReadOverride(notif.id, newStatus);
     setNotifications((prev) =>
@@ -202,6 +208,7 @@ export const NotificationsPage: React.FC = () => {
 
   const handleDeleteOne = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    haptics.medium();
     saveDeletedId(id);
     setNotifications((prev) => prev.filter((n) => n.id !== id));
     NotificationService.showInAppToast('Notification supprimée', 'La notification a bien été effacée.', 'info');
@@ -213,7 +220,14 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const handleClearAll = async () => {
-    if (!window.confirm('Voulez-vous supprimer toutes vos notifications ?')) return;
+    const ok = await confirm({
+      title: 'Supprimer toutes les notifications ?',
+      message: 'Votre liste de notifications sera vidée.',
+      confirmLabel: 'Tout supprimer',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    haptics.medium();
     saveClearedAt(Date.now());
     notifications.forEach((n) => saveDeletedId(n.id));
     setNotifications([]);
@@ -391,7 +405,10 @@ export const NotificationsPage: React.FC = () => {
         ].map((t) => (
           <button
             key={t.id}
-            onClick={() => setFilter(t.id as any)}
+            onClick={() => {
+              haptics.light();
+              setFilter(t.id as any);
+            }}
             className={`flex-1 py-3 text-xs font-semibold uppercase tracking-wider relative transition-colors ${
               filter === t.id ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
             }`}
@@ -527,6 +544,8 @@ export const NotificationsPage: React.FC = () => {
           )}
         </>
       )}
+
+      {confirmDialog}
     </div>
   );
 };

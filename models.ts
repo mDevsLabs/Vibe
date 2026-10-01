@@ -7,6 +7,7 @@ import {
   getUserQuotaBoost,
   getWeekData,
   isPaidTier,
+  rateLimit,
   verifyToken,
 } from "./config.ts";
 import { maiModelsList } from "./maiModels.ts";
@@ -16,6 +17,58 @@ function getOpenRouterApiKey(userCustomKey?: string | null): string {
     return userCustomKey.trim();
   }
   return Deno.env.get("OPENROUTER_API_KEY") || "";
+}
+
+// ─────────────────────────────────────────────
+// Alias cloud mAI-2 -> backends OpenRouter (cachés aux utilisateurs).
+// mAI-2      -> DeepSeek V4 Flash 0731 (1.3M ctx / 384k out)
+// mAI-2-Mini -> MiniMax M3 (1M ctx / 128k out)
+// Disponibles pour tous les plans (Free, Plus, Pro, Max).
+// ─────────────────────────────────────────────
+const MAI_CLOUD_ALIASES: Record<string, string> = {
+  "mai-2": "deepseek/deepseek-v4-flash-0731",
+  "mai-2-mini": "minimax/minimax-m3",
+};
+
+function normalizeMaiAliasId(model?: string | null): string {
+  let m = String(model || "").toLowerCase().trim();
+  if (m.startsWith("mdevslabs/")) m = m.slice("mdevslabs/".length);
+  return m;
+}
+
+function resolveMaiCloudBackend(model?: string | null): string | null {
+  return MAI_CLOUD_ALIASES[normalizeMaiAliasId(model)] || null;
+}
+
+function buildMaiCloudPublicModels(nowSec: number) {
+  const defs = maiModelsList.filter(
+    (m) => resolveMaiCloudBackend(m.id) !== null
+  );
+  return defs.map((m) => ({
+    architecture: {
+      input_modalities: ["text"],
+      modality: "text->text",
+      output_modalities: ["text"],
+    },
+    created:
+      Math.floor(new Date(m.releaseDate).getTime() / 1000) || nowSec,
+    description: m.description || "",
+    id: m.id,
+    maxContext: m.contextWindow,
+    maxOutput: m.maxOutputTokens,
+    name: m.name,
+    object: "model",
+    owned_by: "mDevsLabs",
+    supported_parameters: [
+      "temperature",
+      "top_p",
+      "max_tokens",
+      "stream",
+      "stop",
+      "tools",
+      "response_format",
+    ],
+  }));
 }
 
 export function registerModelRoutes(app: Hono) {
@@ -132,13 +185,17 @@ export function registerModelRoutes(app: Hono) {
       }
 
       const body = await c.req.json().catch(() => ({}));
-      const inputTokens = Number(body.inputTokens || body.promptTokens || 0);
-      const outputTokens = Number(
-        body.outputTokens || body.completionTokens || 0
-      );
-      const tokensUsed = Number(
-        body.tokensUsed || inputTokens + outputTokens || 0
-      );
+      const inputTokens = Number(body?.inputTokens ?? body?.promptTokens ?? 0);
+      const outputTokens = Number(body?.outputTokens ?? body?.completionTokens ?? 0);
+      const tokensUsed = Number(body?.tokensUsed ?? (inputTokens + outputTokens));
+      const validTokenCount = (value: number) =>
+        Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+      if (!validTokenCount(inputTokens) || !validTokenCount(outputTokens) || !validTokenCount(tokensUsed)) {
+        return c.json({ error: "Compte de tokens invalide." }, 400);
+      }
+      if (!rateLimit(`log-usage:${userId}`, 60, 60_000)) {
+        return c.json({ error: "Trop de rapports d'usage." }, 429);
+      }
       const { weekStartStr } = getWeekData();
 
       const sql = getDb();
@@ -154,26 +211,30 @@ export function registerModelRoutes(app: Hono) {
         WHERE user_id = ${resolvedUserId}::integer AND week_start = ${weekStartStr}::date
         LIMIT 1
       `;
-      const currentUsage = usageResult[0]?.tokens_used || 0;
+      const currentUsage = Number(usageResult[0]?.tokens_used || 0);
 
+      // Cette route est un rapport client : elle ne modifie jamais le quota.
+      // Les handlers qui consomment réellement un LLM réservent leurs tokens
+      // côté serveur via reserveMAIQuota().
       await sql`
-        INSERT INTO weekly_usage (user_id, week_start, tokens_used)
-        VALUES (${resolvedUserId}::integer, ${weekStartStr}::date, ${tokensUsed})
-        ON CONFLICT (user_id, week_start)
-        DO UPDATE SET tokens_used = weekly_usage.tokens_used + ${tokensUsed}
-      `;
+        INSERT INTO usage_logs (user_id, action_type, endpoint, metadata, tokens_used, timestamp)
+        VALUES (${resolvedUserId}::integer, 'client_usage_report', 'log-usage',
+                ${JSON.stringify({ inputTokens, outputTokens })}::jsonb,
+                ${tokensUsed}, NOW())
+      `.catch(() => {});
 
       return c.json({
         inputTokens,
         limit,
         outputTokens,
+        quotaUpdated: false,
         success: true,
         tokensUsed,
-        weeklyUsed: currentUsage + tokensUsed,
+        weeklyUsed: currentUsage,
       });
     } catch (err: any) {
       console.error("[log-usage] Error:", err);
-      return c.json({ error: "Erreur serveur.", details: err?.message }, 500);
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   };
 
@@ -240,6 +301,16 @@ export function registerModelRoutes(app: Hono) {
         const [laguna] = filtered.splice(lagunaIdx, 1);
         filtered.unshift(laguna);
       }
+
+      // Injecter les alias cloud mAI-2 (visibles pour tous les plans,
+      // après le filtre :free — backend OpenRouter caché).
+      try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const cloudModels = buildMaiCloudPublicModels(nowSec).filter(
+          (cm) => !filtered.some((m) => m.id === cm.id)
+        );
+        filtered.unshift(...cloudModels);
+      } catch {}
 
       return c.json({ data: filtered, object: "list" });
     } catch (_err) {
@@ -373,6 +444,13 @@ export function registerModelRoutes(app: Hono) {
         );
       }
 
+      try {
+        const cloudModels = buildMaiCloudPublicModels(0).filter(
+          (cm) => !fallback.some((m) => m.id === cm.id)
+        );
+        fallback.unshift(...cloudModels);
+      } catch {}
+
       return c.json({ data: fallback, object: "list" });
     }
   };
@@ -385,28 +463,40 @@ export function registerModelRoutes(app: Hono) {
   // GET /v1/models/mai & GET /v1/mai/models
   // ─────────────────────────────────────────────
   const handleGetMaiModels = (c: any) => {
-    const formatted = maiModelsList.map((m) => ({
-      capabilities: m.capabilities,
-      context_length: m.contextWindow,
-      created:
-        Math.floor(new Date(m.releaseDate).getTime() / 1000) ||
-        Math.floor(Date.now() / 1000),
-      description: m.description,
-      huggingface_tag: m.huggingFaceTag,
-      id: m.id,
-      license: m.license,
-      max_output_tokens: m.maxOutputTokens,
-      name: m.name,
-      object: "model",
-      ollama_tag: m.ollamaTag,
-      owned_by: "mDevsLabs",
-      parameters: m.parameters,
-      recommended_hardware: m.recommendedHardware,
-      status: m.status,
-      tagline: m.tagline,
-      usable_in_cloud_chat: false,
-      version: m.version,
-    }));
+    const formatted = maiModelsList.map((m) => {
+      // Modèles cloud mAI-2 : réponse épurée (pas de parameters/hardware).
+      if (resolveMaiCloudBackend(m.id) !== null) {
+        return {
+          description: m.description,
+          id: m.id,
+          name: m.name,
+          object: "model",
+          status: m.status,
+        };
+      }
+      return {
+        capabilities: m.capabilities,
+        context_length: m.contextWindow,
+        created:
+          Math.floor(new Date(m.releaseDate).getTime() / 1000) ||
+          Math.floor(Date.now() / 1000),
+        description: m.description,
+        huggingface_tag: m.huggingFaceTag,
+        id: m.id,
+        license: m.license,
+        max_output_tokens: m.maxOutputTokens,
+        name: m.name,
+        object: "model",
+        ollama_tag: m.ollamaTag,
+        owned_by: "mDevsLabs",
+        parameters: m.parameters,
+        recommended_hardware: m.recommendedHardware,
+        status: m.status,
+        tagline: m.tagline,
+        usable_in_cloud_chat: false,
+        version: m.version,
+      };
+    });
     return c.json({ data: formatted, object: "list" });
   };
 
@@ -469,14 +559,18 @@ export function registerModelRoutes(app: Hono) {
         );
       }
       const modelStr = String(modelRequested).toLowerCase().trim();
+      // Alias cloud mAI-2 : autorisés en chat cloud pour tous les plans,
+      // transférés vers OpenRouter en arrière-plan (backend caché).
+      const maiCloudBackend = resolveMaiCloudBackend(modelRequested);
 
       // Vérifier si c'est un modèle mAI (local uniquement)
       const isMaiLocal =
-        modelStr.startsWith("mai-") ||
-        modelStr.startsWith("mdevslabs/") ||
-        modelStr.includes("mai-1.") ||
-        modelStr === "mai-1" ||
-        modelStr === "mai-1-light";
+        (modelStr.startsWith("mai-") ||
+          modelStr.startsWith("mdevslabs/") ||
+          modelStr.includes("mai-1.") ||
+          modelStr === "mai-1" ||
+          modelStr === "mai-1-light") &&
+        !maiCloudBackend;
 
       if (isMaiLocal) {
         return c.json(
@@ -494,9 +588,11 @@ export function registerModelRoutes(app: Hono) {
 
       const isFreePlan = !isPaidTier(userPlan);
       const isFreeModel = modelStr.includes(":free");
+      const isMaiCloudAlias = maiCloudBackend !== null;
 
       // Bloquer avec 403 les requêtes pour les modèles payants avec une clé ou JWT free
-      if (isFreePlan && !isFreeModel) {
+      // Exception : alias cloud mAI-2 disponibles pour tous les plans.
+      if (isFreePlan && !isFreeModel && !isMaiCloudAlias) {
         return c.json(
           {
             error: {
@@ -559,6 +655,11 @@ export function registerModelRoutes(app: Hono) {
       const { api_key: _ck, authorization: _ca, Authorization: _cA, ...safeBody } =
         body as Record<string, any>;
 
+      // Transférer l'alias mAI-2 vers le backend OpenRouter réel (caché).
+      if (maiCloudBackend) {
+        safeBody.model = maiCloudBackend;
+      }
+
       const openRouterRes = await fetch(
         "https://openrouter.ai/api/v1/chat/completions",
         {
@@ -595,7 +696,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[ChatCompletions] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process chat completion.",
         },
         500
@@ -631,12 +731,15 @@ export function registerModelRoutes(app: Hono) {
 
       const modelRequested = body.model;
       const modelStr = String(modelRequested || "").toLowerCase().trim();
+      const maiCloudBackend = resolveMaiCloudBackend(modelRequested);
 
       const isFreePlan = !isPaidTier(userPlan);
       const isFreeModel = modelStr.includes(":free");
+      const isMaiCloudAlias = maiCloudBackend !== null;
 
       // Bloquer avec 403 les requêtes pour les modèles payants avec une clé ou JWT free
-      if (isFreePlan && !isFreeModel) {
+      // Exception : alias cloud mAI-2 disponibles pour tous les plans.
+      if (isFreePlan && !isFreeModel && !isMaiCloudAlias) {
         return c.json(
           {
             error: {
@@ -698,6 +801,10 @@ export function registerModelRoutes(app: Hono) {
       const { api_key: _ck, authorization: _ca, Authorization: _cA, ...safeBody } =
         body as Record<string, any>;
 
+      if (maiCloudBackend) {
+        safeBody.model = maiCloudBackend;
+      }
+
       const openRouterRes = await fetch(
         "https://openrouter.ai/api/v1/chat/completions",
         {
@@ -734,7 +841,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[Messages] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process Anthropic request.",
         },
         500
@@ -769,12 +875,15 @@ export function registerModelRoutes(app: Hono) {
       const paramModel = c.req.param("model");
       const modelRequested = body.model || paramModel || pathModel;
       const modelStr = String(modelRequested || "").toLowerCase().trim();
+      const maiCloudBackend = resolveMaiCloudBackend(modelRequested);
 
       const isFreePlan = !isPaidTier(userPlan);
       const isFreeModel = modelStr.includes(":free");
+      const isMaiCloudAlias = maiCloudBackend !== null;
 
       // Bloquer avec 403 les requêtes pour les modèles payants avec une clé ou JWT free
-      if (isFreePlan && !isFreeModel) {
+      // Exception : alias cloud mAI-2 disponibles pour tous les plans.
+      if (isFreePlan && !isFreeModel && !isMaiCloudAlias) {
         return c.json(
           {
             error: {
@@ -837,7 +946,7 @@ export function registerModelRoutes(app: Hono) {
 
       const openRouterPayload = {
         ...safeBody,
-        model: body.model || modelRequested,
+        model: maiCloudBackend || body.model || modelRequested,
       };
 
       const openRouterRes = await fetch(
@@ -876,7 +985,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[GeminiGenerate] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process Google Gemini request.",
         },
         500
