@@ -8,6 +8,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { User, Profile, MAIQuotas } from '../types/vibe';
 import { ApiService } from '../services/api';
+import { RealtimeService } from '../services/realtimeService';
 
 interface AuthContextType {
   user: User | null;
@@ -38,9 +39,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   /** Après session établie : ouvre l'onboarding si jamais terminé (getSettings séparé). */
-  const checkOnboarding = async () => {
+  const checkOnboarding = async (expectedToken: string) => {
     try {
       const res = await ApiService.getSettings();
+      if (ApiService.getToken() !== expectedToken) return;
       if (res?.settings && res.settings.onboarding_completed === false) {
         setShowOnboarding(true);
       }
@@ -52,6 +54,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /** Rejoue l'intro 3 étapes sans toucher au flag serveur (refermable à tout moment). */
   const restartOnboarding = () => setShowOnboarding(true);
 
+  /**
+   * Frontière de session : ferme SSE avant de supprimer le JWT et purge les
+   * données offline via ApiService.removeToken(). TEST: logout => aucun retry
+   * realtime avec l'ancien token et aucun snapshot de feed lisible ensuite.
+   */
+  const clearLocalSession = () => {
+    const token = ApiService.getToken();
+    RealtimeService.reset();
+    if (token) void ApiService.revokeSession(token);
+    ApiService.removeToken();
+    setToken(null);
+    setUser(null);
+    setProfile(null);
+    setQuotas(null);
+    setShowOnboarding(false);
+    setIsLoadingSession(false);
+  };
+
   const fetchSession = async () => {
     const currentToken = ApiService.getToken();
     if (!currentToken) {
@@ -61,20 +81,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       const data = await ApiService.getCurrentUser();
+      // Une réponse de l'ancienne session ne doit pas réécrire l'UI après un logout.
+      if (ApiService.getToken() !== currentToken) return;
       setUser(data.user);
       setProfile(data.profile);
       setQuotas(data.quotas);
-      checkOnboarding();
+      checkOnboarding(currentToken);
     } catch (err: any) {
-      // On ne déconnecte que sur une vraie invalidation (401).
+      // On ne déconnecte que sur une vraie invalidation (401) de la session courante.
       // Une erreur réseau ou un 500 ponctuel ne doit pas détruire la session.
-      if (err?.status === 401) {
+      if (err?.status === 401 && ApiService.getToken() === currentToken) {
         console.warn('[AuthContext] Session expirée ou non autorisée:', err.message);
-        ApiService.removeToken();
-        setToken(null);
-        setUser(null);
-        setProfile(null);
-        setQuotas(null);
+        clearLocalSession();
       } else {
         console.warn('[AuthContext] Erreur transitoire de session (session conservée):', err?.message);
       }
@@ -123,12 +141,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
-    ApiService.removeToken();
-    setToken(null);
-    setUser(null);
-    setProfile(null);
-    setQuotas(null);
-    setShowOnboarding(false);
+    clearLocalSession();
   };
 
   useEffect(() => {

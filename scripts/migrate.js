@@ -7,34 +7,56 @@
  *   - users et profiles manquent is_verified
  */
 import { neon } from '@neondatabase/serverless';
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const envContent = readFileSync(join(__dirname, '..', '.env'), 'utf8');
-const envVars = {};
-for (const line of envContent.split('\n')) {
-  const eq = line.indexOf('=');
-  if (eq < 0 || line.trim().startsWith('#')) continue;
-  const key = line.substring(0, eq).trim();
-  let val = line.substring(eq + 1).trim();
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
-  envVars[key] = val;
+
+function readOptionalEnvFile(path) {
+  if (!existsSync(path)) return {};
+
+  const vars = {};
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const eq = line.indexOf('=');
+    if (eq < 0 || line.trim().startsWith('#')) continue;
+
+    const key = line.slice(0, eq).trim();
+    if (!key) continue;
+
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    vars[key] = value;
+  }
+  return vars;
 }
 
-const sql = neon(envVars.DATABASE_URL);
+const fileEnv = readOptionalEnvFile(join(__dirname, '..', '.env'));
+const env = { ...fileEnv, ...process.env };
+const databaseUrl = env.DATABASE_URL?.trim();
+
+if (!databaseUrl) {
+  console.error(
+    '❌ DATABASE_URL est requis. Définissez-la dans l’environnement (par exemple DATABASE_URL=... npm run migrate:ci).'
+  );
+  process.exit(1);
+}
+
+const sql = neon(databaseUrl);
 
 async function runAlter(name, query) {
   try {
     await sql.query(query);
     console.log(`  ✅ ${name}`);
-  } catch (e) {
-    if (e.message.includes('already exists') || e.message.includes('does not exist') || e.message.includes('duplicate')) {
-      console.log(`  ⏭️  ${name} — déjà appliqué`);
-    } else {
-      console.error(`  ❌ ${name} — ERREUR: ${e.message}`);
-    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`  ❌ ${name} — ERREUR: ${message}`);
+    throw new Error(`Migration en échec (${name}) : ${message}`, { cause: error });
   }
 }
 
@@ -93,8 +115,32 @@ async function migrate() {
     `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_mentions VARCHAR(32) DEFAULT 'everyone'`
   );
   await runAlter(
-    'user_settings.allow_dms_from',
-    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_dms_from VARCHAR(20) DEFAULT 'everyone'`
+    'user_settings.allow_dms',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_dms VARCHAR(20) DEFAULT 'everyone'`
+  );
+  await runAlter(
+    'user_settings.dms_enabled',
+    `ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS dms_enabled BOOLEAN DEFAULT TRUE`
+  );
+  // allow_dms est la colonne canonique utilisée par le backend. Conserver
+  // allow_dms_from comme source de compatibilité tant que des données l'utilisent.
+  await runAlter(
+    'user_settings.allow_dms_from_to_allow_dms',
+    `DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'user_settings'
+          AND column_name = 'allow_dms_from'
+      ) THEN
+        EXECUTE 'UPDATE user_settings
+                 SET allow_dms = allow_dms_from
+                 WHERE allow_dms = ''everyone''
+                   AND allow_dms_from IS NOT NULL
+                   AND allow_dms_from <> ''everyone''';
+      END IF;
+    END $$`
   );
   await runAlter(
     'user_settings.mai_auto_approve_tools',
@@ -277,54 +323,69 @@ async function migrate() {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // 9. Bot account — Créer @bot si absent
+  // 9. Compte @bot — aucun mot de passe public ; seed uniquement opt-in
   // ─────────────────────────────────────────────────────────────
   console.log('\n🤖 COMPTE @bot:');
-  try {
-    const existing = await sql`SELECT id FROM users WHERE username = 'bot' LIMIT 1`;
-    if (existing.length === 0) {
-      const botUser = await sql`
-        INSERT INTO users (username, email, password_hash, tier, avatar_url, is_verified)
-        VALUES (
-          'bot',
-          'bot@vibe.ai',
-          '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
-          'Pro',
-          'https://api.dicebear.com/7.x/bottts/svg?seed=vibe-bot',
-          TRUE
-        )
-        ON CONFLICT (username) DO UPDATE SET is_verified = TRUE, avatar_url = 'https://api.dicebear.com/7.x/bottts/svg?seed=vibe-bot'
-        RETURNING id
-      `;
-      const botId = botUser[0]?.id;
-      if (botId) {
-        await sql`
-          INSERT INTO profiles (user_id, display_name, bio, avatar_url, is_verified)
-          VALUES (${botId}, 'Bot', 'Compte officiel de test Vibe 🤖', 'https://api.dicebear.com/7.x/bottts/svg?seed=vibe-bot', TRUE)
-          ON CONFLICT (user_id) DO UPDATE SET display_name = 'Bot', is_verified = TRUE
-        `;
-        // Posts de test
-        const postCount = await sql`SELECT COUNT(*) as n FROM posts WHERE author_id = ${botId}`;
-        if (Number(postCount[0].n) < 2) {
-          await sql`
-            INSERT INTO posts (author_id, content, format, visibility, toxicity_score, created_via)
-            VALUES (${botId}, 'Bienvenue sur Vibe ! 🚀 Je suis le bot de test officiel @bot. Vous pouvez liker, commenter ou m''envoyer un message en DM !', 'micro_text', 'public', 0.01, 'mai_agent')
-          `;
-          await sql`
-            INSERT INTO posts (author_id, content, format, visibility, toxicity_score, created_via)
-            VALUES (${botId}, 'Test de publication avec #mAI sur Vibe ! Intelligence artificielle intégrée ✨🤖 #Vibe #Innovation', 'micro_text', 'public', 0.01, 'mai_agent')
-          `;
-        }
-        console.log(`  ✅ Compte @bot créé (id: ${botId})`);
-      }
-    } else {
-      // Mettre à jour is_verified si la colonne vient d'être ajoutée
-      await sql`UPDATE users SET is_verified = TRUE WHERE username = 'bot'`;
-      await sql`UPDATE profiles SET is_verified = TRUE WHERE user_id = ${existing[0].id}`;
-      console.log(`  ⏭️  @bot existe déjà (id: ${existing[0].id}) — is_verified mis à TRUE`);
+
+  // Neutralise tout ancien hash public déjà présent. Le bcrypt est calculé
+  // dans PostgreSQL à partir de données aléatoires jamais conservées en clair.
+  await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`;
+  await sql`
+    UPDATE users
+    SET password_hash = crypt(encode(gen_random_bytes(32), 'hex'), gen_salt('bf', 12))
+    WHERE username = 'bot'
+  `;
+  console.log('  🔒 Connexion par mot de passe @bot neutralisée (bcrypt aléatoire)');
+
+  const botPasswordHash = env.BOT_PASSWORD_HASH?.trim();
+  if (!botPasswordHash) {
+    console.log('  ⏭️  Aucun compte @bot créé : BOT_PASSWORD_HASH n’est pas défini');
+  } else {
+    if (!/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(botPasswordHash)) {
+      throw new Error('BOT_PASSWORD_HASH doit être un hash bcrypt valide.');
     }
-  } catch (e) {
-    console.error(`  ❌ Erreur bot: ${e.message}`);
+
+    const botUser = await sql`
+      INSERT INTO users (username, email, password_hash, tier, avatar_url, is_verified)
+      VALUES (
+        'bot',
+        'bot@vibe.ai',
+        ${botPasswordHash},
+        'Pro',
+        'https://api.dicebear.com/7.x/bottts/svg?seed=vibe-bot',
+        TRUE
+      )
+      ON CONFLICT (username) DO UPDATE SET
+        password_hash = EXCLUDED.password_hash,
+        is_verified = TRUE,
+        avatar_url = EXCLUDED.avatar_url
+      RETURNING id
+    `;
+    const botId = botUser[0]?.id;
+    if (!botId) throw new Error('Impossible de créer le compte @bot.');
+
+    await sql`
+      INSERT INTO profiles (user_id, display_name, bio, avatar_url, is_verified)
+      VALUES (${botId}, 'Bot', 'Compte officiel de test Vibe 🤖', 'https://api.dicebear.com/7.x/bottts/svg?seed=vibe-bot', TRUE)
+      ON CONFLICT (user_id) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        bio = EXCLUDED.bio,
+        avatar_url = EXCLUDED.avatar_url,
+        is_verified = TRUE
+    `;
+
+    const postCount = await sql`SELECT COUNT(*) as n FROM posts WHERE author_id = ${botId}`;
+    if (Number(postCount[0].n) < 2) {
+      await sql`
+        INSERT INTO posts (author_id, content, format, visibility, toxicity_score, created_via)
+        VALUES (${botId}, 'Bienvenue sur Vibe ! 🚀 Je suis le bot de test officiel @bot. Vous pouvez liker, commenter ou m''envoyer un message en DM !', 'micro_text', 'public', 0.01, 'mai_agent')
+      `;
+      await sql`
+        INSERT INTO posts (author_id, content, format, visibility, toxicity_score, created_via)
+        VALUES (${botId}, 'Test de publication avec #mAI sur Vibe ! Intelligence artificielle intégrée ✨🤖 #Vibe #Innovation', 'micro_text', 'public', 0.01, 'mai_agent')
+      `;
+    }
+    console.log(`  ✅ Compte @bot sécurisé à partir de BOT_PASSWORD_HASH (id: ${botId})`);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -557,6 +618,8 @@ async function migrate() {
     ['user_settings.blocked_keywords', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='blocked_keywords'`],
     ['user_settings.two_factor_auth', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='two_factor_auth'`],
     ['user_settings.allow_mentions', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='allow_mentions'`],
+    ['user_settings.allow_dms', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='allow_dms'`],
+    ['user_settings.dms_enabled', `SELECT 1 FROM information_schema.columns WHERE table_name='user_settings' AND column_name='dms_enabled'`],
     ['usage_logs.endpoint', `SELECT 1 FROM information_schema.columns WHERE table_name='usage_logs' AND column_name='endpoint'`],
     ['posts.status', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='status'`],
     ['posts.scheduled_at', `SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='scheduled_at'`],
@@ -579,9 +642,15 @@ async function migrate() {
     ['idx_mai_messages_conv', `SELECT 1 FROM pg_indexes WHERE indexname='idx_mai_messages_conv'`],
   ];
 
-  for (const [name, q] of checks) {
-    const r = await sql.query(q);
-    console.log(`  ${r.length > 0 ? '✅' : '❌'} ${name}`);
+  const missingChecks = [];
+  for (const [name, query] of checks) {
+    const result = await sql.query(query);
+    const found = result.length > 0;
+    console.log(`  ${found ? '✅' : '❌'} ${name}`);
+    if (!found) missingChecks.push(name);
+  }
+  if (missingChecks.length > 0) {
+    throw new Error(`Vérification finale échouée : ${missingChecks.join(', ')}`);
   }
 
   console.log('\n🎉 Migration terminée !\n');

@@ -46,6 +46,23 @@ jobs:
       - name: 📦 Installation des dépendances
         run: npm ci
 
+      - name: 🧹 Vérification statique du code
+        run: npm run lint
+
+      - name: 🦕 Installer Deno pour les tests backend
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: 🧪 Tests backend
+        run: npm test
+
+      - name: 🧩 Vérification TypeScript/Deno du backend
+        run: npm run check:backend
+
+      - name: 🗃️ Vérification du runner de migrations
+        run: npm run check:migrations
+
       - name: 🔨 Build de l'application React/Vite
         run: npm run build
         env:

@@ -343,7 +343,7 @@ export function registerTranslateRoutes(app: Hono) {
       });
     } catch (err: any) {
       console.error("[translate] Translate error:", err);
-      return c.json({ error: err?.message || "Erreur de traduction." }, 500);
+      return c.json({ error: "Erreur de traduction." }, 500);
     }
   };
 

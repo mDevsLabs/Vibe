@@ -22,6 +22,154 @@ import {
   stripHtmlTags,
 } from "./vibe-posts-core.ts";
 
+type PostAccessResult =
+  | { post: any; error?: never; status?: never }
+  | { post?: never; error: string; status: number; blocked?: boolean };
+
+/**
+ * Charge un post et applique les mêmes règles d'accès aux interactions que
+ * pour le détail : statut publié, audience, et blocage croisé. La vérification
+ * est faite avant toute mutation afin qu'un UUID valide ne permette pas de
+ * signaler un post privé/planifié.
+ */
+const getPostForViewer = async (
+  sql: any,
+  postId: string,
+  viewerId: number | null,
+  options: { allowOwnScheduled?: boolean } = {},
+): Promise<PostAccessResult> => {
+  await ensurePostColumns().catch(() => {});
+  const rows = await sql`
+    SELECT id, author_id, content, visibility,
+           COALESCE(status, 'published') AS status,
+           likes_count, reposts_count, replies_count, bookmarks_count, views_count
+    FROM posts
+    WHERE id = ${postId}::uuid
+    LIMIT 1
+  `;
+  if (!rows || rows.length === 0) {
+    return { error: "Publication introuvable.", status: 404 };
+  }
+
+  const post = rows[0];
+  const authorId = Number(post.author_id);
+  const isAuthor = viewerId !== null && Number.isFinite(viewerId) && authorId === viewerId;
+  const status = String(post.status || "published").toLowerCase();
+  if (status !== "published" && !(options.allowOwnScheduled && isAuthor)) {
+    return { error: "Publication introuvable.", status: 404 };
+  }
+
+  const visibility = String(post.visibility || "public").toLowerCase();
+  if (visibility === "private" && !isAuthor) {
+    return { error: "Publication introuvable.", status: 404 };
+  }
+  if (visibility === "followers" && !isAuthor) {
+    try {
+      const followed = await sql`
+        SELECT 1 FROM follows
+        WHERE follower_id = ${viewerId} AND following_id = ${authorId}
+        LIMIT 1
+      `;
+      if (!followed || followed.length === 0) {
+        return { error: "Publication introuvable.", status: 404 };
+      }
+    } catch {
+      return { error: "Publication introuvable.", status: 404 };
+    }
+  }
+  if (visibility === "circle" && !isAuthor) {
+    try {
+      const member = await sql`
+        SELECT 1 FROM circle_members
+        WHERE user_id = ${authorId} AND member_user_id = ${viewerId}
+        LIMIT 1
+      `;
+      if (!member || member.length === 0) {
+        return { error: "Publication introuvable.", status: 404 };
+      }
+    } catch {
+      return { error: "Publication introuvable.", status: 404 };
+    }
+  }
+  // Une audience inconnue ne doit pas être traitée comme publique.
+  if (!["public", "private", "followers", "circle"].includes(visibility)) {
+    return { error: "Publication introuvable.", status: 404 };
+  }
+
+  if (viewerId !== null && Number.isFinite(viewerId) && !isAuthor && await isBlockEitherWay(viewerId, authorId)) {
+    return { error: "Publication indisponible.", status: 403, blocked: true };
+  }
+  return { post };
+};
+
+const emitPostStats = async (post: any): Promise<void> => {
+  try {
+    await pushRealtimeEvent(Number(post?.author_id), "post_stats", {
+      post_id: post?.id,
+      likes_count: Number(post?.likes_count || 0),
+      reposts_count: Number(post?.reposts_count || 0),
+      replies_count: Number(post?.replies_count || 0),
+    });
+  } catch {}
+};
+
+/** Recalcule le compteur depuis la table d'interactions (source de vérité). */
+const syncLikeCounter = async (sql: any, postId: string, userId: number) => sql`
+  UPDATE posts AS p
+  SET likes_count = (
+    SELECT COUNT(*)::int FROM post_interactions pi
+    WHERE pi.post_id = p.id AND pi.interaction_type = 'like'
+  )
+  WHERE p.id = ${postId}::uuid AND COALESCE(p.status, 'published') = 'published'
+  RETURNING p.id, p.author_id, p.content, p.likes_count, p.reposts_count, p.replies_count,
+            EXISTS (
+              SELECT 1 FROM post_interactions pi
+              WHERE pi.post_id = p.id AND pi.user_id = ${userId} AND pi.interaction_type = 'like'
+            ) AS liked
+`;
+
+const syncRepostCounter = async (sql: any, postId: string, userId: number) => sql`
+  UPDATE posts AS p
+  SET reposts_count = (
+    SELECT COUNT(*)::int FROM post_interactions pi
+    WHERE pi.post_id = p.id AND pi.interaction_type = 'repost'
+  )
+  WHERE p.id = ${postId}::uuid AND COALESCE(p.status, 'published') = 'published'
+  RETURNING p.id, p.author_id, p.content, p.likes_count, p.reposts_count, p.replies_count,
+            EXISTS (
+              SELECT 1 FROM post_interactions pi
+              WHERE pi.post_id = p.id AND pi.user_id = ${userId} AND pi.interaction_type = 'repost'
+            ) AS reposted
+`;
+
+const syncBookmarkCounter = async (sql: any, postId: string, userId: number) => sql`
+  UPDATE posts AS p
+  SET bookmarks_count = (
+    SELECT COUNT(*)::int FROM bookmarks b
+    WHERE b.post_id = p.id
+  )
+  WHERE p.id = ${postId}::uuid AND COALESCE(p.status, 'published') = 'published'
+  RETURNING p.id, p.author_id, p.content, p.likes_count, p.reposts_count, p.replies_count,
+            EXISTS (
+              SELECT 1 FROM bookmarks b
+              WHERE b.post_id = p.id AND b.user_id = ${userId}
+            ) AS bookmarked
+`;
+
+const syncCommentLikeCounter = async (sql: any, commentId: string, userId: number) => sql`
+  UPDATE comments AS c
+  SET likes_count = (
+    SELECT COUNT(*)::int FROM comment_likes cl
+    WHERE cl.comment_id = c.id
+  )
+  WHERE c.id = ${commentId}::uuid
+  RETURNING c.id, c.post_id, c.author_id, c.likes_count,
+            EXISTS (
+              SELECT 1 FROM comment_likes cl
+              WHERE cl.comment_id = c.id AND cl.user_id = ${userId}
+            ) AS liked
+`;
+
 export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
   // 2. LIKES & REPOSTS & BOOKMARKS
   const handleLike = async (c: any) => {
@@ -30,75 +178,73 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
       const postId = c.req.param("id");
+      if (!isUuid(postId)) return c.json({ error: "Identifiant de post invalide." }, 400);
       const sql = getDb();
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
+      const post = access.post;
 
-      const existing = await sql`
-        SELECT id FROM post_interactions
+      // Suppression d'abord, puis insertion seulement si aucune ligne n'a
+      // été supprimée. RETURNING permet de ne notifier/compter qu'une
+      // transition réelle, même avec deux requêtes concurrentes.
+      const removed = await sql`
+        DELETE FROM post_interactions
         WHERE user_id = ${userId} AND post_id = ${postId}::uuid AND interaction_type = 'like'
+        RETURNING id
       `;
-
-      if (existing.length > 0) {
-        await sql`DELETE FROM post_interactions WHERE id = ${existing[0].id}::uuid`;
-        await sql`UPDATE posts SET likes_count = GREATEST(0, likes_count - 1) WHERE id = ${postId}::uuid`;
-        try {
-          await sql`
-            DELETE FROM notifications
-            WHERE actor_id = ${userId} AND post_id = ${postId}::uuid AND type = 'like'
-          `;
-        } catch {}
-        // Temps réel : compteurs actualisés pour l'auteur (flux SSE)
-        try {
-          const statsRows = await sql`SELECT author_id, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-          if (statsRows[0]) {
-            await pushRealtimeEvent(statsRows[0].author_id, "post_stats", {
-              post_id: postId,
-              likes_count: Number(statsRows[0].likes_count || 0),
-              reposts_count: Number(statsRows[0].reposts_count || 0),
-              replies_count: Number(statsRows[0].replies_count || 0),
-            });
-          }
-        } catch {}
-        return c.json({ success: true, liked: false });
-      } else {
-        await sql`
+      let becameLiked = false;
+      if (removed.length === 0) {
+        const inserted = await sql`
           INSERT INTO post_interactions (user_id, post_id, interaction_type)
           VALUES (${userId}, ${postId}::uuid, 'like')
           ON CONFLICT (user_id, post_id, interaction_type) DO NOTHING
+          RETURNING id
         `;
-        await sql`UPDATE posts SET likes_count = likes_count + 1 WHERE id = ${postId}::uuid`;
+        becameLiked = inserted.length > 0;
+      }
 
-        const postAuthor = await sql`SELECT author_id, content, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-        if (postAuthor.length > 0) {
-          // Temps réel : compteurs actualisés pour l'auteur (flux SSE)
-          pushRealtimeEvent(postAuthor[0].author_id, "post_stats", {
-            post_id: postId,
-            likes_count: Number(postAuthor[0].likes_count || 0),
-            reposts_count: Number(postAuthor[0].reposts_count || 0),
-            replies_count: Number(postAuthor[0].replies_count || 0),
-          }).catch(() => {});
+      const synced = await syncLikeCounter(sql, postId, userId);
+      if (synced.length === 0) return c.json({ error: "Publication introuvable." }, 404);
+      await emitPostStats(synced[0]);
 
-          const recipientId = Number(postAuthor[0].author_id);
-          if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
-            const rawContent = stripHtmlTags(postAuthor[0].content || "").trim();
-            const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
-            const msg = `a aimé votre publication${snippet}`;
-            try {
-              await sql`
-                INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-                VALUES (${recipientId}, ${userId}, 'like', ${postId}::uuid, ${msg})
-              `;
-            } catch (err) {
-              console.error("[Like Notification Error]:", err);
-            }
+      if (becameLiked) {
+        const recipientId = Number(post.author_id);
+        if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
+          const rawContent = stripHtmlTags(post.content || "").trim();
+          const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
+          try {
+            await sql`
+              INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
+              SELECT ${recipientId}, ${userId}, 'like', ${postId}::uuid,
+                     ${`a aimé votre publication${snippet}`}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM notifications
+                WHERE recipient_id = ${recipientId} AND actor_id = ${userId}
+                  AND type = 'like' AND post_id = ${postId}::uuid AND comment_id IS NULL
+              )
+            `;
+          } catch (err) {
+            console.error("[Like Notification Error]:", err);
           }
         }
-
-        return c.json({ success: true, liked: true });
+      } else if (removed.length > 0) {
+        try {
+          await sql`
+            DELETE FROM notifications
+            WHERE actor_id = ${userId} AND post_id = ${postId}::uuid
+              AND type = 'like' AND comment_id IS NULL
+          `;
+        } catch {}
       }
+
+      return c.json({ success: true, liked: Boolean(synced[0].liked ?? becameLiked) });
     } catch (err: any) {
-      return c.json({ error: err.message || "Erreur lors de l'interaction." }, 500);
+      console.error("[Like] interaction error:", err?.message || err);
+      return c.json({ error: "Erreur lors de l'interaction." }, 500);
     }
   };
 
@@ -110,75 +256,69 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
       const postId = c.req.param("id");
+      if (!isUuid(postId)) return c.json({ error: "Identifiant de post invalide." }, 400);
       const sql = getDb();
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
+      const post = access.post;
 
-      const existing = await sql`
-        SELECT id FROM post_interactions
+      const removed = await sql`
+        DELETE FROM post_interactions
         WHERE user_id = ${userId} AND post_id = ${postId}::uuid AND interaction_type = 'repost'
+        RETURNING id
       `;
+      let becameReposted = false;
+      if (removed.length === 0) {
+        const inserted = await sql`
+          INSERT INTO post_interactions (user_id, post_id, interaction_type)
+          VALUES (${userId}, ${postId}::uuid, 'repost')
+          ON CONFLICT (user_id, post_id, interaction_type) DO NOTHING
+          RETURNING id
+        `;
+        becameReposted = inserted.length > 0;
+      }
 
-      if (existing.length > 0) {
-        await sql`DELETE FROM post_interactions WHERE id = ${existing[0].id}::uuid`;
-        await sql`UPDATE posts SET reposts_count = GREATEST(0, reposts_count - 1) WHERE id = ${postId}::uuid`;
+      const synced = await syncRepostCounter(sql, postId, userId);
+      if (synced.length === 0) return c.json({ error: "Publication introuvable." }, 404);
+      await emitPostStats(synced[0]);
+
+      if (becameReposted) {
+        const recipientId = Number(post.author_id);
+        if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
+          const rawContent = stripHtmlTags(post.content || "").trim();
+          const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
+          try {
+            await sql`
+              INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
+              SELECT ${recipientId}, ${userId}, 'repost', ${postId}::uuid,
+                     ${`a republié votre publication${snippet}`}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM notifications
+                WHERE recipient_id = ${recipientId} AND actor_id = ${userId}
+                  AND type = 'repost' AND post_id = ${postId}::uuid AND comment_id IS NULL
+              )
+            `;
+          } catch (err) {
+            console.error("[Repost Notification Error]:", err);
+          }
+        }
+      } else if (removed.length > 0) {
         try {
           await sql`
             DELETE FROM notifications
             WHERE actor_id = ${userId} AND post_id = ${postId}::uuid AND type = 'repost'
           `;
         } catch {}
-        // Temps réel : compteurs actualisés pour l'auteur (flux SSE)
-        try {
-          const statsRows = await sql`SELECT author_id, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-          if (statsRows[0]) {
-            await pushRealtimeEvent(statsRows[0].author_id, "post_stats", {
-              post_id: postId,
-              likes_count: Number(statsRows[0].likes_count || 0),
-              reposts_count: Number(statsRows[0].reposts_count || 0),
-              replies_count: Number(statsRows[0].replies_count || 0),
-            });
-          }
-        } catch {}
-        return c.json({ success: true, reposted: false });
-      } else {
-        await sql`
-          INSERT INTO post_interactions (user_id, post_id, interaction_type)
-          VALUES (${userId}, ${postId}::uuid, 'repost')
-          ON CONFLICT (user_id, post_id, interaction_type) DO NOTHING
-        `;
-        await sql`UPDATE posts SET reposts_count = reposts_count + 1 WHERE id = ${postId}::uuid`;
-
-        const postAuthor = await sql`SELECT author_id, content, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-        if (postAuthor.length > 0) {
-          // Temps réel : compteurs actualisés pour l'auteur (flux SSE)
-          pushRealtimeEvent(postAuthor[0].author_id, "post_stats", {
-            post_id: postId,
-            likes_count: Number(postAuthor[0].likes_count || 0),
-            reposts_count: Number(postAuthor[0].reposts_count || 0),
-            replies_count: Number(postAuthor[0].replies_count || 0),
-          }).catch(() => {});
-
-          const recipientId = Number(postAuthor[0].author_id);
-          if (recipientId !== userId && !(await isBlockEitherWay(userId, recipientId))) {
-            const rawContent = stripHtmlTags(postAuthor[0].content || "").trim();
-            const snippet = rawContent ? ` : « ${rawContent.slice(0, 45)}${rawContent.length > 45 ? '…' : ''} »` : '';
-            const msg = `a republié votre publication${snippet}`;
-            try {
-              await sql`
-                INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-                VALUES (${recipientId}, ${userId}, 'repost', ${postId}::uuid, ${msg})
-              `;
-            } catch (err) {
-              console.error("[Repost Notification Error]:", err);
-            }
-          }
-        }
-
-        return c.json({ success: true, reposted: true });
       }
+
+      return c.json({ success: true, reposted: Boolean(synced[0].reposted ?? becameReposted) });
     } catch (err: any) {
-      return c.json({ error: err.message || "Erreur lors du repartage." }, 500);
+      console.error("[Repost] interaction error:", err?.message || err);
+      return c.json({ error: "Erreur lors du repartage." }, 500);
     }
   };
 
@@ -191,6 +331,7 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
       const postId = c.req.param("id");
       if (!isUuid(postId)) {
@@ -204,6 +345,9 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       }
 
       const sql = getDb();
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
       // Toggle : supprime les deux types puis réinsère si un nouveau choix
       await sql`
         DELETE FROM post_interactions
@@ -234,28 +378,32 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
       const postId = c.req.param("id");
+      if (!isUuid(postId)) return c.json({ error: "Identifiant de post invalide." }, 400);
       const sql = getDb();
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
 
-      const existing = await sql`
-        SELECT id FROM bookmarks WHERE user_id = ${userId} AND post_id = ${postId}::uuid
+      const removed = await sql`
+        DELETE FROM bookmarks
+        WHERE user_id = ${userId} AND post_id = ${postId}::uuid
+        RETURNING id
       `;
-
-      if (existing.length > 0) {
-        await sql`DELETE FROM bookmarks WHERE id = ${existing[0].id}::uuid`;
-        await sql`UPDATE posts SET bookmarks_count = GREATEST(0, bookmarks_count - 1) WHERE id = ${postId}::uuid`;
-        return c.json({ success: true, bookmarked: false });
-      } else {
+      if (removed.length === 0) {
         await sql`
           INSERT INTO bookmarks (user_id, post_id) VALUES (${userId}, ${postId}::uuid)
           ON CONFLICT (user_id, post_id) DO NOTHING
         `;
-        await sql`UPDATE posts SET bookmarks_count = bookmarks_count + 1 WHERE id = ${postId}::uuid`;
-        return c.json({ success: true, bookmarked: true });
       }
+      const synced = await syncBookmarkCounter(sql, postId, userId);
+      if (synced.length === 0) return c.json({ error: "Publication introuvable." }, 404);
+      return c.json({ success: true, bookmarked: Boolean(synced[0].bookmarked) });
     } catch (err: any) {
-      return c.json({ error: err.message || "Erreur lors de l'enregistrement." }, 500);
+      console.error("[Bookmark] interaction error:", err?.message || err);
+      return c.json({ error: "Erreur lors de l'enregistrement." }, 500);
     }
   };
 
@@ -265,37 +413,27 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
   const handleGetComments = async (c: any) => {
     try {
       const postId = c.req.param("id");
-      const sql = getDb();
-
       if (!isUuid(postId)) {
-        return c.json({ count: 0, aiDigest: null, comments: [] });
+        return c.json({ error: "Identifiant de post invalide." }, 400);
       }
+      const sql = getDb();
 
       let currentUserId: number | null = null;
       const token = extractToken(c.req.raw);
       if (token) {
         try {
           const payload = await verifyToken(token);
-          currentUserId = Number(payload.sub || (payload as any).id);
+          const parsedUserId = Number(payload.sub || (payload as any).id);
+          if (Number.isSafeInteger(parsedUserId) && parsedUserId > 0) currentUserId = parsedUserId;
         } catch {}
       }
 
-      // Visibilité du post parent : les commentaires d'un post à audience
-      // restreinte (Abonnés / Cercle Privé) ne fuient pas par cette route.
+      // Un post inaccessible (restricted, planifié, bloqué ou absent) ne doit
+      // pas laisser fuiter ses commentaires via cette route.
       await ensureCircleTable().catch(() => {});
-      const parentPost = await sql`SELECT author_id, visibility FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-      if (parentPost.length > 0) {
-        const vis = String(parentPost[0].visibility || "public");
-        const authorId = Number(parentPost[0].author_id);
-        let canView = vis === "public" || (currentUserId != null && authorId === currentUserId);
-        if (!canView && currentUserId != null && vis === "followers") {
-          const followerRows = await sql`SELECT 1 FROM follows WHERE follower_id = ${currentUserId} AND following_id = ${authorId} LIMIT 1`;
-          canView = followerRows.length > 0;
-        } else if (!canView && currentUserId != null && vis === "circle") {
-          const memberRows = await sql`SELECT 1 FROM circle_members WHERE user_id = ${authorId} AND member_user_id = ${currentUserId} LIMIT 1`;
-          canView = memberRows.length > 0;
-        }
-        if (!canView) return c.json({ count: 0, aiDigest: null, comments: [] });
+      const access = await getPostForViewer(sql, postId, currentUserId);
+      if (access.error) {
+        return c.json({ count: 0, aiDigest: null, comments: [] });
       }
 
       const comments = await sql`
@@ -397,10 +535,14 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
 
       const sql = getDb();
       await ensurePostColumns().catch(() => {});
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, viewerId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
+
       const updated = await sql`
         UPDATE posts
         SET views_count = COALESCE(views_count, 0) + 1
-        WHERE id = ${postId}::uuid
+        WHERE id = ${postId}::uuid AND COALESCE(status, 'published') = 'published'
         RETURNING views_count
       `;
       if (updated.length === 0) {
@@ -585,21 +727,38 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
       const postId = c.req.param("id");
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
       const body = await c.req.json().catch(() => ({} as any));
       const content = body?.content ?? "";
       const parent_comment_id = body?.parent_comment_id;
       const commentMedia = Array.isArray(body?.media_assets) ? body.media_assets : [];
+      if (
+        parent_comment_id !== undefined &&
+        parent_comment_id !== null &&
+        parent_comment_id !== "" &&
+        !isUuid(String(parent_comment_id))
+      ) {
+        return c.json({ error: "Commentaire parent invalide." }, 400);
+      }
+
+      const sql = getDb();
+      await ensurePostColumns();
+      await ensureCircleTable().catch(() => {});
+      // Ne jamais insérer un commentaire sur un post absent, planifié,
+      // hors audience ou bloqué avec son auteur.
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
 
       if ((!content || !String(content).trim()) && commentMedia.length === 0) {
         return c.json({ error: "Commentaire vide." }, 400);
       }
       if (String(content).length > 10000) {
         return c.json({ error: "Commentaire trop long (10 000 caractères max)." }, 400);
-      }
-      if (!isUuid(postId)) {
-        return c.json({ error: "Identifiant de post invalide." }, 400);
       }
 
       // Validation des médias de commentaire : max 3 images + 1 vidéo
@@ -621,9 +780,6 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
           alt_text: String(m.alt_text || m.alt || "").slice(0, 500),
         });
       }
-
-      const sql = getDb();
-      await ensurePostColumns();
 
       // Commande /mai : réponse IA en commentaire (abonnés Plus, Pro et Max uniquement)
       const plainStart = stripHtmlTags(String(content || "")).trim();
@@ -653,17 +809,29 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       // Résoudre le parent (profondeur réelle, aplatie au niveau 4 max)
       let parentDepth = 0;
       let effectiveParentId: string | null = null;
-      if (parent_comment_id) {
-        if (!isUuid(parent_comment_id)) {
+      if (parent_comment_id !== undefined && parent_comment_id !== null && parent_comment_id !== "") {
+        const parentId = String(parent_comment_id);
+        if (!isUuid(parentId)) {
           return c.json({ error: "Commentaire parent invalide." }, 400);
         }
         const parentRows = await sql`
-          SELECT id, depth, parent_comment_id FROM comments WHERE id = ${parent_comment_id}::uuid LIMIT 1
+          SELECT id, depth, parent_comment_id, author_id, is_hidden, post_id
+          FROM comments
+          WHERE id = ${parentId}::uuid AND post_id = ${postId}::uuid
+          LIMIT 1
         `;
-        if (parentRows.length === 0) {
+        if (parentRows.length === 0 || parentRows[0].is_hidden) {
           return c.json({ error: "Commentaire parent introuvable." }, 404);
         }
         const parent = parentRows[0];
+        const parentAuthorId = Number(parent.author_id);
+        if (
+          parentAuthorId &&
+          parentAuthorId !== userId &&
+          await isBlockEitherWay(userId, parentAuthorId)
+        ) {
+          return c.json({ error: "Commentaire indisponible." }, 403);
+        }
         // On répond toujours à la racine du fil si le parent est déjà profond
         if (Number(parent.depth) >= 4) {
           effectiveParentId = parent.parent_comment_id || parent.id;
@@ -679,6 +847,9 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
         VALUES (${postId}::uuid, ${userId}, ${effectiveParentId || null}::uuid, ${String(content || '').trim()}, ${parentDepth + 1})
         RETURNING *
       `;
+      if (!inserted || inserted.length === 0) {
+        return c.json({ error: "Commentaire introuvable ou publication supprimée." }, 404);
+      }
 
       // Insertion des médias joints au commentaire
       const insertedCommentMedia: any[] = [];
@@ -695,20 +866,21 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
         }
       }
 
-      await sql`UPDATE posts SET replies_count = replies_count + 1 WHERE id = ${postId}::uuid`;
-
-      // Temps réel : replies_count actualisé pour l'auteur du post (flux SSE)
-      try {
-        const statsRows = await sql`SELECT author_id, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-        if (statsRows[0]) {
-          await pushRealtimeEvent(statsRows[0].author_id, "post_stats", {
-            post_id: postId,
-            likes_count: Number(statsRows[0].likes_count || 0),
-            reposts_count: Number(statsRows[0].reposts_count || 0),
-            replies_count: Number(statsRows[0].replies_count || 0),
-          });
-        }
-      } catch {}
+      // Compter depuis comments (source de vérité) évite qu'un retry ou un
+      // import ancien ne décale définitivement replies_count.
+      const statsRows = await sql`
+        UPDATE posts AS p
+        SET replies_count = (
+          SELECT COUNT(*)::int FROM comments c
+          WHERE c.post_id = p.id
+        )
+        WHERE p.id = ${postId}::uuid AND COALESCE(p.status, 'published') = 'published'
+        RETURNING p.id, p.author_id, p.likes_count, p.reposts_count, p.replies_count
+      `;
+      if (statsRows.length === 0) {
+        return c.json({ error: "Publication introuvable." }, 404);
+      }
+      await emitPostStats(statsRows[0]);
 
       // Notifier l'auteur du post (ou du commentaire parent) sans se notifier soi-même
       try {
@@ -771,25 +943,25 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
               question: maiQuestion,
               requesterId: userId,
             });
-            const replyContent = answer
-              || "Je n'ai pas pu générer de réponse pour le moment. Réessayez dans un instant.";
+            if (!answer) {
+              console.warn("[Vibe API] /mai: aucun résultat IA, aucune réponse persistée");
+              return;
+            }
+            const replyContent = answer;
             const aiInserted = await sql`
               INSERT INTO comments (post_id, author_id, parent_comment_id, content, depth)
               VALUES (${postId}::uuid, ${maiUserId}, ${maiParentId}::uuid, ${replyContent}, ${maiReplyDepth})
               RETURNING id
             `;
-            await sql`UPDATE posts SET replies_count = replies_count + 1 WHERE id = ${postId}::uuid`;
-            try {
-              const statsRows = await sql`SELECT author_id, likes_count, reposts_count, replies_count FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
-              if (statsRows[0]) {
-                await pushRealtimeEvent(statsRows[0].author_id, "post_stats", {
-                  post_id: postId,
-                  likes_count: Number(statsRows[0].likes_count || 0),
-                  reposts_count: Number(statsRows[0].reposts_count || 0),
-                  replies_count: Number(statsRows[0].replies_count || 0),
-                });
-              }
-            } catch {}
+            const aiStats = await sql`
+              UPDATE posts AS p
+              SET replies_count = (
+                SELECT COUNT(*)::int FROM comments c WHERE c.post_id = p.id
+              )
+              WHERE p.id = ${postId}::uuid AND COALESCE(p.status, 'published') = 'published'
+              RETURNING p.id, p.author_id, p.likes_count, p.reposts_count, p.replies_count
+            `;
+            if (aiStats.length > 0) await emitPostStats(aiStats[0]);
             try {
               await sql`
                 INSERT INTO notifications (recipient_id, actor_id, type, post_id, comment_id, message)
@@ -823,7 +995,7 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
         {
           error: isMissingTable
             ? "Table comments incomplète — migration requise."
-            : (err?.message || "Erreur ajout commentaire."),
+            : "Erreur ajout commentaire.",
         },
         500
       );
@@ -839,51 +1011,91 @@ export function registerPostEngagementRoutes(registerMulti: RegisterMultiFn) {
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
-      const commentId = c.req.param("commentId");
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
+      // Le paramètre du post fait partie de l'URL et doit être utilisé pour
+      // vérifier que le commentaire appartient bien au post demandé.
+      const postId = c.req.param("id");
+      const commentId = c.req.param("commentId");
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
       if (!isUuid(commentId)) {
         return c.json({ error: "Identifiant de commentaire invalide." }, 400);
       }
 
       const sql = getDb();
+      await ensurePostColumns();
+      await ensureCircleTable().catch(() => {});
+      const access = await getPostForViewer(sql, postId, userId);
+      if (access.error) return c.json({ error: access.error, blocked: access.blocked }, access.status);
 
-      let alreadyLiked = false;
-      try {
-        const existing = await sql`
-          SELECT 1 FROM comment_likes WHERE user_id = ${userId} AND comment_id = ${commentId}::uuid LIMIT 1
+      const commentRows = await sql`
+        SELECT c.id, c.post_id, c.author_id, c.is_hidden
+        FROM comments c
+        WHERE c.id = ${commentId}::uuid AND c.post_id = ${postId}::uuid
+        LIMIT 1
+      `;
+      if (commentRows.length === 0 || commentRows[0].is_hidden) {
+        return c.json({ error: "Commentaire introuvable." }, 404);
+      }
+      const comment = commentRows[0];
+      const commentAuthorId = Number(comment.author_id);
+      if (
+        commentAuthorId &&
+        commentAuthorId !== userId &&
+        await isBlockEitherWay(userId, commentAuthorId)
+      ) {
+        return c.json({ error: "Commentaire indisponible." }, 403);
+      }
+
+      const removed = await sql`
+        DELETE FROM comment_likes
+        WHERE user_id = ${userId} AND comment_id = ${commentId}::uuid
+        RETURNING id
+      `;
+      let becameLiked = false;
+      if (removed.length === 0) {
+        const inserted = await sql`
+          INSERT INTO comment_likes (user_id, comment_id)
+          VALUES (${userId}, ${commentId}::uuid)
+          ON CONFLICT (user_id, comment_id) DO NOTHING
+          RETURNING id
         `;
-        alreadyLiked = existing.length > 0;
-      } catch {
-        // Table comment_likes absente : on retombe sur un simple compteur
+        becameLiked = inserted.length > 0;
       }
 
-      if (alreadyLiked) {
-        try {
-          await sql`DELETE FROM comment_likes WHERE user_id = ${userId} AND comment_id = ${commentId}::uuid`;
-        } catch {}
-        await sql`UPDATE comments SET likes_count = GREATEST(0, COALESCE(likes_count, 0) - 1) WHERE id = ${commentId}::uuid`;
-        const row = await sql`SELECT COALESCE(likes_count, 0) as likes_count FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
-        return c.json({ success: true, liked: false, likes_count: Number(row[0]?.likes_count || 0) });
-      } else {
-        try {
-          await sql`INSERT INTO comment_likes (user_id, comment_id) VALUES (${userId}, ${commentId}::uuid)`;
-        } catch {}
-        await sql`UPDATE comments SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ${commentId}::uuid`;
-        const row = await sql`SELECT COALESCE(likes_count, 0) as likes_count FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
+      const synced = await syncCommentLikeCounter(sql, commentId, userId);
+      if (synced.length === 0) return c.json({ error: "Commentaire introuvable." }, 404);
 
+      if (becameLiked && commentAuthorId && commentAuthorId !== userId && !(await isBlockEitherWay(userId, commentAuthorId))) {
         try {
-          const cm = await sql`SELECT author_id, post_id FROM comments WHERE id = ${commentId}::uuid LIMIT 1`;
-          const authorId = Number(cm[0]?.author_id);
-          if (authorId && authorId !== userId && !(await isBlockEitherWay(userId, authorId))) {
-            await sql`
-              INSERT INTO notifications (recipient_id, actor_id, type, post_id, comment_id, message)
-              VALUES (${authorId}, ${userId}, 'like', ${cm[0]?.post_id}::uuid, ${commentId}::uuid, 'a aimé votre commentaire')
-            `;
-          }
+          await sql`
+            INSERT INTO notifications (recipient_id, actor_id, type, post_id, comment_id, message)
+            SELECT ${commentAuthorId}, ${userId}, 'like', ${postId}::uuid, ${commentId}::uuid,
+                   'a aimé votre commentaire'
+            WHERE NOT EXISTS (
+              SELECT 1 FROM notifications
+              WHERE recipient_id = ${commentAuthorId} AND actor_id = ${userId}
+                AND type = 'like' AND post_id = ${postId}::uuid AND comment_id = ${commentId}::uuid
+            )
+          `;
         } catch {}
-
-        return c.json({ success: true, liked: true, likes_count: Number(row[0]?.likes_count || 0) });
+      } else if (removed.length > 0) {
+        try {
+          await sql`
+            DELETE FROM notifications
+            WHERE actor_id = ${userId} AND post_id = ${postId}::uuid
+              AND comment_id = ${commentId}::uuid AND type = 'like'
+          `;
+        } catch {}
       }
+
+      return c.json({
+        success: true,
+        liked: Boolean(synced[0].liked ?? becameLiked),
+        likes_count: Number(synced[0].likes_count || 0),
+      });
     } catch (err: any) {
       console.error("[Like Comment Error]:", err);
       return c.json({ error: "Erreur lors du like du commentaire." }, 500);

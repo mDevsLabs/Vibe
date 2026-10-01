@@ -10,6 +10,8 @@ export default defineConfig({
   ],
   server: {
     port: 3000,
+    // Le proxy local doit rester sur le port attendu par l'API_BASE relatif.
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'https://mai.val.run',

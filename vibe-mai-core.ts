@@ -8,7 +8,7 @@
  * ============================================================================
  */
 
-import { getDb } from "./config.ts";
+import { getDb, getTierMaiTokenLimit, getWeekData } from "./config.ts";
 import { stripHtmlTags } from "./vibe-posts-core.ts";
 
 /** Regex UUID partagée (conversations mAI, publications jointes). */
@@ -41,7 +41,7 @@ export function parsePeriodArg(raw: string): "7d" | "30d" | "90d" | "12m" {
 }
 
 /** Formatte la réponse conversationnelle après exécution d'un outil. */
-export function formatToolReply(toolName: string, result: any, _username: string): string {
+function formatToolReplyInternal(toolName: string, result: any, _username: string): string {
   if (toolName === "generate_vibe_image") {
     return `🎨 Voici l'image générée avec mAI :\n\n![Image générée](${result.imageUrl})\n\n*Prompt : « ${result.prompt} »*`;
   }
@@ -161,6 +161,17 @@ export function formatToolReply(toolName: string, result: any, _username: string
   return "✅ Action effectuée.";
 }
 
+/** Limite la taille des chips/réponses et évite qu'un résultat malveillant
+ * transforme une réponse mAI en réponse géante. */
+export function formatToolReply(toolName: string, result: any, _username: string): string {
+  try {
+    const bounded = boundPersistedValue(result || {}, 24_000);
+    return formatToolReplyInternal(toolName, bounded, _username).slice(0, 12_000);
+  } catch {
+    return "✅ Action effectuée, mais le détail de l'outil a été tronqué.";
+  }
+}
+
 // ── Contexte de post joint à une question mAI ────────────────────────────
 // Le post est transmis avec ses statistiques, ses premiers commentaires et
 // ses médias. Les images sont jointes comme FICHIERS (octets récupérés puis
@@ -172,8 +183,264 @@ export const VISION_CAPABLE_MODELS = new Set([
   "anthropic/claude-3.7-sonnet",
   "mai-1.5-apex",
 ]);
+
+/** Limites de contexte et de sécurité pour les médias joints. */
+export const MAX_CONTEXT_POST_CHARS = 4_000;
+export const MAX_CONTEXT_COMMENT_CHARS = 200;
+export const MAX_CONTEXT_MEDIA_URL_LENGTH = 2_048;
 const MAX_CONTEXT_IMAGES = 3;
 const MAX_CONTEXT_IMAGE_BYTES = 3.5 * 1024 * 1024;
+const MAX_CONTEXT_TOTAL_IMAGE_BYTES = 7 * 1024 * 1024;
+const MAX_REMOTE_MEDIA_REDIRECTS = 2;
+const REMOTE_MEDIA_TIMEOUT_MS = 8_000;
+
+/**
+ * Nom réservé transporté dans les arguments d'un outil en attente. Il permet
+ * au client historique de renvoyer automatiquement le nonce sans modifier son
+ * contrat (y compris l'UI) ; il est retiré avant toute exécution.
+ */
+export const APPROVAL_NONCE_ARG = "__mai_approval_nonce";
+
+const PRIVATE_HOSTNAMES = new Set([
+  "localhost",
+  "localhost.localdomain",
+  "ip6-localhost",
+  "ip6-loopback",
+  "metadata",
+  "metadata.google.internal",
+  "metadata.goog",
+  "instance-data",
+]);
+
+function stripIpv6Zone(address: string): string {
+  return address.split("%")[0].toLowerCase();
+}
+
+function isPrivateIpv4(address: string): boolean {
+  const parts = address.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51) ||
+    (a === 203 && b === 0) ||
+    a >= 224
+  );
+}
+
+function isPrivateIpv6(address: string): boolean {
+  const value = stripIpv6Zone(address);
+  if (!value.includes(":")) return false;
+  if (value === "::1" || value === "::") return true;
+
+  // IPv4-mapped IPv6 (::ffff:127.0.0.1, etc.).
+  const mapped = value.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped && isPrivateIpv4(mapped[1])) return true;
+
+  const first = value.split(":")[0];
+  if (/^f[cd][0-9a-f]{0,2}$/.test(first)) return true; // fc00::/7
+  if (/^fe[89ab][0-9a-f]?$/.test(first)) return true; // fe80::/10
+  if (value.startsWith("ff")) return true; // multicast
+  if (value.startsWith("2001:db8")) return true; // documentation range
+  return false;
+}
+
+function isPrivateAddress(address: string): boolean {
+  const value = stripIpv6Zone(String(address || "").trim());
+  return value.includes(":") ? isPrivateIpv6(value) : isPrivateIpv4(value);
+}
+
+function isPrivateHostname(hostname: string): boolean {
+  const host = hostname.replace(/\.$/, "").toLowerCase();
+  if (PRIVATE_HOSTNAMES.has(host) || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    return true;
+  }
+  if (/^\d+(?:\.\d+){3}$/.test(host)) return isPrivateIpv4(host);
+  // URL normalise normalement les notations IPv4, mais on refuse aussi les
+  // variantes décimales/hexadécimales qui peuvent contourner un filtre naïf.
+  if (/^\d+$/.test(host)) {
+    const numeric = Number(host);
+    if (Number.isSafeInteger(numeric)) {
+      const octets = [24, 16, 8, 0].map((shift) => Math.floor(numeric / (2 ** shift)) & 255);
+      return isPrivateIpv4(octets.join("."));
+    }
+  }
+  if (/^0x[0-9a-f]+$/i.test(host)) return true;
+  if (host.includes(":")) return isPrivateIpv6(host);
+  return false;
+}
+
+async function resolveRemoteAddresses(hostname: string): Promise<string[] | null> {
+  const host = hostname.replace(/\.$/, "");
+  const dnsTimeout = (promise: Promise<any>): Promise<any> => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Résolution DNS trop lente.")), 3_000);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+  const deno = (globalThis as any).Deno;
+  if (deno?.resolveDns) {
+    const answers = await dnsTimeout(Promise.all([
+      deno.resolveDns(host, "A").catch(() => []),
+      deno.resolveDns(host, "AAAA").catch(() => []),
+    ]));
+    return answers.flat().map((entry: any) => String(entry)).filter(Boolean);
+  }
+  try {
+    // Import dynamique : le runtime Deno/Val Town n'a pas besoin de charger le
+    // module DNS natif lorsque Deno.resolveDns est disponible.
+    const dns: any = await import("node:dns/promises");
+    const answers = await dnsTimeout(dns.lookup(host, { all: true, verbatim: true }));
+    return answers.map((entry: any) => String(entry?.address || "")).filter(Boolean);
+  } catch (err) {
+    // En l'absence du module natif (runtime web), l'appelant peut encore
+    // valider les IP littérales ; une erreur de résolution effective reste
+    // fail-closed pour éviter un fetch aveugle.
+    const errorMessage = String((err as any)?.message || "");
+    if (errorMessage.includes("Cannot find")) return null;
+    if (errorMessage.includes("DNS")) throw err;
+    return null;
+  }
+}
+
+export async function validateRemoteMediaUrl(raw: unknown): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  if (typeof raw !== "string" || !raw.trim()) return { ok: false, error: "L'URL du média est requise." };
+  const value = raw.trim();
+  if (value.length > MAX_CONTEXT_MEDIA_URL_LENGTH) return { ok: false, error: "L'URL du média est trop longue." };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { ok: false, error: "L'URL du média est invalide." };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, error: "Seules les URL HTTP(S) sont autorisées pour un média." };
+  }
+  if (parsed.username || parsed.password) return { ok: false, error: "Les identifiants dans une URL média sont interdits." };
+  if (parsed.port && parsed.port !== "80" && parsed.port !== "443") {
+    return { ok: false, error: "Le port du média n'est pas autorisé." };
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (!hostname || isPrivateHostname(hostname)) {
+    return { ok: false, error: "Les hôtes locaux, privés et metadata sont interdits." };
+  }
+
+  let addresses: string[] | null = null;
+  try {
+    addresses = await resolveRemoteAddresses(hostname);
+  } catch {
+    return { ok: false, error: "Impossible de vérifier l'adresse du média." };
+  }
+  if (addresses && (addresses.length === 0 || addresses.some((address) => isPrivateAddress(address)))) {
+    return { ok: false, error: "L'URL du média pointe vers une adresse réseau privée ou non vérifiable." };
+  }
+  const canonical = parsed.toString();
+  if (canonical.length > MAX_CONTEXT_MEDIA_URL_LENGTH) return { ok: false, error: "L'URL du média est trop longue." };
+  return { ok: true, url: canonical };
+}
+
+async function readResponseBodyLimited(response: Response, maxBytes: number): Promise<Uint8Array | null> {
+  const contentLength = Number(response.headers?.get?.("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) return null;
+  if (!response.body) {
+    if (typeof (response as any).arrayBuffer !== "function" && typeof (response as any).text === "function") {
+      const text = String(await (response as any).text());
+      if (!text || text.length > maxBytes) return null;
+      return new TextEncoder().encode(text);
+    }
+    const buffer = await response.arrayBuffer();
+    return buffer.byteLength > 0 && buffer.byteLength <= maxBytes ? new Uint8Array(buffer) : null;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  if (total === 0) return null;
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+export async function readJSONResponseLimited(response: Response, maxBytes = 1_000_000): Promise<any> {
+  const bytes = await readResponseBodyLimited(response, maxBytes);
+  if (!bytes) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+async function fetchPublicImage(rawUrl: string): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+  let current: URL;
+  const initial = await validateRemoteMediaUrl(rawUrl);
+  if (!initial.ok) return null;
+  try { current = new URL(initial.url); } catch { return null; }
+
+  for (let redirect = 0; redirect <= MAX_REMOTE_MEDIA_REDIRECTS; redirect++) {
+    const checked = await validateRemoteMediaUrl(current.toString());
+    if (!checked.ok) return null;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REMOTE_MEDIA_TIMEOUT_MS);
+    try {
+      const response = await fetch(checked.url, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: { Accept: "image/*" },
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers?.get?.("location");
+        if (!location || redirect === MAX_REMOTE_MEDIA_REDIRECTS) return null;
+        const next = new URL(location, current);
+        const validNext = await validateRemoteMediaUrl(next.toString());
+        if (!validNext.ok) return null;
+        current = next;
+        continue;
+      }
+      if (!response.ok) return null;
+      const contentType = (response.headers?.get?.("content-type") || "").split(";")[0].trim().toLowerCase();
+      if (!/^image\/[a-z0-9.+-]+$/.test(contentType) || contentType === "image/svg+xml") return null;
+      const bytes = await readResponseBodyLimited(response, MAX_CONTEXT_IMAGE_BYTES);
+      return bytes ? { bytes, contentType } : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return null;
+}
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -184,22 +451,79 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-export async function buildPostContext(sql: any, postId: string): Promise<{ text: string; imageParts: any[] } | null> {
+/**
+ * Un post n'est inclus dans un contexte IA que si son audience et son statut
+ * sont visibles pour le demandeur. Les posts propres restent accessibles à leur
+ * auteur ; les posts planifiés ne sont jamais exposés à un tiers.
+ */
+export async function canUserViewPost(sql: any, post: any, viewerId?: number | null): Promise<boolean> {
+  const viewer = Number.isSafeInteger(Number(viewerId)) && Number(viewerId) > 0 ? Number(viewerId) : null;
+  const authorId = Number(post?.author_id);
+  const status = String(post?.status || "published").toLowerCase();
+  const visibility = String(post?.visibility || "public").toLowerCase();
+  if (viewer && authorId === viewer) return true;
+  if (viewer) {
+    try {
+      const blocked = await sql`
+        SELECT 1 FROM blocked_users
+        WHERE (user_id = ${viewer} AND blocked_user_id = ${authorId})
+           OR (user_id = ${authorId} AND blocked_user_id = ${viewer})
+        LIMIT 1
+      `;
+      if (blocked.length > 0) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (status !== "published") return false;
+  if (visibility === "public") return true;
+  if (!viewer || visibility === "private") return false;
   try {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId)) return null;
+    if (visibility === "followers") {
+      const rows = await sql`
+        SELECT 1 FROM follows
+        WHERE follower_id = ${viewer} AND following_id = ${authorId}
+        LIMIT 1
+      `;
+      return rows.length > 0;
+    }
+    if (visibility === "circle") {
+      const rows = await sql`
+        SELECT 1 FROM circle_members
+        WHERE user_id = ${authorId} AND member_user_id = ${viewer}
+        LIMIT 1
+      `;
+      return rows.length > 0;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+export async function buildPostContext(
+  sql: any,
+  postId: string,
+  viewerId?: number | null
+): Promise<{ text: string; imageParts: any[] } | null> {
+  try {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(postId || ""))) return null;
 
     const rows = await sql`
-      SELECT p.id, p.content, p.likes_count, p.reposts_count, p.replies_count, p.views_count,
+      SELECT p.id, p.author_id, p.content, p.visibility,
+             COALESCE(p.status, 'published') AS status,
+             p.likes_count, p.reposts_count, p.replies_count, p.views_count,
              p.published_at, p.created_via, p.ai_generated,
              u.username, pr.display_name
       FROM posts p
       JOIN users u ON u.id = p.author_id
       LEFT JOIN profiles pr ON pr.user_id = u.id
-      WHERE p.id = ${postId}::uuid
+      WHERE p.id = ${String(postId)}::uuid
       LIMIT 1
     `;
     if (rows.length === 0) return null;
     const post = rows[0];
+    if (!(await canUserViewPost(sql, post, viewerId))) return null;
 
     let commentsText = "";
     try {
@@ -207,13 +531,13 @@ export async function buildPostContext(sql: any, postId: string): Promise<{ text
         SELECT c.content, u.username
         FROM comments c
         JOIN users u ON u.id = c.author_id
-        WHERE c.post_id = ${postId}::uuid AND c.is_hidden = FALSE
+        WHERE c.post_id = ${String(postId)}::uuid AND c.is_hidden = FALSE
         ORDER BY c.depth ASC, c.likes_count DESC, c.created_at ASC
         LIMIT 10
       `;
       if (comments.length > 0) {
         const lines = comments
-          .map((cm: any) => `  • @${cm.username} : ${String(cm.content || "").slice(0, 200)}`)
+          .map((cm: any) => `  • @${String(cm.username || "").slice(0, 80)} : ${String(cm.content || "").slice(0, MAX_CONTEXT_COMMENT_CHARS)}`)
           .join("\n");
         commentsText = `\n\nPremiers commentaires :\n${lines}`;
       }
@@ -221,36 +545,42 @@ export async function buildPostContext(sql: any, postId: string): Promise<{ text
 
     let media: any[] = [];
     try {
-      media = await sql`SELECT url, media_type FROM media_assets WHERE post_id = ${postId}::uuid`;
+      media = await sql`
+        SELECT url, media_type FROM media_assets
+        WHERE post_id = ${String(postId)}::uuid
+        ORDER BY id ASC LIMIT 20
+      `;
     } catch {}
 
+    const publishedAt = post.published_at ? new Date(post.published_at) : null;
+    const dateText = publishedAt && !Number.isNaN(publishedAt.getTime())
+      ? publishedAt.toLocaleString("fr-FR")
+      : "date non publiée";
+    const contentText = String(post.content || "").slice(0, MAX_CONTEXT_POST_CHARS);
     const text =
-      `📌 Post mentionné de @${post.username} (${post.display_name || post.username})` +
+      `📌 Post mentionné de @${String(post.username || "").slice(0, 80)} (${String(post.display_name || post.username || "").slice(0, 100)})` +
       `${post.ai_generated ? " [marqué « créé avec l'IA » par son auteur]" : ""}\n` +
-      `Publié le ${new Date(post.published_at).toLocaleString("fr-FR")}\n\n` +
-      `« ${post.content} »\n\n` +
-      `Statistiques : ${post.likes_count} J'aime · ${post.replies_count} réponses · ${post.reposts_count} republications · ${post.views_count || 0} vues` +
+      `Publié le ${dateText}\n\n` +
+      `« ${contentText} »\n\n` +
+      `Statistiques : ${Number(post.likes_count || 0)} J'aime · ${Number(post.replies_count || 0)} réponses · ${Number(post.reposts_count || 0)} republications · ${Number(post.views_count || 0)} vues` +
       commentsText;
 
     const imageParts: any[] = [];
+    let totalImageBytes = 0;
     for (const m of media) {
-      if (imageParts.length >= MAX_CONTEXT_IMAGES) break;
+      if (imageParts.length >= MAX_CONTEXT_IMAGES || totalImageBytes >= MAX_CONTEXT_TOTAL_IMAGE_BYTES) break;
       const url = String(m.url || "");
       const isImage =
         String(m.media_type || "").startsWith("image") ||
         /\.(png|jpe?g|webp|gif)(\?|$)/i.test(url);
-      if (!url || !isImage) continue;
-      try {
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const buf = await res.arrayBuffer();
-        if (buf.byteLength === 0 || buf.byteLength > MAX_CONTEXT_IMAGE_BYTES) continue;
-        const contentType = res.headers.get("content-type") || "image/jpeg";
-        imageParts.push({
-          type: "image_url",
-          image_url: { url: `data:${contentType};base64,${bytesToBase64(new Uint8Array(buf))}` },
-        });
-      } catch {}
+      if (!url || url.length > MAX_CONTEXT_MEDIA_URL_LENGTH || !isImage) continue;
+      const image = await fetchPublicImage(url);
+      if (!image || totalImageBytes + image.bytes.byteLength > MAX_CONTEXT_TOTAL_IMAGE_BYTES) continue;
+      totalImageBytes += image.bytes.byteLength;
+      imageParts.push({
+        type: "image_url",
+        image_url: { url: `data:${image.contentType};base64,${bytesToBase64(image.bytes)}` },
+      });
     }
 
     return { text, imageParts };
@@ -360,10 +690,19 @@ export async function saveMAIMessage(
   extra?: { toolCalls?: any[] | null; toolCallId?: string | null }
 ) {
   try {
-    const toolCallsJson = extra?.toolCalls && extra.toolCalls.length > 0 ? JSON.stringify(extra.toolCalls) : null;
+    const safeCalls = extra?.toolCalls && extra.toolCalls.length > 0
+      ? extra.toolCalls.slice(0, 10).map((call: any) => ({
+          ...call,
+          args: boundPersistedValue(call?.args, 8_000),
+          result: boundPersistedValue(call?.result, 16_000),
+          error: call?.error ? String(call.error).slice(0, 500) : call?.error ?? null,
+        }))
+      : null;
+    const toolCallsJson = safeCalls ? JSON.stringify(safeCalls) : null;
+    const safeContent = String(content ?? "").slice(0, 20_000);
     const rows = await sql`
       INSERT INTO mai_messages (conversation_id, sender_role, content, tool_calls, tool_call_id)
-      VALUES (${conversationId}::uuid, ${role}, ${content}, ${toolCallsJson}::jsonb, ${extra?.toolCallId || null})
+      VALUES (${conversationId}::uuid, ${role}, ${safeContent}, ${toolCallsJson}::jsonb, ${extra?.toolCallId || null})
       RETURNING id, created_at
     `;
     await sql`UPDATE mai_conversations SET updated_at = NOW() WHERE id = ${conversationId}::uuid`;
@@ -378,10 +717,11 @@ export async function saveMAIMessage(
 export function makeToolCallRecord(opts: {
   name: string;
   args?: any;
-  status: "executed" | "error" | "pending_approval" | "rejected" | "disabled" | "blocked";
+  status: "executed" | "error" | "pending_approval" | "rejected" | "disabled" | "blocked" | "executing";
   result?: any;
   error?: string | null;
   model?: string | null;
+  approvalNonce?: string | null;
 }) {
   return {
     id: (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
@@ -391,44 +731,218 @@ export function makeToolCallRecord(opts: {
     result: opts.result ?? null,
     error: opts.error ?? null,
     model: opts.model ?? null,
+    ...(opts.approvalNonce ? { approvalNonce: opts.approvalNonce } : {}),
     at: new Date().toISOString(),
   };
+}
+
+function boundPersistedValue(value: any, maxChars: number): any {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) return null;
+    if (serialized.length <= maxChars) return value;
+    return { truncated: true, preview: serialized.slice(0, maxChars) };
+  } catch {
+    return { unavailable: true };
+  }
+}
+
+function cloneToolValue(value: any, depth = 0): any {
+  if (depth > 8) throw new Error("Arguments d'outil trop imbriqués.");
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    if (value.length > 20_000) throw new Error("Un argument d'outil est trop long.");
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    if (value.length > 50) throw new Error("Trop d'éléments dans les arguments d'outil.");
+    return value.slice(0, 50).map((item) => cloneToolValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const output: Record<string, any> = {};
+    const keys = Object.keys(value).slice(0, 100);
+    for (const key of keys) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+      output[key] = cloneToolValue(value[key], depth + 1);
+    }
+    return output;
+  }
+  throw new Error("Type d'argument d'outil non autorisé.");
+}
+
+/** Valide et clone les arguments JSON avant persistance/exécution. */
+export function sanitizeToolArgs(raw: unknown): Record<string, any> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("Les arguments d'outil doivent être un objet JSON.");
+  const cloned = cloneToolValue(raw) as Record<string, any>;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(cloned);
+  } catch {
+    throw new Error("Arguments d'outil invalides.");
+  }
+  if (serialized.length > 32_768) throw new Error("Arguments d'outil trop volumineux.");
+  return JSON.parse(serialized);
+}
+
+/** Retire le nonce transporté dans args et retourne une copie sans secret. */
+export function extractApprovalNonce(
+  rawArgs: unknown,
+  explicitNonce?: unknown
+): { args: Record<string, any>; nonce: string | null } {
+  const args = sanitizeToolArgs(rawArgs);
+  const embedded = args[APPROVAL_NONCE_ARG];
+  delete args[APPROVAL_NONCE_ARG];
+  const candidate = explicitNonce !== undefined && explicitNonce !== null ? explicitNonce : embedded;
+  const nonce = typeof candidate === "string" && /^[A-Za-z0-9_-]{8,200}$/.test(candidate) ? candidate : null;
+  return { args, nonce };
+}
+
+export function createApprovalNonce(): string {
+  const cryptoObj: any = (globalThis as any).crypto;
+  if (cryptoObj?.randomUUID) return cryptoObj.randomUUID().replace(/-/g, "");
+  if (cryptoObj?.getRandomValues) {
+    const bytes = new Uint8Array(24);
+    cryptoObj.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  throw new Error("Générateur de nonce cryptographique indisponible.");
+}
+
+function canonicalToolValue(value: any): any {
+  if (Array.isArray(value)) return value.map(canonicalToolValue);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((out: Record<string, any>, key) => {
+      if (value[key] !== undefined) out[key] = canonicalToolValue(value[key]);
+      return out;
+    }, {});
+  }
+  return value;
+}
+
+export function toolArgsEqual(left: unknown, right: unknown): boolean {
+  try {
+    return JSON.stringify(canonicalToolValue(left)) === JSON.stringify(canonicalToolValue(right));
+  } catch {
+    return false;
+  }
+}
+
+/** Retrouve un appel en attente sans faire confiance à `approve=true`. */
+export async function findPendingToolMessage(
+  sql: any,
+  conversationId: string,
+  toolName: string,
+  args: Record<string, any>,
+  approvalNonce?: string | null
+): Promise<{ id: string; call: any } | null> {
+  try {
+    const rows = await sql`
+      SELECT id, tool_calls FROM mai_messages
+      WHERE conversation_id = ${String(conversationId)}::uuid
+        AND sender_role = 'assistant' AND tool_calls IS NOT NULL
+      ORDER BY created_at DESC LIMIT 40
+    `;
+    for (const row of rows as any[]) {
+      const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
+      for (const call of calls) {
+        if (!call || call.name !== toolName || call.status !== "pending_approval") continue;
+        if (approvalNonce && call.approvalNonce !== approvalNonce) continue;
+        if (!toolArgsEqual(call.args || {}, args)) continue;
+        return { id: String(row.id), call };
+      }
+    }
+  } catch (err) {
+    console.warn("[vibe-mai] findPendingToolMessage:", (err as any)?.message);
+  }
+  return null;
+}
+
+/** Réclame atomiquement une approbation pour empêcher une double exécution. */
+export async function claimPendingToolMessage(
+  sql: any,
+  conversationId: string,
+  toolName: string,
+  args: Record<string, any>,
+  approvalNonce: string
+): Promise<{ id: string; call: any } | null> {
+  if (!approvalNonce) return null;
+  try {
+    const rows = await sql`
+      SELECT id, tool_calls FROM mai_messages
+      WHERE conversation_id = ${String(conversationId)}::uuid
+        AND sender_role = 'assistant' AND tool_calls IS NOT NULL
+      ORDER BY created_at DESC LIMIT 40
+    `;
+    for (const row of rows as any[]) {
+      const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
+      const idx = calls.findIndex((cc: any) =>
+        cc && cc.name === toolName && cc.status === "pending_approval" &&
+        cc.approvalNonce === approvalNonce && toolArgsEqual(cc.args || {}, args)
+      );
+      if (idx < 0) continue;
+      const nextCalls = calls.slice();
+      nextCalls[idx] = { ...calls[idx], status: "executing", at: new Date().toISOString() };
+      const updated = await sql`
+        UPDATE mai_messages SET tool_calls = ${JSON.stringify(nextCalls)}::jsonb
+        WHERE id = ${String(row.id)}::uuid AND tool_calls = ${JSON.stringify(row.tool_calls)}::jsonb
+        RETURNING id
+      `;
+      if (updated.length > 0) return { id: String(row.id), call: nextCalls[idx] };
+    }
+  } catch (err) {
+    console.warn("[vibe-mai] claimPendingToolMessage:", (err as any)?.message);
+  }
+  return null;
 }
 
 /**
  * Finalise le dernier message assistant portant un record `pending_approval`
  * pour cet outil (exécution ou refus) : met à jour contenu + tool_calls sans
- * insérer de doublon. Retourne l'id du message mis à jour, ou null.
+ * insérer de doublon. Les arguments et le nonce doivent correspondre.
  */
 export async function finalizePendingToolMessage(
   sql: any,
   conversationId: string,
   toolName: string,
-  patch: { status: string; result?: any; error?: string | null; reply: string; model?: string | null }
+  patch: { status: string; result?: any; error?: string | null; reply: string; model?: string | null },
+  approvalNonce?: string | null,
+  args?: Record<string, any>
 ): Promise<{ id: string | null }> {
   try {
     const rows = await sql`
       SELECT id, tool_calls FROM mai_messages
-      WHERE conversation_id = ${conversationId}::uuid AND sender_role = 'assistant' AND tool_calls IS NOT NULL
-      ORDER BY created_at DESC LIMIT 12
+      WHERE conversation_id = ${String(conversationId)}::uuid AND sender_role = 'assistant' AND tool_calls IS NOT NULL
+      ORDER BY created_at DESC LIMIT 40
     `;
     for (const row of rows as any[]) {
       const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
-      const idx = calls.findIndex((cc: any) => cc && cc.name === toolName && cc.status === "pending_approval");
+      const idx = calls.findIndex((cc: any) => {
+        const eligibleStatus = patch.status === "rejected"
+          ? cc?.status === "pending_approval"
+          : (cc?.status === "pending_approval" || cc?.status === "executing");
+        if (!cc || cc.name !== toolName || !eligibleStatus) return false;
+        if (approvalNonce && cc.approvalNonce !== approvalNonce) return false;
+        if (args && !toolArgsEqual(cc.args || {}, args)) return false;
+        return true;
+      });
       if (idx >= 0) {
         calls[idx] = {
           ...calls[idx],
           status: patch.status,
-          result: patch.result ?? null,
-          error: patch.error ?? null,
+          result: boundPersistedValue(patch.result, 16_000),
+          error: patch.error ? String(patch.error).slice(0, 500) : patch.error ?? null,
           model: patch.model ?? calls[idx].model ?? null,
           at: new Date().toISOString(),
         };
-        await sql`
-          UPDATE mai_messages SET content = ${patch.reply}, tool_calls = ${JSON.stringify(calls)}::jsonb
-          WHERE id = ${row.id}::uuid
+        const updated = await sql`
+          UPDATE mai_messages SET content = ${String(patch.reply || "").slice(0, 12_000)}, tool_calls = ${JSON.stringify(calls)}::jsonb
+          WHERE id = ${String(row.id)}::uuid
+            AND tool_calls = ${JSON.stringify(row.tool_calls)}::jsonb
+          RETURNING id
         `;
-        return { id: String(row.id) };
+        if (updated.length > 0) return { id: String(row.id) };
       }
     }
   } catch (err) {
@@ -604,8 +1118,57 @@ export function detectTool(cleanMsg: string): { toolToRun: string; toolArgs: any
 export async function getUserAutoApprove(sql: any, userId: number): Promise<boolean> {
   try {
     const rows = await sql`SELECT mai_auto_approve_tools FROM user_settings WHERE user_id = ${userId} LIMIT 1`;
-    return Boolean(rows[0]?.mai_auto_approve_tools);
+    const value = rows[0]?.mai_auto_approve_tools;
+    return value === true || value === 1 || value === "1" || value === "true";
   } catch {
     return false;
+  }
+}
+
+/**
+ * Réserve atomiquement le coût standard d'un appel mAI. Si la table de quota
+ * n'existe pas encore, on conserve la compatibilité des anciennes installs ;
+ * une autre erreur de base est traitée en fail-closed par l'appelant.
+ */
+export async function reserveMAIQuota(
+  sql: any,
+  userId: number,
+  cost = 250
+): Promise<{ ok: boolean; used: number; limit: number; reason?: string; unavailable?: boolean }> {
+  const safeCost = Math.max(1, Math.min(10_000, Math.floor(Number(cost) || 250)));
+  try {
+    const userRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
+    const tier = String(userRows[0]?.tier || "Free");
+    const limit = getTierMaiTokenLimit(tier);
+    const { weekStartStr } = getWeekData();
+    const rows = await sql`
+      INSERT INTO weekly_usage (user_id, week_start, tokens_used)
+      VALUES (${userId}, ${weekStartStr}::date, ${safeCost})
+      ON CONFLICT (user_id, week_start)
+      DO UPDATE SET tokens_used = weekly_usage.tokens_used + ${safeCost}
+      WHERE weekly_usage.tokens_used + ${safeCost} <= ${limit}
+      RETURNING tokens_used
+    `;
+    if (rows.length > 0) {
+      return { ok: true, used: Number(rows[0]?.tokens_used || 0), limit };
+    }
+    const usageRows = await sql`
+      SELECT COALESCE(tokens_used, 0) AS tokens_used
+      FROM weekly_usage WHERE user_id = ${userId} AND week_start = ${weekStartStr}::date LIMIT 1
+    `;
+    return {
+      ok: false,
+      used: Number(usageRows[0]?.tokens_used || 0),
+      limit,
+      reason: "Quota mAI hebdomadaire atteint.",
+    };
+  } catch (err: any) {
+    // Une installation ancienne peut ne pas avoir encore weekly_usage. Ne pas
+    // bloquer le chat dans ce cas ; les erreurs réelles de connexion restent
+    // fail-closed pour éviter une consommation incontrôlée.
+    if (/does not exist|relation .* does not exist|undefined table/i.test(String(err?.message || ""))) {
+      return { ok: false, used: 0, limit: 0, reason: "Quota mAI indisponible.", unavailable: true };
+    }
+    return { ok: false, used: 0, limit: 0, reason: "Quota mAI indisponible." };
   }
 }

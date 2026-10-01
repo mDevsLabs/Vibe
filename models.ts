@@ -7,6 +7,7 @@ import {
   getUserQuotaBoost,
   getWeekData,
   isPaidTier,
+  rateLimit,
   verifyToken,
 } from "./config.ts";
 import { maiModelsList } from "./maiModels.ts";
@@ -184,13 +185,17 @@ export function registerModelRoutes(app: Hono) {
       }
 
       const body = await c.req.json().catch(() => ({}));
-      const inputTokens = Number(body.inputTokens || body.promptTokens || 0);
-      const outputTokens = Number(
-        body.outputTokens || body.completionTokens || 0
-      );
-      const tokensUsed = Number(
-        body.tokensUsed || inputTokens + outputTokens || 0
-      );
+      const inputTokens = Number(body?.inputTokens ?? body?.promptTokens ?? 0);
+      const outputTokens = Number(body?.outputTokens ?? body?.completionTokens ?? 0);
+      const tokensUsed = Number(body?.tokensUsed ?? (inputTokens + outputTokens));
+      const validTokenCount = (value: number) =>
+        Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+      if (!validTokenCount(inputTokens) || !validTokenCount(outputTokens) || !validTokenCount(tokensUsed)) {
+        return c.json({ error: "Compte de tokens invalide." }, 400);
+      }
+      if (!rateLimit(`log-usage:${userId}`, 60, 60_000)) {
+        return c.json({ error: "Trop de rapports d'usage." }, 429);
+      }
       const { weekStartStr } = getWeekData();
 
       const sql = getDb();
@@ -206,26 +211,30 @@ export function registerModelRoutes(app: Hono) {
         WHERE user_id = ${resolvedUserId}::integer AND week_start = ${weekStartStr}::date
         LIMIT 1
       `;
-      const currentUsage = usageResult[0]?.tokens_used || 0;
+      const currentUsage = Number(usageResult[0]?.tokens_used || 0);
 
+      // Cette route est un rapport client : elle ne modifie jamais le quota.
+      // Les handlers qui consomment réellement un LLM réservent leurs tokens
+      // côté serveur via reserveMAIQuota().
       await sql`
-        INSERT INTO weekly_usage (user_id, week_start, tokens_used)
-        VALUES (${resolvedUserId}::integer, ${weekStartStr}::date, ${tokensUsed})
-        ON CONFLICT (user_id, week_start)
-        DO UPDATE SET tokens_used = weekly_usage.tokens_used + ${tokensUsed}
-      `;
+        INSERT INTO usage_logs (user_id, action_type, endpoint, metadata, tokens_used, timestamp)
+        VALUES (${resolvedUserId}::integer, 'client_usage_report', 'log-usage',
+                ${JSON.stringify({ inputTokens, outputTokens })}::jsonb,
+                ${tokensUsed}, NOW())
+      `.catch(() => {});
 
       return c.json({
         inputTokens,
         limit,
         outputTokens,
+        quotaUpdated: false,
         success: true,
         tokensUsed,
-        weeklyUsed: currentUsage + tokensUsed,
+        weeklyUsed: currentUsage,
       });
     } catch (err: any) {
       console.error("[log-usage] Error:", err);
-      return c.json({ error: "Erreur serveur.", details: err?.message }, 500);
+      return c.json({ error: "Erreur serveur." }, 500);
     }
   };
 
@@ -687,7 +696,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[ChatCompletions] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process chat completion.",
         },
         500
@@ -833,7 +841,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[Messages] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process Anthropic request.",
         },
         500
@@ -978,7 +985,6 @@ export function registerModelRoutes(app: Hono) {
       console.error("[GeminiGenerate] Erreur inattendue:", err);
       return c.json(
         {
-          details: err?.message || "Erreur interne.",
           error: "Failed to process Google Gemini request.",
         },
         500

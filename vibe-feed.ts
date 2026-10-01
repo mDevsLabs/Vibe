@@ -16,6 +16,7 @@ import {
   attachQuotedPosts,
   ensurePostColumns,
   fetchPostMedia,
+  isUuid,
   publishDuePosts,
 } from "./vibe-posts-core.ts";
 
@@ -76,13 +77,16 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
       const rawCursor = (c.req.query("cursor") || "").trim();
       const parseKeyset = (cur: string): { ts: string; id: string } | null => {
         const [ts, id] = cur.split("|");
-        if (!ts || !id || Number.isNaN(Date.parse(ts))) return null;
+        if (!ts || !id || Number.isNaN(Date.parse(ts)) || !isUuid(id)) return null;
         return { ts, id };
       };
       const parseRank = (cur: string): number | null => {
         const m = cur.match(/^rank:(\d+)$/);
         return m ? Number(m[1]) : null;
       };
+      if (rawCursor && !parseKeyset(rawCursor) && parseRank(rawCursor) === null) {
+        return c.json({ error: "Curseur invalide." }, 400);
+      }
 
       // Médias hydratés via le helper top-level fetchPostMedia (tagged-template only).
 
@@ -439,6 +443,10 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
   // 2. REAL TRENDS & HASHTAGS
   const handleGetTrends = async (c: any) => {
     try {
+      await ensurePostColumns().catch(() => {});
+      // Une tendance ne doit pas rester invisible simplement parce que le
+      // worker de publication paresseuse n'a pas encore été sollicité.
+      await publishDuePosts().catch(() => {});
       const sql = getDb();
 
       // Chercher les posts récents (48h d'abord, puis 30j si pas assez)
@@ -446,8 +454,8 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
         SELECT content, likes_count, reposts_count, replies_count, views_count, published_at
         FROM posts
         WHERE published_at > NOW() - INTERVAL '48 hours'
-          AND visibility = 'public' AND status = 'published'
-        ORDER BY (likes_count * 2 + reposts_count * 3 + replies_count) DESC
+          AND visibility = 'public' AND COALESCE(status, 'published') = 'published'
+        ORDER BY (COALESCE(likes_count, 0) * 2 + COALESCE(reposts_count, 0) * 3 + COALESCE(replies_count, 0)) DESC
         LIMIT 300
       `;
 
@@ -456,8 +464,8 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
           SELECT content, likes_count, reposts_count, replies_count, views_count, published_at
           FROM posts
           WHERE published_at > NOW() - INTERVAL '30 days'
-            AND visibility = 'public' AND status = 'published'
-          ORDER BY (likes_count * 2 + reposts_count * 3 + replies_count) DESC
+            AND visibility = 'public' AND COALESCE(status, 'published') = 'published'
+          ORDER BY (COALESCE(likes_count, 0) * 2 + COALESCE(reposts_count, 0) * 3 + COALESCE(replies_count, 0)) DESC
           LIMIT 300
         `;
       }
@@ -482,10 +490,11 @@ export function registerVibeFeedRoutes(app: Hono, registerMulti: RegisterMultiFn
           const normalized = rawTag.toLowerCase().trim();
           if (normalized.length <= 1 || normalized.length > 35) continue;
 
-          if (!tagMap[rawTag]) tagMap[rawTag] = { count: 0, engagement: 0, recencyBoost: 0 };
-          tagMap[rawTag].count += 1;
-          tagMap[rawTag].engagement += eng;
-          tagMap[rawTag].recencyBoost += recency;
+          // Une même tendance ne doit pas être scindée selon sa casse.
+          if (!tagMap[normalized]) tagMap[normalized] = { count: 0, engagement: 0, recencyBoost: 0 };
+          tagMap[normalized].count += 1;
+          tagMap[normalized].engagement += eng;
+          tagMap[normalized].recencyBoost += recency;
         }
       }
 

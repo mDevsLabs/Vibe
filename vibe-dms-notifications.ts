@@ -79,7 +79,7 @@ export function registerDMNotificationRoutes(app: Hono, registerMulti: RegisterM
       return c.json({ success: true, is_read: isReadVal, id: notifId });
     } catch (err: any) {
       console.error("[vibe-dms] Error in handleMarkNotificationsRead:", err);
-      return c.json({ error: "Erreur marquage notification.", details: err?.message }, 500);
+      return c.json({ error: "Erreur marquage notification." }, 500);
     }
   };
 
@@ -127,7 +127,7 @@ export function registerDMNotificationRoutes(app: Hono, registerMulti: RegisterM
       return c.json({ success: true, deleted_id: notifId || "all" });
     } catch (err: any) {
       console.error("[vibe-dms] Error in handleDeleteNotification:", err);
-      return c.json({ error: "Erreur suppression notification.", details: err?.message }, 500);
+      return c.json({ error: "Erreur suppression notification." }, 500);
     }
   };
 

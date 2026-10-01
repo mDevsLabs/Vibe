@@ -487,7 +487,6 @@ export function registerStorageRoutes(app: Hono) {
           {
             error:
               "L'upload a échoué sur tous les buckets de stockage. Vérifiez la configuration Z1 Storage (credentials S3) ou réessayez plus tard.",
-            details: uploadResult.error?.slice(0, 300),
           },
           503
         );
@@ -587,7 +586,6 @@ export function registerStorageRoutes(app: Hono) {
           {
             error:
               "L'upload a échoué sur tous les buckets de stockage. Vérifiez la configuration Z1 Storage (credentials S3) ou réessayez plus tard.",
-            details: uploadResult.error?.slice(0, 300),
           },
           503
         );

@@ -80,10 +80,10 @@ export function registerVibeMAISettingsRoutes(app: Hono, registerMulti: Register
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
       const body = await c.req.json().catch(() => ({}));
-      const ids = Array.isArray(body?.enabled_tool_ids)
-        ? Array.from(new Set(body.enabled_tool_ids.map(String)))
+      const ids: string[] = Array.isArray(body?.enabled_tool_ids)
+        ? Array.from(new Set<string>(body.enabled_tool_ids.map(String)))
         : [];
-      const validIds = new Set(MAI_TOOLS_CATALOG.filter((t) => t.enabled).map((t) => t.id));
+      const validIds = new Set<string>(MAI_TOOLS_CATALOG.filter((t) => t.enabled).map((t) => t.id));
       const filtered = ids.filter((id) => validIds.has(id));
       const sql = getDb();
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_enabled_tools JSONB DEFAULT NULL`.catch(() => {});

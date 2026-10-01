@@ -134,7 +134,7 @@ export function registerVibeAIRoutes(app: Hono) {
       return c.json({ success: true, text: cleanLlmText(result) });
     } catch (err: any) {
       console.error("[vibe-ai] AI text error:", err);
-      return c.json({ error: err?.message || "Erreur outil texte mAI." }, 500);
+      return c.json({ error: "Erreur outil texte mAI." }, 500);
     }
   };
 
@@ -283,7 +283,7 @@ export function registerVibeAIRoutes(app: Hono) {
       return c.json({ success: true, translation, detected_language: detected, target_lang: effectiveTarget, cached: false });
     } catch (err: any) {
       console.error("[vibe-ai] Translate error:", err);
-      return c.json({ error: err?.message || "Erreur traduction mAI." }, 500);
+      return c.json({ error: "Erreur traduction mAI." }, 500);
     }
   };
 

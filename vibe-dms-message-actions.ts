@@ -498,7 +498,7 @@ export function registerDMMessageActionRoutes(app: Hono, registerMulti: Register
       });
     } catch (err: any) {
       console.error("[vibe-dms] Generate reply error:", err);
-      return c.json({ error: err?.message || "Erreur génération de réponse." }, 500);
+      return c.json({ error: "Erreur génération de réponse." }, 500);
     }
   };
 

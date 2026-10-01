@@ -13,9 +13,7 @@ function getEnv(key: string): string | undefined {
   if (typeof process !== "undefined" && process.env && process.env[key]) {
     return process.env[key];
   }
-  // @ts-expect-error Nodemailer transport typing is incompatible with the configured transport.
   if (typeof Deno !== "undefined" && Deno.env && Deno.env.get) {
-    // @ts-expect-error Nodemailer transport typing is incompatible with the configured transport.
     return Deno.env.get(key);
   }
   return undefined;

@@ -46,6 +46,7 @@ export const maiModelsList: MAIModelDetail[] = [
     maxOutputTokens: 384_000,
     multimodal: true,
     name: "mAI-2",
+    ollamaTag: "mDevsLabs/mAI-2",
     parameters: "N/A",
     recommendedHardware: {
       minVram: "Cloud",

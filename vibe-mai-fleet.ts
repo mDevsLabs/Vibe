@@ -7,6 +7,7 @@
 
 import { getDb, getWeekData, getTierMaiTokenLimit, getTierDailyImageLimit } from "./config.ts";
 import { executeWebSearch } from "./web.ts";
+import { canUserViewPost, validateRemoteMediaUrl, sanitizeToolArgs, readJSONResponseLimited } from "./vibe-mai-core.ts";
 
 /**
  * Outils "sensibles" : ils modifient le compte ou le contenu public de
@@ -23,6 +24,41 @@ function parsePeriodDays(period: unknown): number {
 const WEEKDAY_NAMES = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
 
 export class MAIAgentFleet {
+  /** Vérifie l'auteur, le statut et l'audience avant toute lecture/engagement. */
+  private static async assertPostReadable(sql: any, postId: unknown, userId: number): Promise<{ id: string; author_id: number; visibility: string; status: string }> {
+    const id = String(postId || "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error("post_id UUID valide est requis.");
+    }
+    const rows = await sql`
+      SELECT id, author_id, COALESCE(visibility, 'public') AS visibility,
+             COALESCE(status, 'published') AS status
+      FROM posts WHERE id = ${id}::uuid LIMIT 1
+    `;
+    if (rows.length === 0) throw new Error("Publication introuvable.");
+    const post = rows[0];
+    if (!(await canUserViewPost(sql, post, userId))) {
+      throw new Error("Publication introuvable ou inaccessible.");
+    }
+    return {
+      id: String(post.id),
+      author_id: Number(post.author_id),
+      visibility: String(post.visibility || "public"),
+      status: String(post.status || "published"),
+    };
+  }
+
+  private static boundedJson(value: any, maxChars = 24_000): any {
+    try {
+      const serialized = JSON.stringify(value);
+      if (serialized === undefined) return null;
+      if (serialized.length <= maxChars) return value;
+      return { truncated: true, preview: serialized.slice(0, maxChars) };
+    } catch {
+      return { unavailable: true };
+    }
+  }
+
   public static assessContentSafety(content: string): { isSafe: boolean; toxicityScore: number; flagReason?: string } {
     const prohibitedKeywords = ["haine", "violence explicite", "terrorisme", "terrorist", "cp_illegal", "doxx"];
     const lower = content.toLowerCase();
@@ -103,7 +139,9 @@ export class MAIAgentFleet {
   public static async callOpenRouter(userId: number, system: string, user: string, model?: string): Promise<string | null> {
     const apiKey = await this.getOpenRouterKey(userId);
     if (!apiKey) return null;
-    const resolvedModel = model || (await this.getUserDefaultModel(userId));
+    const resolvedModel = String(model || (await this.getUserDefaultModel(userId))).slice(0, 120);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
       const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -116,16 +154,20 @@ export class MAIAgentFleet {
         body: JSON.stringify({
           model: resolvedModel,
           messages: [
-            { role: "system", content: system },
-            { role: "user", content: user },
+            { role: "system", content: String(system || "").slice(0, 12_000) },
+            { role: "user", content: String(user || "").slice(0, 24_000) },
           ],
         }),
+        signal: controller.signal,
       });
       if (!aiRes.ok) return null;
-      const aiData = await aiRes.json();
-      return aiData.choices?.[0]?.message?.content || null;
+      const aiData = await readJSONResponseLimited(aiRes);
+      const content = aiData?.choices?.[0]?.message?.content;
+      return typeof content === "string" && content.trim() ? content.trim().slice(0, 20_000) : null;
     } catch {
       return null;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -139,6 +181,10 @@ export class MAIAgentFleet {
     const uid = Number(userId);
 
     try {
+      if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Utilisateur invalide.");
+      args = sanitizeToolArgs(args);
+      delete (args as any).__mai_approval_nonce;
+      if (JSON.stringify(args).length > 32_768) throw new Error("Arguments d'outil trop volumineux.");
       let resultData: any = null;
 
       switch (toolName) {
@@ -146,7 +192,7 @@ export class MAIAgentFleet {
           const [uRows, prRows, pCount] = await Promise.all([
             sql`SELECT id, username, email, tier, avatar_url, COALESCE(created_at, NOW()) as created_at FROM users WHERE id = ${uid} LIMIT 1`,
             sql`SELECT * FROM profiles WHERE user_id = ${uid} LIMIT 1`,
-            sql`SELECT COUNT(*) as count FROM posts WHERE author_id = ${uid}`,
+            sql`SELECT COUNT(*) as count FROM posts WHERE author_id = ${uid} AND COALESCE(status, 'published') = 'published'`,
           ]);
           resultData = {
             user: uRows[0],
@@ -158,102 +204,108 @@ export class MAIAgentFleet {
 
         case "create_post": {
           const { content, format = "micro_text", media_url } = args;
-          if (!content || !content.trim()) throw new Error("Le contenu du post est obligatoire.");
+          const text = typeof content === "string" ? content.trim() : "";
+          if (!text) throw new Error("Le contenu du post est obligatoire.");
+          if (text.length > 50_000) throw new Error("Publication trop longue (50 000 caractères maximum).");
+          const safeFormat = ["micro_text", "article", "media", "mai_generation"].includes(String(format))
+            ? String(format)
+            : "micro_text";
 
-          const safety = this.assessContentSafety(content);
+          let safeMediaUrl: string | null = null;
+          if (media_url !== undefined && media_url !== null && media_url !== "") {
+            const mediaCheck = await validateRemoteMediaUrl(media_url);
+            if (!mediaCheck.ok) throw new Error(mediaCheck.error);
+            safeMediaUrl = mediaCheck.url;
+          }
+
+          const safety = this.assessContentSafety(text);
           if (!safety.isSafe) throw new Error(`Publication refusée par mAI : ${safety.flagReason}`);
 
           const inserted = await sql`
             INSERT INTO posts (author_id, content, format, created_via, toxicity_score, ai_generated)
-            VALUES (${uid}, ${content.trim()}, ${format}, 'mai_agent', ${safety.toxicityScore}, TRUE)
-            RETURNING *
+            VALUES (${uid}, ${text}, ${safeFormat}, 'mai_agent', ${safety.toxicityScore}, TRUE)
+            RETURNING id, content, format, created_via, ai_generated, published_at
           `;
           const newPost = inserted[0];
 
-          if (media_url) {
-            const cleanUrl = String(media_url).split("?")[0].split("#")[0];
+          if (safeMediaUrl) {
+            const cleanUrl = safeMediaUrl.split("?")[0].split("#")[0];
             const ext = cleanUrl.split(".").pop()?.toLowerCase();
             const mediaType = (ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : ext === "mp4" ? "video/mp4" : "image/jpeg");
             await sql`
               INSERT INTO media_assets (owner_id, post_id, url, media_type, file_size_bytes, alt_text)
-              VALUES (${uid}, ${newPost.id}::uuid, ${media_url}, ${mediaType}, 0, '')
+              VALUES (${uid}, ${newPost.id}::uuid, ${safeMediaUrl}, ${mediaType}, 0, '')
             `;
           }
 
-          await sql`UPDATE profiles SET posts_count = posts_count + 1 WHERE user_id = ${uid}`;
+          await sql`UPDATE profiles SET posts_count = COALESCE(posts_count, 0) + 1 WHERE user_id = ${uid}`;
           resultData = { post: newPost, message: "Post publié avec succès sur Vibe !" };
           break;
         }
 
         case "delete_post": {
           const { post_id } = args;
-          if (!post_id) throw new Error("post_id est requis.");
+          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
+            throw new Error("post_id UUID valide est requis.");
+          }
 
           const del = await sql`
-            DELETE FROM posts WHERE id = ${post_id}::uuid AND author_id = ${uid} RETURNING id
+            DELETE FROM posts WHERE id = ${String(post_id)}::uuid AND author_id = ${uid}
+             RETURNING id, COALESCE(status, 'published') AS status
           `;
           if (del.length === 0) {
             throw new Error("Publication introuvable ou vous n'êtes pas l'auteur.");
           }
-          await sql`UPDATE profiles SET posts_count = GREATEST(0, posts_count - 1) WHERE user_id = ${uid}`;
-          resultData = { deletedPostId: post_id, message: "Publication supprimée avec succès." };
+          if (String(del[0].status || "published") === "published") {
+             await sql`UPDATE profiles SET posts_count = GREATEST(0, COALESCE(posts_count, 0) - 1) WHERE user_id = ${uid}`;
+           }
+          resultData = { deletedPostId: String(post_id), message: "Publication supprimée avec succès." };
           break;
         }
 
         case "search_posts": {
-          const { query, limit = 10 } = args;
+          const query = String(args.query || "").trim().slice(0, 200);
+          if (!query) throw new Error("La recherche de posts requiert un terme.");
+          const requestedLimit = Number(args.limit);
+          const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(20, Math.floor(requestedLimit))) : 10;
           const rows = await sql`
-            SELECT p.*, pr.display_name, pr.avatar_url, u.username
+            SELECT p.id, p.content, p.format, p.likes_count, p.reposts_count, p.replies_count,
+                   p.views_count, p.published_at, p.visibility, u.username, pr.display_name
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
-            WHERE p.content ILIKE ('%' || ${query} || '%')
+            WHERE p.content ILIKE ${`%${query}%`}
+              AND COALESCE(p.status, 'published') = 'published'
+              AND (
+                p.author_id = ${uid}
+                OR COALESCE(p.visibility, 'public') = 'public'
+                OR (p.visibility = 'followers' AND EXISTS (
+                  SELECT 1 FROM follows f WHERE f.follower_id = ${uid} AND f.following_id = p.author_id
+                ))
+                OR (p.visibility = 'circle' AND EXISTS (
+                  SELECT 1 FROM circle_members cm WHERE cm.user_id = p.author_id AND cm.member_user_id = ${uid}
+                ))
+              )
             ORDER BY p.published_at DESC
             LIMIT ${limit}
           `;
-          resultData = { query, resultsCount: rows.length, posts: rows };
+          const posts = (rows as any[]).map((p) => ({
+            ...p,
+            content: String(p.content || "").slice(0, 500),
+            username: String(p.username || "").slice(0, 80),
+            display_name: String(p.display_name || "").slice(0, 100),
+          }));
+          resultData = { query, resultsCount: posts.length, posts };
           break;
         }
 
         case "generate_vibe_image": {
-          const { prompt, aspect_ratio = "1:1" } = args;
-          const uRows = await sql`SELECT tier FROM users WHERE id = ${uid} LIMIT 1`;
-          const tier = uRows[0]?.tier || "Free";
-          const maxImages = getTierDailyImageLimit(tier);
-
-          const todayRows = await sql`
-            SELECT images_generated FROM daily_image_usage 
-            WHERE user_id = ${uid} AND usage_date = CURRENT_DATE LIMIT 1
-          `;
-          const currentCount = todayRows[0]?.images_generated || 0;
-
-          if (currentCount >= maxImages) {
-            throw new Error(`Quota journalier d'images atteint (${currentCount}/${maxImages} pour le forfait ${tier}).`);
-          }
-
-          await sql`
-            INSERT INTO daily_image_usage (user_id, usage_date, images_generated)
-            VALUES (${uid}, CURRENT_DATE, 1)
-            ON CONFLICT (user_id, usage_date)
-            DO UPDATE SET images_generated = daily_image_usage.images_generated + 1
-          `;
-
-          const sampleImages = [
-            "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&q=80",
-            "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200&q=80",
-            "https://images.unsplash.com/photo-1634017839464-5c339ebe3cb4?w=1200&q=80",
-            "https://images.unsplash.com/photo-1550684848-fac1c5b4e853?w=1200&q=80",
-          ];
-          const chosen = sampleImages[Math.floor(Math.random() * sampleImages.length)];
-
-          resultData = {
-            prompt,
-            aspect_ratio,
-            imageUrl: chosen,
-            quotaRemaining: Math.max(0, maxImages - (currentCount + 1)),
-            message: "Image générée avec succès via mAI !",
-          };
-          break;
+          const prompt = String(args.prompt || "").trim().slice(0, 2_000);
+          if (!prompt) throw new Error("Le prompt de l'image est obligatoire.");
+          // Ne jamais débiter le quota ou retourner une image aléatoire comme
+          // si un fournisseur avait généré le média. Le moteur d'images réel
+          // devra être branché explicitement avant de réactiver cet outil.
+          throw new Error("La génération d'images mAI n'est pas configurée sur cette instance.");
         }
 
         case "check_quotas": {
@@ -281,8 +333,9 @@ export class MAIAgentFleet {
         }
 
         case "search_web": {
-          const { query } = args;
-          const search = await executeWebSearch(String(query || ""), 5);
+          const query = String(args.query || "").trim().slice(0, 500);
+          if (!query) throw new Error("La requête de recherche est requise.");
+          const search = await executeWebSearch(query, 5);
           if (!search.success || search.results.length === 0) {
             throw new Error(search.error || "Aucun résultat de recherche web.");
           }
@@ -290,13 +343,14 @@ export class MAIAgentFleet {
             .slice(0, 3)
             .map((r) => `• **${r.title}** — ${r.snippet}\n  ${r.url}`)
             .join("\n");
-          resultData = { query, snippet, provider: search.provider, results: search.results };
+          resultData = { query, snippet: snippet.slice(0, 4_000), provider: search.provider, results: search.results.slice(0, 5) };
           break;
         }
 
         case "fact_check": {
-          const { statement } = args;
-          const search = await executeWebSearch(String(statement || ""), 5).catch(() => null);
+          const statement = String(args.statement || "").trim().slice(0, 2_000);
+          if (!statement) throw new Error("L'affirmation à vérifier est requise.");
+          const search = await executeWebSearch(statement, 5).catch(() => null);
           const sources = search?.success ? search.results.slice(0, 3) : [];
           const llm = await this.callOpenRouter(
             uid,
@@ -314,45 +368,58 @@ export class MAIAgentFleet {
         }
 
         case "rewrite_post": {
-          const { text, style = "viral" } = args;
+          const text = String(args.text || "").trim().slice(0, 10_000);
+          if (!text) throw new Error("Le texte à reformuler est obligatoire.");
+          const style = ["viral", "pro", "humour", "concis", "poétique"].includes(String(args.style || "viral"))
+            ? String(args.style || "viral")
+            : "viral";
           const tones: Record<string, string> = { viral: "viral", pro: "executive", humour: "viral", concis: "minimal", poétique: "poetic" };
           const llm = await this.callOpenRouter(
             uid,
             `Reformule le texte suivant en français dans un style « ${style} », percutant et adapté à un réseau social. Réponds UNIQUEMENT par le texte reformulé, sans commentaire.`,
-            String(text || "")
+            text
           );
-          const rewritten = llm || (await this.modulateText({ text: String(text || ""), tone: tones[style] || "viral" }));
+          const rewritten = (llm || (await this.modulateText({ text, tone: tones[style] || "viral" }))).slice(0, 12_000);
           resultData = { rewritten, style };
           break;
         }
 
         case "suggest_post": {
-          const { topic, style = "viral" } = args;
+          const topic = String(args.topic || "sujets d'actualité").trim().slice(0, 500);
+          const style = ["viral", "pro", "humour", "concis", "poétique"].includes(String(args.style || "viral"))
+            ? String(args.style || "viral")
+            : "viral";
           const llm = await this.callOpenRouter(
             uid,
             `Propose 3 idées de publications courtes pour le réseau social Vibe sur le thème « ${topic} », dans un style « ${style} ». Format : une liste numérotée, chaque post fait 1 à 2 phrases, avec des hashtags pertinents. Réponds UNIQUEMENT par la liste.`,
-            String(topic || "sujets d'actualité")
+            topic
           );
           if (!llm) throw new Error("Génération indisponible : aucune clé IA configurée sur le serveur.");
-          resultData = { suggestions: llm, topic, style };
+          resultData = { suggestions: llm.slice(0, 6_000), topic, style };
           break;
         }
 
         case "translate": {
-          const { text, target_language = "anglais" } = args;
+          const text = String(args.text || "").trim().slice(0, 10_000);
+          const targetLanguage = String(args.target_language || "anglais").trim().slice(0, 80) || "anglais";
+          if (!text) throw new Error("Le texte à traduire est obligatoire.");
           const llm = await this.callOpenRouter(
             uid,
-            `Traduis le texte suivant en ${target_language}. Réponds UNIQUEMENT par la traduction, sans commentaire.`,
-            String(text || "")
+            `Traduis le texte suivant en ${targetLanguage}. Réponds UNIQUEMENT par la traduction, sans commentaire.`,
+            text
           );
           if (!llm) throw new Error("Traduction indisponible : aucune clé IA configurée sur le serveur.");
-          resultData = { translated: llm, targetLanguage: target_language };
+          resultData = { translated: llm.slice(0, 12_000), targetLanguage };
           break;
         }
 
         case "analyze_trends": {
           const recent = await sql`
-            SELECT content FROM posts WHERE published_at > NOW() - INTERVAL '7 days' ORDER BY published_at DESC LIMIT 200
+            SELECT content FROM posts
+            WHERE published_at > NOW() - INTERVAL '7 days'
+              AND COALESCE(status, 'published') = 'published'
+              AND COALESCE(visibility, 'public') = 'public'
+            ORDER BY published_at DESC LIMIT 200
           `;
           const tags: Record<string, number> = {};
           for (const r of recent) {
@@ -370,17 +437,18 @@ export class MAIAgentFleet {
         }
 
         case "update_profile": {
-          const { display_name, bio } = args;
-          if (!display_name && !bio) throw new Error("Fournissez au moins un champ (display_name ou bio).");
-          if (display_name !== undefined && (String(display_name).length < 2 || String(display_name).length > 40)) {
+          const displayName = args.display_name === undefined ? undefined : String(args.display_name).trim();
+          const bio = args.bio === undefined ? undefined : String(args.bio).trim();
+          if (displayName === undefined && bio === undefined) throw new Error("Fournissez au moins un champ (display_name ou bio).");
+          if (displayName !== undefined && (displayName.length < 2 || displayName.length > 40)) {
             throw new Error("Le nom affiché doit contenir entre 2 et 40 caractères.");
           }
-          if (bio !== undefined && String(bio).length > 200) {
+          if (bio !== undefined && bio.length > 200) {
             throw new Error("La bio ne doit pas dépasser 200 caractères.");
           }
           const updated = await sql`
             UPDATE profiles SET
-              display_name = COALESCE(${display_name ?? null}, display_name),
+              display_name = COALESCE(${displayName ?? null}, display_name),
               bio = COALESCE(${bio ?? null}, bio),
               updated_at = NOW()
             WHERE user_id = ${uid}
@@ -393,8 +461,8 @@ export class MAIAgentFleet {
 
         case "follow_user": {
           const { username, follow = true } = args;
-          const cleanUsername = String(username || "").replace(/^@/, "").trim().toLowerCase();
-          if (!cleanUsername) throw new Error("username est requis.");
+          const cleanUsername = String(username || "").replace(/^@/, "").trim().toLowerCase().slice(0, 80);
+          if (!cleanUsername || !/^[a-z0-9_.-]+$/i.test(cleanUsername)) throw new Error("username invalide.");
           const target = await sql`SELECT id FROM users WHERE LOWER(username) = ${cleanUsername} LIMIT 1`;
           if (target.length === 0) throw new Error(`Compte @${cleanUsername} introuvable sur Vibe.`);
           const targetId = Number(target[0].id);
@@ -427,70 +495,68 @@ export class MAIAgentFleet {
 
         case "get_notifications": {
           const rows = await sql`
-            SELECT n.*, u.username as actor_username
+            SELECT n.id, n.type, n.message, n.post_id, n.comment_id, n.created_at,
+                   u.username as actor_username
             FROM notifications n
             LEFT JOIN users u ON u.id = n.actor_id
             WHERE n.recipient_id = ${uid}
             ORDER BY n.created_at DESC LIMIT 20
           `;
-          resultData = { count: rows.length, notifications: rows };
+          resultData = {
+            count: rows.length,
+            notifications: (rows as any[]).map((n) => ({
+              ...n,
+              type: String(n.type || "").slice(0, 50),
+              message: String(n.message || "").slice(0, 500),
+            })),
+          };
           break;
         }
 
         case "like_post": {
           const { post_id, like = true } = args;
-          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
-            throw new Error("post_id UUID valide est requis.");
-          }
-          const postRows = await sql`SELECT id, author_id FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-          if (postRows.length === 0) throw new Error("Publication introuvable.");
-          const authorId = Number(postRows[0].author_id);
+          const target = await this.assertPostReadable(sql, post_id, uid);
+          const authorId = target.author_id;
           if (like) {
-            const existing = await sql`
-              SELECT id FROM post_interactions
-              WHERE user_id = ${uid} AND post_id = ${String(post_id)}::uuid AND interaction_type = 'like' LIMIT 1
-            `;
-            if (existing.length > 0) {
-              const c = await sql`SELECT likes_count FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-              resultData = { liked: true, post_id, likes_count: Number(c[0]?.likes_count || 0), message: "Vous aimez déjà cette publication." };
-              break;
-            }
-            await sql`
+            const inserted = await sql`
               INSERT INTO post_interactions (user_id, post_id, interaction_type)
-              VALUES (${uid}, ${String(post_id)}::uuid, 'like')
+              VALUES (${uid}, ${target.id}::uuid, 'like')
               ON CONFLICT (user_id, post_id, interaction_type) DO NOTHING
+              RETURNING id
             `;
-            await sql`UPDATE posts SET likes_count = COALESCE(likes_count,0) + 1 WHERE id = ${String(post_id)}::uuid`;
-            if (authorId !== uid) {
-              try {
-                await sql`
-                  INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-                  VALUES (${authorId}, ${uid}, 'like', ${String(post_id)}::uuid, 'a aimé votre publication via mAI')
-                `;
-              } catch {}
+            if (inserted.length > 0) {
+              await sql`UPDATE posts SET likes_count = COALESCE(likes_count,0) + 1 WHERE id = ${target.id}::uuid`;
+              if (authorId !== uid) {
+                try {
+                  await sql`
+                    INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
+                    VALUES (${authorId}, ${uid}, 'like', ${target.id}::uuid, 'a aimé votre publication via mAI')
+                  `;
+                } catch {}
+              }
             }
-            const c = await sql`SELECT likes_count FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-            resultData = { liked: true, post_id, likes_count: Number(c[0]?.likes_count || 0), message: "Publication likée avec succès !" };
+            const c = await sql`SELECT likes_count FROM posts WHERE id = ${target.id}::uuid LIMIT 1`;
+            resultData = { liked: true, post_id: target.id, likes_count: Number(c[0]?.likes_count || 0), message: inserted.length > 0 ? "Publication likée avec succès !" : "Vous aimez déjà cette publication." };
           } else {
-            const existing = await sql`
-              SELECT id FROM post_interactions
-              WHERE user_id = ${uid} AND post_id = ${String(post_id)}::uuid AND interaction_type = 'like' LIMIT 1
+            const deleted = await sql`
+              DELETE FROM post_interactions
+              WHERE user_id = ${uid} AND post_id = ${target.id}::uuid AND interaction_type = 'like'
+              RETURNING id
             `;
-            if (existing.length > 0) {
-              await sql`DELETE FROM post_interactions WHERE id = ${existing[0].id}::uuid`;
-              await sql`UPDATE posts SET likes_count = GREATEST(0, COALESCE(likes_count,0) - 1) WHERE id = ${String(post_id)}::uuid`;
+            if (deleted.length > 0) {
+              await sql`UPDATE posts SET likes_count = GREATEST(0, COALESCE(likes_count,0) - 1) WHERE id = ${target.id}::uuid`;
             }
-            const c = await sql`SELECT likes_count FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-            resultData = { liked: false, post_id, likes_count: Number(c[0]?.likes_count || 0), message: "Like retiré." };
+            const c = await sql`SELECT likes_count FROM posts WHERE id = ${target.id}::uuid LIMIT 1`;
+            resultData = { liked: false, post_id: target.id, likes_count: Number(c[0]?.likes_count || 0), message: "Like retiré." };
           }
           break;
         }
 
         case "send_message": {
           const { username, content } = args;
-          const cleanUsername = String(username || "").replace(/^@/, "").trim().toLowerCase();
+          const cleanUsername = String(username || "").replace(/^@/, "").trim().toLowerCase().slice(0, 80);
           const text = String(content || "").trim();
-          if (!cleanUsername) throw new Error("username destinataire est requis.");
+          if (!cleanUsername || !/^[a-z0-9_.-]+$/i.test(cleanUsername)) throw new Error("username destinataire invalide.");
           if (!text) throw new Error("Le contenu du message est obligatoire.");
           if (text.length > 2000) throw new Error("Message trop long (max 2000 caractères).");
           const safety = this.assessContentSafety(text);
@@ -499,6 +565,13 @@ export class MAIAgentFleet {
           if (target.length === 0) throw new Error(`Compte @${cleanUsername} introuvable sur Vibe.`);
           const recId = Number(target[0].id);
           if (recId === uid) throw new Error("Vous ne pouvez pas vous envoyer un message à vous-même.");
+          const blocked = await sql`
+            SELECT 1 FROM blocked_users
+            WHERE (user_id = ${uid} AND blocked_user_id = ${recId})
+               OR (user_id = ${recId} AND blocked_user_id = ${uid})
+            LIMIT 1
+          `;
+          if (blocked.length > 0) throw new Error("Ce compte ne peut pas être contacté via mAI.");
           const p1 = uid < recId ? uid : recId;
           const p2 = uid < recId ? recId : uid;
           const convRows = await sql`
@@ -525,7 +598,7 @@ export class MAIAgentFleet {
         }
 
         case "update_settings": {
-          const ALLOWED = ["theme_preference","ui_language","feed_default_mode","hide_reposts","blocked_keywords","accent_color","font_size","mai_auto_approve_tools","mai_default_model","mai_context_posts","mai_context_dms","mai_context_books","email_notifications","push_notifications","notify_on_like","notify_on_reply","notify_on_dm","dm_auto_translate","dm_translate_lang"];
+          const ALLOWED = ["theme_preference","ui_language","feed_default_mode","hide_reposts","blocked_keywords","accent_color","font_size","mai_default_model","mai_context_posts","mai_context_dms","mai_context_books","email_notifications","push_notifications","notify_on_like","notify_on_reply","notify_on_dm","dm_auto_translate","dm_translate_lang"];
           const patch: Record<string, any> = {};
           for (const k of ALLOWED) {
             if (args[k] !== undefined) patch[k] = args[k];
@@ -584,53 +657,51 @@ export class MAIAgentFleet {
 
         case "bookmark_post": {
           const { post_id, bookmark = true } = args;
-          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
-            throw new Error("post_id UUID valide est requis.");
-          }
-          const exists = await sql`SELECT id FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-          if (exists.length === 0) throw new Error("Publication introuvable.");
+          const target = await this.assertPostReadable(sql, post_id, uid);
           if (bookmark) {
-            await sql`
-              INSERT INTO bookmarks (user_id, post_id) VALUES (${uid}, ${String(post_id)}::uuid)
+            const inserted = await sql`
+              INSERT INTO bookmarks (user_id, post_id) VALUES (${uid}, ${target.id}::uuid)
               ON CONFLICT (user_id, post_id) DO NOTHING
+              RETURNING post_id
             `;
-            await sql`UPDATE posts SET bookmarks_count = COALESCE(bookmarks_count,0) + 1 WHERE id = ${String(post_id)}::uuid`;
-            resultData = { bookmarked: true, post_id, message: "Post ajouté à vos favoris !" };
+            if (inserted.length > 0) {
+              await sql`UPDATE posts SET bookmarks_count = COALESCE(bookmarks_count,0) + 1 WHERE id = ${target.id}::uuid`;
+            }
+            resultData = { bookmarked: true, post_id: target.id, message: "Post ajouté à vos favoris !" };
           } else {
-            await sql`DELETE FROM bookmarks WHERE user_id = ${uid} AND post_id = ${String(post_id)}::uuid`;
-            await sql`UPDATE posts SET bookmarks_count = GREATEST(0, COALESCE(bookmarks_count,0) - 1) WHERE id = ${String(post_id)}::uuid`;
-            resultData = { bookmarked: false, post_id, message: "Post retiré de vos favoris." };
+            const deleted = await sql`DELETE FROM bookmarks WHERE user_id = ${uid} AND post_id = ${target.id}::uuid RETURNING post_id`;
+            if (deleted.length > 0) {
+              await sql`UPDATE posts SET bookmarks_count = GREATEST(0, COALESCE(bookmarks_count,0) - 1) WHERE id = ${target.id}::uuid`;
+            }
+            resultData = { bookmarked: false, post_id: target.id, message: "Post retiré de vos favoris." };
           }
           break;
         }
 
         case "repost_post": {
           const { post_id, repost = true } = args;
-          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
-            throw new Error("post_id UUID valide est requis.");
-          }
-          const prow = await sql`SELECT id, author_id FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-          if (prow.length === 0) throw new Error("Publication introuvable.");
+          const target = await this.assertPostReadable(sql, post_id, uid);
           if (repost) {
-            const existing = await sql`
-              SELECT id FROM post_interactions
-              WHERE user_id = ${uid} AND post_id = ${String(post_id)}::uuid AND interaction_type = 'repost' LIMIT 1
-            `;
-            if (existing.length > 0) {
-              resultData = { reposted: true, post_id, message: "Vous avez déjà reposté cette publication." };
-              break;
-            }
-            await sql`
+            const inserted = await sql`
               INSERT INTO post_interactions (user_id, post_id, interaction_type)
-              VALUES (${uid}, ${String(post_id)}::uuid, 'repost')
+              VALUES (${uid}, ${target.id}::uuid, 'repost')
               ON CONFLICT (user_id, post_id, interaction_type) DO NOTHING
+              RETURNING id
             `;
-            await sql`UPDATE posts SET reposts_count = COALESCE(reposts_count,0) + 1 WHERE id = ${String(post_id)}::uuid`;
-            resultData = { reposted: true, post_id, message: "Publication repostée avec succès !" };
+            if (inserted.length > 0) {
+              await sql`UPDATE posts SET reposts_count = COALESCE(reposts_count,0) + 1 WHERE id = ${target.id}::uuid`;
+            }
+            resultData = { reposted: true, post_id: target.id, message: inserted.length > 0 ? "Publication repostée avec succès !" : "Vous avez déjà reposté cette publication." };
           } else {
-            await sql`DELETE FROM post_interactions WHERE user_id = ${uid} AND post_id = ${String(post_id)}::uuid AND interaction_type = 'repost'`;
-            await sql`UPDATE posts SET reposts_count = GREATEST(0, COALESCE(reposts_count,0) - 1) WHERE id = ${String(post_id)}::uuid`;
-            resultData = { reposted: false, post_id, message: "Repost annulé." };
+            const deleted = await sql`
+              DELETE FROM post_interactions
+              WHERE user_id = ${uid} AND post_id = ${target.id}::uuid AND interaction_type = 'repost'
+              RETURNING id
+            `;
+            if (deleted.length > 0) {
+              await sql`UPDATE posts SET reposts_count = GREATEST(0, COALESCE(reposts_count,0) - 1) WHERE id = ${target.id}::uuid`;
+            }
+            resultData = { reposted: false, post_id: target.id, message: "Repost annulé." };
           }
           break;
         }
@@ -638,39 +709,32 @@ export class MAIAgentFleet {
         case "comment_post": {
           const { post_id, content } = args;
           const text = String(content || "").trim();
-          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
-            throw new Error("post_id UUID valide est requis.");
-          }
+          const target = await this.assertPostReadable(sql, post_id, uid);
           if (!text) throw new Error("Le contenu du commentaire est obligatoire.");
           if (text.length > 2000) throw new Error("Commentaire trop long (max 2000 caractères).");
           const safety = this.assessContentSafety(text);
           if (!safety.isSafe) throw new Error(`Commentaire refusé par mAI : ${safety.flagReason}`);
-          const prow = await sql`SELECT id, author_id FROM posts WHERE id = ${String(post_id)}::uuid LIMIT 1`;
-          if (prow.length === 0) throw new Error("Publication introuvable.");
           const inserted = await sql`
             INSERT INTO comments (post_id, author_id, content, depth)
-            VALUES (${String(post_id)}::uuid, ${uid}, ${text}, 1)
+            VALUES (${target.id}::uuid, ${uid}, ${text}, 1)
             RETURNING id, content, created_at
           `;
-          await sql`UPDATE posts SET replies_count = COALESCE(replies_count,0) + 1 WHERE id = ${String(post_id)}::uuid`;
-          const authorId = Number(prow[0].author_id);
-          if (authorId !== uid) {
+          await sql`UPDATE posts SET replies_count = COALESCE(replies_count,0) + 1 WHERE id = ${target.id}::uuid`;
+          if (target.author_id !== uid) {
             try {
               await sql`
                 INSERT INTO notifications (recipient_id, actor_id, type, post_id, comment_id, message)
-                VALUES (${authorId}, ${uid}, 'reply', ${String(post_id)}::uuid, ${String(inserted[0].id)}::uuid, 'a commenté votre publication via mAI')
+                VALUES (${target.author_id}, ${uid}, 'reply', ${target.id}::uuid, ${String(inserted[0].id)}::uuid, 'a commenté votre publication via mAI')
               `;
             } catch {}
           }
-          resultData = { commented: true, post_id, comment_id: String(inserted[0].id), message: "Commentaire publié avec succès !" };
+          resultData = { commented: true, post_id: target.id, comment_id: String(inserted[0].id), message: "Commentaire publié avec succès !" };
           break;
         }
 
         case "get_post_stats": {
           const { post_id } = args;
-          if (!post_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(post_id))) {
-            throw new Error("post_id UUID valide est requis.");
-          }
+          const target = await this.assertPostReadable(sql, post_id, uid);
           const rows = await sql`
             SELECT p.id, p.content, p.likes_count, p.reposts_count, p.replies_count,
                    COALESCE(p.views_count,0) as views_count, COALESCE(p.bookmarks_count,0) as bookmarks_count,
@@ -678,7 +742,7 @@ export class MAIAgentFleet {
             FROM posts p
             JOIN users u ON u.id = p.author_id
             LEFT JOIN profiles pr ON pr.user_id = u.id
-            WHERE p.id = ${String(post_id)}::uuid LIMIT 1
+            WHERE p.id = ${target.id}::uuid LIMIT 1
           `;
           if (rows.length === 0) throw new Error("Publication introuvable.");
           const p = rows[0];
@@ -687,7 +751,7 @@ export class MAIAgentFleet {
           const engagement = likes + reposts * 2.5 + replies * 2 + views * 0.1;
           const rate = views > 0 ? Math.round(((likes + reposts + replies) / views) * 1000) / 10 : 0;
           resultData = {
-            post_id, author: p.username, content: String(p.content || "").slice(0, 300),
+            post_id: target.id, author: p.username, content: String(p.content || "").slice(0, 300),
             likes, reposts, replies, views, bookmarks: Number(p.bookmarks_count || 0),
             engagement: Math.round(engagement * 10) / 10, engagement_rate_percent: rate,
             published_at: p.published_at,
@@ -1096,10 +1160,27 @@ export class MAIAgentFleet {
           let topPosts: any[] = [];
           if (bookIds.length > 0) {
             topPosts = await sql`
-              SELECT bi.book_id, p.id AS post_id, p.content, COALESCE(p.views_count,0) AS views, COALESCE(p.likes_count,0) AS likes
+              SELECT bi.book_id, p.id AS post_id, p.content, p.author_id, p.visibility,
+                     COALESCE(p.status, 'published') AS status,
+                     COALESCE(p.views_count,0) AS views, COALESCE(p.likes_count,0) AS likes
               FROM vibe_book_items bi
               JOIN posts p ON p.id = bi.post_id
               WHERE bi.book_id = ANY(${bookIds}::uuid[])
+                AND (
+                  p.author_id = ${uid}
+                  OR (
+                    COALESCE(p.status, 'published') = 'published'
+                    AND (
+                      COALESCE(p.visibility, 'public') = 'public'
+                      OR (p.visibility = 'followers' AND EXISTS (
+                        SELECT 1 FROM follows f WHERE f.follower_id = ${uid} AND f.following_id = p.author_id
+                      ))
+                      OR (p.visibility = 'circle' AND EXISTS (
+                        SELECT 1 FROM circle_members cm WHERE cm.user_id = p.author_id AND cm.member_user_id = ${uid}
+                      ))
+                    )
+                  )
+                )
               ORDER BY COALESCE(p.views_count,0) DESC
               LIMIT 60
             ` as any[];
@@ -1144,7 +1225,7 @@ export class MAIAgentFleet {
               FROM posts WHERE author_id = ${uid} AND published_at >= ${sinceIso}::timestamptz
               ORDER BY published_at DESC LIMIT 500
             `,
-            sql`SELECT content FROM posts WHERE published_at > NOW() - INTERVAL '7 days' ORDER BY published_at DESC LIMIT 200`,
+            sql`SELECT content FROM posts WHERE published_at > NOW() - INTERVAL '7 days' AND COALESCE(status, 'published') = 'published' AND COALESCE(visibility, 'public') = 'public' ORDER BY published_at DESC LIMIT 200`,
           ]);
           const tagStats: Record<string, { posts: number; views: number; likes: number; engagement: number }> = {};
           for (const r of mine as any[]) {
@@ -1197,20 +1278,24 @@ export class MAIAgentFleet {
       }
 
       const duration = Date.now() - startTime;
+      const safeArgs = this.boundedJson(args, 16_000);
+      const safeResult = this.boundedJson(resultData, 24_000);
       await sql`
         INSERT INTO mai_tool_executions (user_id, tool_name, parameters, result, status, execution_time_ms)
-        VALUES (${uid}, ${toolName}, ${JSON.stringify(args)}::jsonb, ${JSON.stringify(resultData)}::jsonb, 'success', ${duration})
+        VALUES (${uid}, ${String(toolName).slice(0, 100)}, ${JSON.stringify(safeArgs)}::jsonb, ${JSON.stringify(safeResult)}::jsonb, 'success', ${duration})
       `;
 
-      return { success: true, result: resultData };
+      return { success: true, result: safeResult };
     } catch (err: any) {
       console.error(`[MAIAgentFleet] Error executing tool ${toolName}:`, err);
       const duration = Date.now() - startTime;
+      const safeArgs = this.boundedJson(args, 16_000);
+      const safeError = String(err?.message || "Erreur").slice(0, 500);
       await sql`
         INSERT INTO mai_tool_executions (user_id, tool_name, parameters, result, status, execution_time_ms)
-        VALUES (${uid}, ${toolName}, ${JSON.stringify(args)}::jsonb, ${JSON.stringify({ error: err.message })}::jsonb, 'failed', ${duration})
+        VALUES (${uid}, ${String(toolName).slice(0, 100)}, ${JSON.stringify(safeArgs)}::jsonb, ${JSON.stringify({ error: safeError })}::jsonb, 'failed', ${duration})
       `.catch(() => {});
-      return { success: false, result: null, error: err.message };
+      return { success: false, result: null, error: safeError };
     }
   }
 }

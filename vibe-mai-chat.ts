@@ -9,7 +9,7 @@
  */
 
 import type { Hono } from "npm:hono@4";
-import { extractToken, getDb, verifyToken, getWeekData } from "./config.ts";
+import { extractToken, getDb, verifyToken, rateLimit } from "./config.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 import { MAIAgentFleet, SENSITIVE_TOOLS } from "./vibe-mai-fleet.ts";
 import { TOOL_EXECUTORS, isToolEnabledForUser } from "./vibe-tools.ts";
@@ -26,7 +26,23 @@ import {
   buildPostContext,
   getOpenRouterKey,
   VISION_CAPABLE_MODELS,
+  APPROVAL_NONCE_ARG,
+  createApprovalNonce,
+  sanitizeToolArgs,
+  reserveMAIQuota,
+  readJSONResponseLimited,
 } from "./vibe-mai-core.ts";
+
+function boundedToolResult(value: any, maxChars = 24_000): any {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) return null;
+    if (serialized.length <= maxChars) return value;
+    return { truncated: true, preview: serialized.slice(0, maxChars) };
+  } catch {
+    return { unavailable: true };
+  }
+}
 
 /**
  * Réponse mAI à la commande /mai en commentaire : génération à partir du
@@ -38,11 +54,17 @@ export async function generateMAICommentAnswer(
   opts: { postId: string; question: string; requesterId: number }
 ): Promise<string | null> {
   try {
-    const context = await buildPostContext(sql, opts.postId);
+    const question = String(opts.question || "").trim().slice(0, 2_000);
+    if (!question) return null;
+    const context = await buildPostContext(sql, opts.postId, opts.requesterId);
     if (!context) return null;
 
     const openRouterApiKey = await getOpenRouterKey(sql, opts.requesterId);
     if (!openRouterApiKey) return null;
+    // Réservation avant l'appel externe afin qu'un quota épuisé ne
+    // déclenche pas de consommation OpenRouter.
+    const quota = await reserveMAIQuota(sql, opts.requesterId);
+    if (!quota.ok) return null;
 
     const systemContent =
       "Tu es mAI, l'intelligence artificielle intégrée au réseau social Vibe. " +
@@ -50,7 +72,7 @@ export async function generateMAICommentAnswer(
       "uniquement à partir du contenu de la publication fournie (texte, statistiques, commentaires). " +
       "Si l'information demandée ne s'y trouve pas, dis-le clairement. Pas de mise en forme lourde, un ou deux émojis maximum.";
 
-    const userText = `${opts.question}\n\n${context.text}`;
+    const userText = `${question}\n\n${context.text}`;
 
     let answer: string | null = null;
     for (const candidate of ["poolside/laguna-xs-2.1:free", "nvidia/nemotron-3.5-lightning:free"]) {
@@ -76,10 +98,12 @@ export async function generateMAICommentAnswer(
             signal: controller.signal,
           });
           if (aiRes.ok) {
-            const aiData = await aiRes.json();
-            const textOutput = aiData.choices?.[0]?.message?.content;
-            if (textOutput && textOutput.trim()) {
-              answer = textOutput.trim();
+            const aiData = await readJSONResponseLimited(aiRes);
+            const textOutput = typeof aiData?.choices?.[0]?.message?.content === "string"
+              ? aiData.choices[0].message.content.trim()
+              : "";
+            if (textOutput) {
+              answer = textOutput.slice(0, 800);
               break;
             }
           }
@@ -91,17 +115,6 @@ export async function generateMAICommentAnswer(
       }
     }
     if (!answer) return null;
-
-    // Débit quota (parité avec le chat mAI)
-    try {
-      const { weekStartStr } = getWeekData();
-      await sql`
-        INSERT INTO weekly_usage (user_id, week_start, tokens_used)
-        VALUES (${opts.requesterId}, ${weekStartStr}::date, 250)
-        ON CONFLICT (user_id, week_start)
-        DO UPDATE SET tokens_used = weekly_usage.tokens_used + 250
-      `;
-    } catch {}
 
     return answer.slice(0, 800);
   } catch (err) {
@@ -118,12 +131,23 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
       if (!token) return c.json({ error: "Non authentifié." }, 401);
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ error: "Non authentifié." }, 401);
 
-      const { message, execute_tool, model, context, conversation_id } = await c.req.json();
-      if (!message || !message.trim()) return c.json({ error: "Message requis." }, 400);
+      const body = await c.req.json().catch(() => ({} as any));
+      const { execute_tool, context, conversation_id } = body || {};
+      if (typeof body?.message !== "string") return c.json({ error: "Message requis." }, 400);
+      const message = body.message.trim();
+      if (!message) return c.json({ error: "Message requis." }, 400);
+      if (message.length > 8_000) return c.json({ error: "Message trop long (8 000 caractères maximum)." }, 400);
+      if (body.model !== undefined && (typeof body.model !== "string" || body.model.length > 120)) {
+        return c.json({ error: "Modèle invalide." }, 400);
+      }
+      if (!rateLimit(`mai-chat:${userId}`, 20, 60_000)) {
+        return c.json({ error: "Trop de requêtes mAI. Réessayez dans une minute." }, 429);
+      }
 
       // Modèle demandé par le client (sélecteur mAI), sinon réglage utilisateur
-      const effectiveModel = model || (await MAIAgentFleet.getUserDefaultModel(userId));
+      const effectiveModel = body.model || (await MAIAgentFleet.getUserDefaultModel(userId));
 
       const sql = getDb();
       const userRows = await sql`SELECT username, tier FROM users WHERE id = ${userId} LIMIT 1`;
@@ -169,15 +193,19 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
         }
       }
 
-      // Post mentionné : contenu + stats + premiers commentaires + médias (fichiers)
+      // Post mentionné : contenu + stats + premiers commentaires + médias (fichiers).
+      // buildPostContext applique l'auth du demandeur ; un identifiant fourni
+      // mais inaccessible est une erreur, jamais un contexte silencieusement vide.
       let postContextBlock = "";
       let postImageParts: any[] = [];
-      if (context?.post_id) {
-        const postCtx = await buildPostContext(sql, String(context.post_id));
-        if (postCtx) {
-          postContextBlock = `\n\n---\n${postCtx.text}`;
-          postImageParts = postCtx.imageParts;
+      if (context?.post_id !== undefined && context?.post_id !== null && context?.post_id !== "") {
+        if (typeof context.post_id !== "string" || context.post_id.length > 80) {
+          return c.json({ error: "Identifiant de publication invalide." }, 400);
         }
+        const postCtx = await buildPostContext(sql, context.post_id, userId);
+        if (!postCtx) return c.json({ error: "Publication introuvable ou inaccessible." }, 404);
+        postContextBlock = `\n\n---\n${postCtx.text}`;
+        postImageParts = postCtx.imageParts;
       }
 
       // Personnalisation du contexte (opt-in granulaire via user_settings)
@@ -234,14 +262,31 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
         console.warn("[vibe-mai] Contexte personnalisé ignoré:", (ctxErr as any)?.message);
       }
 
-      let toolToRun: string | null = execute_tool?.name || null;
-      let toolArgs: any = execute_tool?.args || {};
+      let toolToRun: string | null = null;
+      let toolArgs: Record<string, any> = {};
+      if (execute_tool !== undefined && execute_tool !== null) {
+        if (typeof execute_tool !== "object" || typeof execute_tool.name !== "string" || execute_tool.name.length > 100) {
+          return c.json({ error: "Outil mAI invalide." }, 400);
+        }
+        toolToRun = execute_tool.name;
+        try {
+          toolArgs = sanitizeToolArgs(execute_tool.args);
+          delete toolArgs[APPROVAL_NONCE_ARG];
+        } catch (err: any) {
+          return c.json({ error: err?.message || "Arguments d'outil invalides." }, 400);
+        }
+      }
 
       if (!toolToRun) {
         const detected = detectTool(message.trim());
         if (detected) {
           toolToRun = detected.toolToRun;
-          toolArgs = detected.toolArgs;
+          try {
+            toolArgs = sanitizeToolArgs(detected.toolArgs);
+            delete toolArgs[APPROVAL_NONCE_ARG];
+          } catch (err: any) {
+            return c.json({ error: err?.message || "Arguments d'outil invalides." }, 400);
+          }
         }
       }
 
@@ -270,13 +315,24 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
         const autoApprove = await getUserAutoApprove(sql, userId);
         if (!autoApprove) {
           const reply = `🔐 **Approbation requise** : mAI souhaite exécuter l'outil « ${toolToRun} » sur votre compte. Confirmez ou refusez dans le panneau ci-dessus.`;
-          const record = makeToolCallRecord({ name: toolToRun, args: toolArgs, status: "pending_approval", model: effectiveModel });
+          const approvalNonce = createApprovalNonce();
+          const record = makeToolCallRecord({
+            name: toolToRun,
+            args: toolArgs,
+            status: "pending_approval",
+            model: effectiveModel,
+            approvalNonce,
+          });
           let savedAssistant: any = null;
           if (conversationId) savedAssistant = await saveMAIMessage(sql, conversationId, "assistant", reply, { toolCalls: [record] });
+          // Le nonce est aussi transporté dans une clé args réservée : les
+          // clients existants le renvoient sans modification, tandis que le
+          // serveur ne l'accepte jamais seul sans l'enregistrement pending.
+          const clientArgs = { ...toolArgs, [APPROVAL_NONCE_ARG]: approvalNonce };
           return c.json({
             reply,
             requiresApproval: true,
-            pendingTool: { name: toolToRun, args: toolArgs },
+            pendingTool: { name: toolToRun, args: clientArgs, nonce: approvalNonce, approvalNonce },
             toolExecuted: null,
             toolCalls: [record],
             modelUsed: effectiveModel,
@@ -288,27 +344,33 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
       }
 
       let toolResult: any = null;
+      let reply = "";
+      let aiSucceeded = false;
+      let lastAiStatus = 0;
+
       if (toolToRun) {
-        // Registre vibe-tools d'abord (couvre les outils sans case dans la flotte,
-        // ex. analyze_creator_stats), flotte en repli.
-        const executor = TOOL_EXECUTORS[toolToRun];
-        toolResult = executor
-          ? await executor(userId, toolArgs)
-          : await MAIAgentFleet.executeTool(toolToRun, toolArgs, userId);
-      }
-
-      const { weekStartStr } = getWeekData();
-      await sql`
-        INSERT INTO weekly_usage (user_id, week_start, tokens_used)
-        VALUES (${userId}, ${weekStartStr}::date, 250)
-        ON CONFLICT (user_id, week_start)
-        DO UPDATE SET tokens_used = weekly_usage.tokens_used + 250
-      `.catch(() => {});
-
-      let reply = `Bonjour @${username} ! Je suis mAI. Comment puis-je vous aider ?`;
-
-      if (!toolToRun) {
+        const quota = await reserveMAIQuota(sql, userId);
+        if (!quota.ok) return c.json({ error: quota.reason || "Quota mAI hebdomadaire atteint." }, 429);
+        try {
+          // Registre vibe-tools d'abord (couvre les outils sans case dans la flotte,
+          // ex. analyze_creator_stats), flotte en repli.
+          const executor = TOOL_EXECUTORS[toolToRun];
+          toolResult = boundedToolResult(executor
+            ? await executor(userId, toolArgs)
+            : await MAIAgentFleet.executeTool(toolToRun, toolArgs, userId));
+        } catch (err: any) {
+          toolResult = { success: false, result: null, error: err?.message || "Erreur d'exécution" };
+        }
+        reply = toolResult?.success
+          ? formatToolReply(toolToRun, toolResult.result, username)
+          : `⚠️ L'action n'a pas pu être exécutée : ${String(toolResult?.error || "erreur inconnue").slice(0, 500)}`;
+      } else {
         const openRouterApiKey = await getOpenRouterKey(sql, userId);
+        if (!openRouterApiKey) {
+          return c.json({ error: "Aucune clé IA n'est configurée pour le moment." }, 503);
+        }
+        const quota = await reserveMAIQuota(sql, userId);
+        if (!quota.ok) return c.json({ error: quota.reason || "Quota mAI hebdomadaire atteint." }, 429);
 
         const resolveModel = (m: string) => {
           if (!m || m === "default" || m === "mai-1.5-light" || m === "openrouter/free") return "poolside/laguna-xs-2.1:free";
@@ -330,7 +392,7 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
           if (!modelsToTry.includes("nvidia/nemotron-3.5-lightning:free")) modelsToTry.push("nvidia/nemotron-3.5-lightning:free");
         }
 
-        const userText = `${message.trim()}${postContextBlock}${personalContextBlock}`;
+        const userText = `${message}${postContextBlock}${personalContextBlock}`.slice(0, 24_000);
         const userContent: any = hasImages
           ? [{ type: "text", text: userText }, ...postImageParts]
           : userText;
@@ -340,47 +402,52 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
           (hasImages ? " Des images sont jointes à la publication mentionnée : analyse-les directement." : "") +
           (postContextBlock ? " Une publication Vibe est jointe à la fin du message : base ta réponse sur son contenu, ses statistiques et ses commentaires." : "");
 
-        if (openRouterApiKey) {
-          for (const candidate of modelsToTry) {
-            try {
-              const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${openRouterApiKey}`,
-                  "Content-Type": "application/json",
-                  "HTTP-Referer": "https://mai.val.run",
-                  "X-Title": "mAI Social Assistant",
-                },
-                body: JSON.stringify({
-                  model: candidate,
-                  messages: [
-                    {
-                      role: "system",
-                      content: systemContent,
-                    },
-                    ...historyMessages,
-                    { role: "user", content: userContent },
-                  ],
-                }),
-              });
-
-              if (aiRes.ok) {
-                const aiData = await aiRes.json();
-                const textOutput = aiData.choices?.[0]?.message?.content;
-                if (textOutput && textOutput.trim()) {
-                  reply = textOutput.trim();
-                  break;
-                }
+        for (const candidate of modelsToTry) {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 20_000);
+          try {
+            const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${openRouterApiKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://mai.val.run",
+                "X-Title": "mAI Social Assistant",
+              },
+              body: JSON.stringify({
+                model: candidate,
+                messages: [
+                  { role: "system", content: systemContent },
+                  ...historyMessages,
+                  { role: "user", content: userContent },
+                ],
+              }),
+              signal: controller.signal,
+            });
+            lastAiStatus = aiRes.status;
+            if (aiRes.ok) {
+              const aiData = await readJSONResponseLimited(aiRes);
+              const textOutput = typeof aiData?.choices?.[0]?.message?.content === "string"
+                ? aiData.choices[0].message.content.trim()
+                : "";
+              if (textOutput) {
+                reply = textOutput.slice(0, 20_000);
+                aiSucceeded = true;
+                break;
               }
-            } catch (e) {
-              console.warn(`[mAI Chat] Erreur sur ${candidate}, essai du suivant...`, e);
             }
+          } catch (e) {
+            console.warn(`[mAI Chat] Erreur sur ${candidate}, essai du suivant...`, e);
+          } finally {
+            clearTimeout(timeout);
           }
         }
-      } else if (toolResult && toolResult.success) {
-        reply = formatToolReply(toolToRun, toolResult.result, username);
-      } else if (toolResult && !toolResult.success) {
-        reply = `⚠️ L'action n'a pas pu être exécutée : ${toolResult.error}`;
+        if (!aiSucceeded) {
+          console.warn(`[mAI Chat] OpenRouter n'a pas produit de réponse (dernier statut ${lastAiStatus}).`);
+          // Ne sauvegarde jamais un greeting de secours comme si c'était une
+          // réponse IA : le message utilisateur reste, l'assistant non.
+          return c.json({ error: "Impossible d'obtenir une réponse mAI pour le moment." }, 502);
+        }
       }
 
       // Persistance de la réponse mAI (avec les outils utilisés — chips du chat)
@@ -390,7 +457,7 @@ export function registerVibeMAIChatRoutes(app: Hono, registerMulti: RegisterMult
             args: toolArgs,
             status: toolResult?.success ? "executed" : "error",
             result: toolResult,
-            error: toolResult && !toolResult.success ? (toolResult.error || "Erreur d'exécution") : null,
+            error: toolResult && !toolResult.success ? String(toolResult.error || "Erreur d'exécution").slice(0, 500) : null,
             model: effectiveModel,
           })]
         : [];

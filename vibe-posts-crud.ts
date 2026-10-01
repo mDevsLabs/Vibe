@@ -55,15 +55,26 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ error: "Vous publiez trop vite. Patientez un instant." }, 429);
       }
 
-      const body = await c.req.json();
+      const body = await c.req.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return c.json({ error: "Corps de requête invalide." }, 400);
+      }
       const { content, format = "micro_text", media_url, media_assets = [], quoted_post_id } = body;
+      if (
+        quoted_post_id !== undefined &&
+        quoted_post_id !== null &&
+        quoted_post_id !== "" &&
+        !isUuid(String(quoted_post_id))
+      ) {
+        return c.json({ error: "Identifiant de citation invalide." }, 400);
+      }
       // Audience : Public (défaut), Abonnés uniquement, Cercle Privé, privé (soi seul)
       const visibility = ["public", "followers", "circle", "private"].includes(body.visibility) ? body.visibility : "public";
       const sql = getDb();
       await ensurePostColumns();
       await ensureCircleTable().catch(() => {});
 
-      if (!content || !content.trim()) {
+      if (typeof content !== "string" || !content.trim()) {
         return c.json({ error: "Le contenu est obligatoire." }, 400);
       }
 
@@ -334,7 +345,7 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ success: true, post: createdPost }, 201);
       }
 
-      await sql`UPDATE profiles SET posts_count = posts_count + 1 WHERE user_id = ${userId}`;
+      await sql`UPDATE profiles SET posts_count = COALESCE(posts_count, 0) + 1 WHERE user_id = ${userId}`;
 
       // Détection et notification des mentions @username dans les publications
       // (les ancres de Livres @livre sont retirées du scan pour éviter de faux utilisateurs)
@@ -782,7 +793,10 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       if (!isUuid(postId)) return c.json({ error: "Identifiant invalide." }, 400);
       const body = await c.req.json().catch(() => ({}));
       const sql = getDb();
-      const existing = await sql`SELECT id, author_id FROM posts WHERE id = ${postId}::uuid LIMIT 1`;
+      const existing = await sql`
+        SELECT id, author_id, COALESCE(status, 'published') AS status
+        FROM posts WHERE id = ${postId}::uuid LIMIT 1
+      `;
       if (existing.length === 0) return c.json({ error: "Publication introuvable." }, 404);
       if (Number(existing[0].author_id) !== userId) return c.json({ error: "Réservé à l'auteur." }, 403);
       const tierRows = await sql`SELECT tier FROM users WHERE id = ${userId} LIMIT 1`;
@@ -791,7 +805,23 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       }
       const raw = body?.scheduled_at;
       if (raw === null || raw === "") {
-        await sql`UPDATE posts SET status = 'published', scheduled_at = NULL, published_at = NOW(), updated_at = NOW() WHERE id = ${postId}::uuid`;
+        // La transition conditionnelle rend l'incrément du compteur unique,
+        // même si deux requêtes de replanification arrivent simultanément.
+        const transitioned = await sql`
+          UPDATE posts
+          SET status = 'published', scheduled_at = NULL, published_at = NOW(), updated_at = NOW()
+          WHERE id = ${postId}::uuid AND author_id = ${userId} AND status = 'scheduled'
+          RETURNING id
+        `;
+        if (transitioned.length > 0) {
+          await sql`UPDATE profiles SET posts_count = COALESCE(posts_count, 0) + 1 WHERE user_id = ${userId}`;
+        } else {
+          await sql`
+            UPDATE posts
+            SET status = 'published', scheduled_at = NULL, published_at = COALESCE(published_at, NOW()), updated_at = NOW()
+            WHERE id = ${postId}::uuid AND author_id = ${userId}
+          `;
+        }
         return c.json({ success: true, status: "published" });
       }
       const ts = Date.parse(String(raw || ""));
@@ -799,7 +829,21 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ error: "Date de planification invalide ou passée." }, 400);
       }
       const scheduledAt = new Date(ts).toISOString();
-      await sql`UPDATE posts SET status = 'scheduled', scheduled_at = ${scheduledAt}::timestamptz, updated_at = NOW() WHERE id = ${postId}::uuid`;
+      const movedBack = await sql`
+        UPDATE posts
+        SET status = 'scheduled', scheduled_at = ${scheduledAt}::timestamptz, updated_at = NOW()
+        WHERE id = ${postId}::uuid AND author_id = ${userId} AND status = 'published'
+        RETURNING id
+      `;
+      if (movedBack.length > 0) {
+        await sql`UPDATE profiles SET posts_count = GREATEST(0, COALESCE(posts_count, 0) - 1) WHERE user_id = ${userId}`;
+      } else {
+        await sql`
+          UPDATE posts
+          SET status = 'scheduled', scheduled_at = ${scheduledAt}::timestamptz, updated_at = NOW()
+          WHERE id = ${postId}::uuid AND author_id = ${userId}
+        `;
+      }
       return c.json({ success: true, status: "scheduled", scheduled_at: scheduledAt });
     } catch (err: any) {
       return c.json({ error: "Erreur replanification." }, 500);
@@ -834,11 +878,21 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       const userId = Number(payload.sub || (payload as any).id);
       const body = await c.req.json().catch(() => ({}));
       const draftId = c.req.param("id") || (body as any)?.id;
+      if (draftId !== undefined && draftId !== null && draftId !== "" && !isUuid(String(draftId))) {
+        return c.json({ error: "Identifiant de brouillon invalide." }, 400);
+      }
       const html = String(body?.html || "");
       const text = String(body?.text || "");
       if (!html && !text) return c.json({ error: "Brouillon vide." }, 400);
       const visibility = ["public", "followers", "circle", "private"].includes(body?.visibility) ? body.visibility : "public";
-      const scheduledAt = body?.scheduled_at ? new Date(Date.parse(String(body.scheduled_at))).toISOString() : null;
+      let scheduledAt: string | null = null;
+      if (body?.scheduled_at !== undefined && body?.scheduled_at !== null && body?.scheduled_at !== "") {
+        const scheduledTs = Date.parse(String(body.scheduled_at));
+        if (Number.isNaN(scheduledTs)) {
+          return c.json({ error: "Date de planification invalide." }, 400);
+        }
+        scheduledAt = new Date(scheduledTs).toISOString();
+      }
       const aiGenerated = Boolean(body?.ai_generated);
       const mediaAssets = Array.isArray(body?.media_assets) ? body.media_assets.slice(0, 10) : [];
       const sql = getDb();
@@ -889,6 +943,9 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
   const handleGetPost = async (c: any) => {
     try {
       const postId = c.req.param("id");
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
       const token = extractToken(c.req.raw);
       let currentUserId: number | null = null;
       if (token) {
@@ -941,17 +998,25 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       const userId = Number(payload.sub || (payload as any).id);
 
       const postId = c.req.param("id");
+      if (!isUuid(postId)) {
+        return c.json({ error: "Identifiant de post invalide." }, 400);
+      }
       const sql = getDb();
+      await ensurePostColumns().catch(() => {});
 
       const deleted = await sql`
-        DELETE FROM posts WHERE id = ${postId}::uuid AND author_id = ${userId} RETURNING id
+        DELETE FROM posts
+        WHERE id = ${postId}::uuid AND author_id = ${userId}
+        RETURNING id, COALESCE(status, 'published') AS status
       `;
 
       if (deleted.length === 0) {
         return c.json({ error: "Publication introuvable ou non autorisée." }, 403);
       }
 
-      await sql`UPDATE profiles SET posts_count = GREATEST(0, posts_count - 1) WHERE user_id = ${userId}`;
+      if (String(deleted[0].status || "published") === "published") {
+        await sql`UPDATE profiles SET posts_count = GREATEST(0, COALESCE(posts_count, 0) - 1) WHERE user_id = ${userId}`;
+      }
       return c.json({ success: true, message: "Publication supprimée." });
     } catch {
       return c.json({ error: "Erreur suppression." }, 500);
@@ -973,8 +1038,11 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ error: "Identifiant de post invalide." }, 400);
       }
 
-      const body = await c.req.json();
-      const { content, media_assets = [] } = body;
+      const body = (await c.req.json().catch(() => ({}))) || {};
+      const content = body?.content;
+      const hasScheduleUpdate = body?.scheduled_at !== undefined;
+      const hasMediaUpdate = Array.isArray(body?.media_assets);
+      const media_assets = body?.media_assets;
 
       const sql = getDb();
       await ensurePostColumns();
@@ -1004,9 +1072,13 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
         return c.json({ error: `Publication refusée : ${safety.flagReason}` }, 403);
       }
 
-      // Re-planification éventuelle (réservée Plus/Pro/Max)
+      // Re-planification éventuelle (réservée Plus/Pro/Max). Un PATCH ordinaire
+      // ne contient pas scheduled_at : dans ce cas les deux colonnes sont
+      // volontairement laissées intactes (en particulier pour un post
+      // planifié). Une propriété explicite null/"" reste le signal pour
+      // publier immédiatement le post.
       let scheduledAt: string | null = null;
-      if (body.scheduled_at !== undefined) {
+      if (hasScheduleUpdate) {
         if (body.scheduled_at === null || body.scheduled_at === "") {
           scheduledAt = null;
         } else {
@@ -1027,23 +1099,45 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
       // Audience mise à jour si fournie (Public / Abonnés / Cercle Privé / privé)
       const visibilityUpdate = ["public", "followers", "circle", "private"].includes(body.visibility) ? body.visibility : null;
 
-      const updated = await sql`
-        UPDATE posts
-        SET content = ${String(content).trim()},
-            toxicity_score = ${safety.toxicityScore},
-            visibility = COALESCE(${visibilityUpdate}, visibility),
-            updated_at = NOW(),
-            published_at = CASE WHEN ${scheduledAt}::timestamptz IS NULL AND status = 'scheduled' THEN NOW() ELSE published_at END,
-            status = CASE
-              WHEN ${scheduledAt}::timestamptz IS NOT NULL THEN 'scheduled'
-              ELSE 'published'
-            END,
-            scheduled_at = ${scheduledAt}::timestamptz
-        WHERE id = ${postId}::uuid AND author_id = ${userId}
-        RETURNING *
-      `;
+      let updated: any[];
+      if (hasScheduleUpdate) {
+        updated = await sql`
+          UPDATE posts
+          SET content = ${String(content).trim()},
+              toxicity_score = ${safety.toxicityScore},
+              visibility = COALESCE(${visibilityUpdate}, visibility),
+              updated_at = NOW(),
+              published_at = CASE WHEN status = 'scheduled' AND ${scheduledAt}::timestamptz IS NULL THEN NOW() ELSE published_at END,
+              status = ${scheduledAt ? "scheduled" : "published"},
+              scheduled_at = ${scheduledAt}::timestamptz
+          WHERE id = ${postId}::uuid AND author_id = ${userId}
+          RETURNING *
+        `;
+      } else {
+        // Ne pas mentionner status/scheduled_at dans cette branche : une
+        // édition ordinaire ne doit jamais publier par inadvertance un post
+        // planifié.
+        updated = await sql`
+          UPDATE posts
+          SET content = ${String(content).trim()},
+              toxicity_score = ${safety.toxicityScore},
+              visibility = COALESCE(${visibilityUpdate}, visibility),
+              updated_at = NOW()
+          WHERE id = ${postId}::uuid AND author_id = ${userId}
+          RETURNING *
+        `;
+      }
       if (updated.length === 0) {
         return c.json({ error: "Publication introuvable." }, 404);
+      }
+
+      if (hasScheduleUpdate) {
+        const previousStatus = String(existing[0].status || "published").toLowerCase();
+        if (previousStatus === "scheduled" && !scheduledAt) {
+          await sql`UPDATE profiles SET posts_count = COALESCE(posts_count, 0) + 1 WHERE user_id = ${userId}`;
+        } else if (previousStatus === "published" && scheduledAt) {
+          await sql`UPDATE profiles SET posts_count = GREATEST(0, COALESCE(posts_count, 0) - 1) WHERE user_id = ${userId}`;
+        }
       }
 
       // Références de Livres : resynchronisées avec le nouveau contenu
@@ -1100,6 +1194,27 @@ export function registerPostCrudRoutes(registerMulti: RegisterMultiFn) {
             `;
           }
           if (res && res[0]) insertedMediaList.push(res[0]);
+        }
+      }
+      if (!hasMediaUpdate) {
+        try {
+          insertedMediaList = await sql`
+            SELECT id, url, media_type, file_size_bytes, alt_text, position
+            FROM media_assets
+            WHERE post_id = ${postId}::uuid AND comment_id IS NULL
+            ORDER BY position ASC, created_at ASC
+          `;
+        } catch {
+          try {
+            insertedMediaList = await sql`
+              SELECT id, url, media_type, file_size_bytes, alt_text
+              FROM media_assets
+              WHERE post_id = ${postId}::uuid AND comment_id IS NULL
+              ORDER BY created_at ASC
+            `;
+          } catch {
+            insertedMediaList = [];
+          }
         }
       }
 

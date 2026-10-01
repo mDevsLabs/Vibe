@@ -589,7 +589,7 @@ export function registerDMDirectRoutes(app: Hono, registerMulti: RegisterMultiFn
       return c.json({ success: true, message: msg[0] }, 201);
     } catch (err: any) {
       console.error("[vibe-dms] Error in handleSendDM:", err);
-      return c.json({ error: err.message || "Erreur envoi message." }, 500);
+      return c.json({ error: "Erreur envoi message." }, 500);
     }
   };
 

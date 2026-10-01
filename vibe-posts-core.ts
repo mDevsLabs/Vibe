@@ -39,9 +39,70 @@ export function stripHtmlTags(text: string): string {
 }
 
 /**
+ * Insère une notification d'évènement de publication une seule fois.
+ * La table notifications n'a pas de contrainte d'unicité historique : le
+ * `NOT EXISTS` est donc indispensable pour que les retries de la publication
+ * paresseuse ne recréent pas la même notification.
+ */
+const insertPostNotificationOnce = async (
+  sql: any,
+  recipientId: number,
+  actorId: number,
+  type: string,
+  postId: string,
+  message: string,
+): Promise<void> => {
+  try {
+    await sql`
+      INSERT INTO notifications (id, recipient_id, actor_id, type, post_id, message)
+      SELECT md5(concat_ws(':', ${recipientId}, ${actorId}, ${type}, ${postId}, 'publication'))::uuid,
+             ${recipientId}, ${actorId}, ${type}, ${postId}::uuid, ${message}
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM notifications
+        WHERE recipient_id = ${recipientId}
+          AND actor_id = ${actorId}
+          AND type = ${type}
+          AND post_id = ${postId}::uuid
+          AND comment_id IS NULL
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+  } catch (err) {
+    // Une notification best-effort ne doit pas empêcher les autres effets de
+    // publication (le statut du post reste déjà transitioned par la requête).
+    console.warn("[vibe-posts] publication notification skipped:", (err as any)?.message);
+  }
+};
+
+/** Blocage bidirectionnel, avec le même comportement best-effort que les
+ *  handlers d'engagement lorsque la table n'est pas encore disponible. */
+const isBlockedPair = async (sql: any, userA: number, userB: number): Promise<boolean> => {
+  if (!userA || !userB || userA === userB) return false;
+  try {
+    const rows = await sql`
+      SELECT 1
+      FROM blocked_users
+      WHERE (user_id = ${userA} AND blocked_user_id = ${userB})
+         OR (user_id = ${userB} AND blocked_user_id = ${userA})
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Publication paresseuse des vibes planifiées dont la date est atteinte :
  * appelée au chargement des flux / profils (aucun cron nécessaire côté serveur).
  * Throttle 30 s pour éviter un scan de table à chaque requête.
+ *
+ * La transition `scheduled -> published` et l'incrément de `posts_count` sont
+ * faits dans la même requête. Ainsi, deux workers ne peuvent jamais
+ * transformer/compter deux fois le même post. Les notifications sont ensuite
+ * dédupliquées par (destinataire, acteur, type, post), ce qui rend les retries
+ * idempotents même après un redémarrage entre la transition et les insertions.
  */
 let lastPublishCheck = 0;
 export async function publishDuePosts(): Promise<void> {
@@ -51,19 +112,171 @@ export async function publishDuePosts(): Promise<void> {
   try {
     await ensurePostColumns();
     const sql = getDb();
+    // Le regroupement par auteur est important : une seule requête peut
+    // faire transitionner plusieurs posts du même compte, chaque post devant
+    // contribuer une fois au compteur.
     const due = await sql`
-      UPDATE posts
-      SET status = 'published', published_at = NOW(), updated_at = NOW()
-      WHERE status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= NOW()
-      RETURNING id, author_id
+      WITH transitioned AS (
+        UPDATE posts
+        SET status = 'published', published_at = NOW(), updated_at = NOW()
+        WHERE status = 'scheduled'
+          AND scheduled_at IS NOT NULL
+          AND scheduled_at <= NOW()
+        RETURNING id, author_id, content, quoted_post_id
+      ), counted AS (
+        UPDATE profiles AS pr
+        SET posts_count = COALESCE(pr.posts_count, 0) + grouped.posts_to_add
+        FROM (
+          SELECT author_id, COUNT(*)::int AS posts_to_add
+          FROM transitioned
+          GROUP BY author_id
+        ) AS grouped
+        WHERE pr.user_id = grouped.author_id
+        RETURNING pr.user_id
+      )
+      SELECT t.id, t.author_id, t.content, t.quoted_post_id
+      FROM transitioned AS t
+      LEFT JOIN counted AS c ON c.user_id = t.author_id
     `;
-    for (const p of due) {
-      await sql`
-        INSERT INTO notifications (recipient_id, actor_id, type, post_id, message)
-        VALUES (${p.author_id}, ${p.author_id}, 'mai_system', ${p.id}::uuid, 'Votre vibe planifiée a été publiée.')
-      `.catch(() => {});
+
+    // Reprise idempotente, limitée à une fenêtre récente, des posts dont le
+    // marqueur de fin n'a pas encore été écrit (par exemple après un
+    // redémarrage entre deux notifications). Cette lecture est best-effort :
+    // l'absence de la table notifications ne doit pas empêcher la transition
+    // principale.
+    let recovered: any[] = [];
+    try {
+      recovered = await sql`
+        SELECT p.id, p.author_id, p.content, p.quoted_post_id
+        FROM posts AS p
+        WHERE p.status = 'published'
+          AND p.scheduled_at IS NOT NULL
+          AND p.published_at >= NOW() - INTERVAL '24 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM notifications n
+            WHERE n.post_id = p.id
+              AND n.actor_id = p.author_id
+              AND n.type = 'mai_system'
+              AND n.comment_id IS NULL
+          )
+      `;
+    } catch {
+      recovered = [];
+    }
+
+    const candidates = [...(due as any[]), ...(recovered as any[])];
+    const seenPosts = new Set<string>();
+    for (const p of candidates) {
+      const candidateId = String(p?.id || "");
+      if (candidateId && seenPosts.has(candidateId)) continue;
+      if (candidateId) seenPosts.add(candidateId);
+      const postId = String(p.id);
+      const authorId = Number(p.author_id);
+      if (!isUuid(postId) || !Number.isFinite(authorId) || authorId <= 0) continue;
+
+      // Les mentions sont recherchées dans le texte rendu, pas dans les
+      // balises : une ancre de Livre ne doit pas notifier un faux @username.
+      const plainContent = stripHtmlTags(
+        String(p.content || "").replace(/<a\b[^>]*data-book-id[\s\S]*?<\/a>/gi, " "),
+      );
+      const mentionMatches = Array.from(
+        new Set(plainContent.match(/@([a-zA-Z0-9_]{1,30})/g) || []),
+      ).map((m: string) => m.slice(1).toLowerCase());
+      if (mentionMatches.length > 0) {
+        try {
+          const mentionedUsers = await sql`
+            SELECT id, username
+            FROM users
+            WHERE LOWER(username) = ANY(${mentionMatches}) AND id <> ${authorId}
+          `;
+          const snippet = plainContent.length > 45 ? `${plainContent.slice(0, 45)}…` : plainContent;
+          for (const mentioned of mentionedUsers as any[]) {
+            const recipientId = Number(mentioned.id);
+            if (!recipientId || recipientId === authorId) continue;
+            if (await isBlockedPair(sql, authorId, recipientId)) continue;
+            await insertPostNotificationOnce(
+              sql,
+              recipientId,
+              authorId,
+              "mention",
+              postId,
+              `vous a mentionné dans une publication : « ${snippet} »`,
+            );
+          }
+        } catch (err) {
+          console.warn("[vibe-posts] publication mentions skipped:", (err as any)?.message);
+        }
+      }
+
+      // Notification de citation à l'auteur du post original.
+      if (p.quoted_post_id && isUuid(String(p.quoted_post_id))) {
+        try {
+          const quotedRows = await sql`
+            SELECT author_id
+            FROM posts
+            WHERE id = ${String(p.quoted_post_id)}::uuid
+            LIMIT 1
+          `;
+          const recipientId = Number(quotedRows[0]?.author_id);
+          if (recipientId && recipientId !== authorId && !(await isBlockedPair(sql, authorId, recipientId))) {
+            const quoteSnippet = plainContent.length > 45 ? `${plainContent.slice(0, 45)}…` : plainContent;
+            await insertPostNotificationOnce(
+              sql,
+              recipientId,
+              authorId,
+              "quote",
+              postId,
+              `a cité votre publication : « ${quoteSnippet} »`,
+            );
+          }
+        } catch (err) {
+          console.warn("[vibe-posts] publication quote skipped:", (err as any)?.message);
+        }
+      }
+
+      // Abonnés aux publications du compte.
+      try {
+        const subscribers = await sql`
+          SELECT subscriber_id
+          FROM post_subscriptions
+          WHERE author_id = ${authorId} AND subscriber_id <> ${authorId}
+        `;
+        const subSnippet = plainContent.length > 45 ? `${plainContent.slice(0, 45)}…` : plainContent;
+        for (const subscriber of subscribers as any[]) {
+          const recipientId = Number(subscriber.subscriber_id);
+          if (!recipientId || recipientId === authorId) continue;
+          if (await isBlockedPair(sql, authorId, recipientId)) continue;
+          await insertPostNotificationOnce(
+            sql,
+            recipientId,
+            authorId,
+            "post",
+            postId,
+            `a publié une nouvelle Vibe : « ${subSnippet} »`,
+          );
+        }
+      } catch (err) {
+        // La table peut être absente sur une ancienne installation ; la
+        // publication du post reste néanmoins valide.
+        console.warn("[vibe-posts] publication subscribers skipped:", (err as any)?.message);
+      }
+
+      // Marqueur de fin idempotent : les notifications ci-dessus ont toutes
+      // été tentées avant cette confirmation à l'auteur. Une reprise future
+      // ne rejouera donc que les posts dont ce marqueur manque.
+      await insertPostNotificationOnce(
+        sql,
+        authorId,
+        authorId,
+        "mai_system",
+        postId,
+        "Votre vibe planifiée a été publiée.",
+      );
     }
   } catch (err) {
+    // Une erreur DB ne doit pas condamner la publication pendant les 30 s
+    // suivantes du throttle.
+    lastPublishCheck = 0;
     console.warn("[vibe-posts] publishDuePosts skipped:", (err as any)?.message);
   }
 }
@@ -88,6 +301,8 @@ export async function attachQuotedPosts(posts: any[]) {
       JOIN users u ON u.id = q.author_id
       LEFT JOIN profiles pr ON pr.user_id = u.id
       WHERE q.id = ANY(${quoteIds}::uuid[])
+        AND COALESCE(q.visibility, 'public') = 'public'
+        AND COALESCE(q.status, 'published') = 'published'
     `;
     const mediaRows = await sql`
       SELECT post_id, url, media_type, alt_text FROM media_assets WHERE post_id = ANY(${quoteIds}::uuid[])

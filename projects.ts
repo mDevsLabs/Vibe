@@ -500,7 +500,7 @@ export function registerProjectRoutes(app: Hono) {
   app.get("/v1/projects", async (c) => {
     try {
       const sql = getDb();
-      const userId = c.get("userId");
+      const userId = (c as any).get("userId") as string | null;
       const dbProjects =
         await sql`SELECT * FROM mprojects_projects WHERE user_id = ${userId} ORDER BY created_at DESC LIMIT 50`;
       return c.json({
@@ -515,7 +515,7 @@ export function registerProjectRoutes(app: Hono) {
   // POST /v1/projects
   app.post("/v1/projects", async (c) => {
     const sql = getDb();
-    const userId = c.get("userId");
+    const userId = (c as any).get("userId") as string | null;
     const body = await c.req.json();
     if (!body.name) {
       return c.json({ error: "Le nom du projet est obligatoire." }, 400);
@@ -540,7 +540,7 @@ export function registerProjectRoutes(app: Hono) {
     }
 
     const sql = getDb();
-    const userId = c.get("userId");
+    const userId = (c as any).get("userId") as string | null;
     const projects = await sql`
       SELECT * FROM mprojects_projects 
       WHERE (user_id = ${userId} OR is_public = TRUE) AND LOWER(project_id) = ${projectId} 
@@ -557,7 +557,7 @@ export function registerProjectRoutes(app: Hono) {
   // PUT /v1/projects/:id
   app.put("/v1/projects/:id", async (c) => {
     const sql = getDb();
-    const userId = c.get("userId");
+    const userId = (c as any).get("userId") as string | null;
     const projectId = c.req.param("id");
     const body = await c.req.json();
 
@@ -590,7 +590,7 @@ export function registerProjectRoutes(app: Hono) {
   // DELETE /v1/projects/:id
   app.delete("/v1/projects/:id", async (c) => {
     const sql = getDb();
-    const userId = c.get("userId");
+    const userId = (c as any).get("userId") as string | null;
     const projectId = c.req.param("id");
 
     const result = await sql`
@@ -609,7 +609,7 @@ export function registerProjectRoutes(app: Hono) {
   // GET /v1/projects/:id/stats
   app.get("/v1/projects/:id/stats", async (c) => {
     const sql = getDb();
-    const userId = c.get("userId");
+    const userId = (c as any).get("userId") as string | null;
     const projectId = c.req.param("id");
 
     const projects =

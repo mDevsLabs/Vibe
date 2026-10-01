@@ -104,7 +104,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       });
     } catch (err: any) {
       console.error("[Me Handler Error]:", err);
-      return c.json({ error: err.message || "Session expirée ou invalide." }, 401);
+      return c.json({ error: "Session expirée ou invalide." }, 401);
     }
   };
 
@@ -534,7 +534,7 @@ export function registerVibeUsersRoutes(app: Hono, registerMulti: RegisterMultiF
       }
       const targetUserId = userRows[0].id;
 
-      const posts = await sql`
+      const posts: any[] = await sql`
         SELECT p.*, pr.display_name, pr.avatar_url, u.username, u.tier,
                (COALESCE(u.is_verified, FALSE) OR LOWER(COALESCE(u.tier, '')) IN ('plus', 'pro', 'max')) as is_verified,
                ${currentUserId ? sql`(SELECT COUNT(*) FROM post_interactions WHERE post_id = p.id AND user_id = ${currentUserId} AND interaction_type = 'like') > 0` : sql`FALSE`} as has_liked,

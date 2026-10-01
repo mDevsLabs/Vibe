@@ -6,7 +6,7 @@
  */
 
 import type { Hono } from "npm:hono@4";
-import { extractToken, getDb, verifyToken, getWeekData } from "./config.ts";
+import { extractToken, getDb, verifyToken, rateLimit } from "./config.ts";
 import { invalidateUserToolsCache } from "./vibe-tools.ts";
 import type { RegisterMultiFn } from "./vibe-common.ts";
 
@@ -28,6 +28,8 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS chat_background_theme TEXT DEFAULT 'default'`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS message_bubble_shape TEXT DEFAULT 'pill'`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS default_vibe_audience VARCHAR(32) DEFAULT 'public'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_dms VARCHAR(20) DEFAULT 'everyone'`;
+      await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS allow_dms_from VARCHAR(20) DEFAULT 'everyone'`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS scheduled_theme TEXT`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE`;
       await sql`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS mai_context_posts BOOLEAN DEFAULT FALSE`;
@@ -61,27 +63,38 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       if (!userId) return c.json({ success: true, logged: false });
 
       const body = await c.req.json().catch(() => ({}));
-      const { endpoint = "api_call", tokens = 10, action_type = "request" } = body;
+      const rawTokens = Number(body?.tokens ?? 10);
+      const tokens = Number.isFinite(rawTokens) ? Math.floor(rawTokens) : NaN;
 
+      // Cette route est un compteur de télémétrie historique, mais elle ne
+      // doit jamais accepter une valeur négative, fractionnaire ou énorme
+      // capable de saturer le quota du compte. Les appels mAI doivent
+      // enregistrer leur consommation réelle côté serveur.
+      if (!Number.isInteger(tokens) || tokens < 0 || tokens > 1_000) {
+        return c.json({ error: "Nombre de tokens invalide." }, 400);
+      }
+      if (!rateLimit(`usage-log:${userId}`, 120, 60_000)) {
+        return c.json({ error: "Trop de rapports d'usage." }, 429);
+      }
+
+      const endpoint = String(body?.endpoint ?? "api_call").slice(0, 200);
+      const actionType = String(body?.action_type ?? "request").slice(0, 80);
       const sql = getDb();
-      const { weekStartStr } = getWeekData();
 
-      await Promise.all([
-        sql`
-          INSERT INTO weekly_usage (user_id, week_start, tokens_used)
-          VALUES (${userId}, ${weekStartStr}::date, ${tokens})
-          ON CONFLICT (user_id, week_start)
-          DO UPDATE SET tokens_used = weekly_usage.tokens_used + ${tokens}, updated_at = NOW()
-        `,
-        sql`
-          INSERT INTO usage_logs (user_id, action_type, endpoint, metadata, tokens_used, timestamp)
-          VALUES (${userId}, ${action_type}, ${endpoint}, ${JSON.stringify({ endpoint, timestamp: new Date().toISOString() })}::jsonb, ${tokens}, NOW())
-        `.catch(() => {}),
-      ]);
+      // Cette route est alimentée par le client et ne doit donc jamais
+      // créditer/débiter le quota métier : les réservations de tokens se font
+      // dans les handlers mAI, les quotas d'images dans leur provider, et les
+      // quotas de clés API dans le middleware. Ici on ne conserve qu'une
+      // trace de télémétrie bornée.
+      await sql`
+        INSERT INTO usage_logs (user_id, action_type, endpoint, metadata, tokens_used, timestamp)
+        VALUES (${userId}, ${actionType}, ${endpoint}, ${JSON.stringify({ endpoint, timestamp: new Date().toISOString() })}::jsonb, ${tokens}, NOW())
+      `.catch(() => {});
 
       return c.json({ success: true, logged: true });
     } catch (err: any) {
-      return c.json({ success: false, error: err.message });
+      console.warn("[vibe-settings] usage log error:", err?.message || err);
+      return c.json({ success: false, error: "Impossible d'enregistrer l'usage." }, 500);
     }
   };
 
@@ -124,7 +137,11 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
       const payload = await verifyToken(token);
       const userId = Number(payload.sub || (payload as any).id);
 
-      const body = await c.req.json();
+      const body = await c.req.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return c.json({ error: "Corps JSON invalide." }, 400);
+      }
+      const allowDms = body.allow_dms ?? body.allow_dms_from ?? "everyone";
       const sql = getDb();
       await ensurePersonalizationColumns();
 
@@ -151,7 +168,7 @@ export function registerVibeSettingsRoutes(app: Hono, registerMulti: RegisterMul
           ${body.content_filter_level || 'medium'},
           ${body.blur_sensitive_content ?? true},
           ${body.age_restriction_enabled ?? false},
-          ${body.allow_dms || 'everyone'},
+          ${allowDms || 'everyone'},
           ${body.dms_enabled ?? true},
           ${body.feed_default_mode || 'for_you'},
           ${body.hide_reposts ?? false},
